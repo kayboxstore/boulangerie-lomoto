@@ -12,3 +12,4 @@ installer/output/
 
 boulangerie.db
 .github-publish/
+tmp/
