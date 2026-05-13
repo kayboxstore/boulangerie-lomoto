@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from queue import Empty, Queue
 import tkinter as tk
 import webbrowser
@@ -10,6 +11,7 @@ from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable
 
 from .database import AuthenticatedUser, DatabaseHelper
+from .reports import ReportGenerationError, create_daily_pdf_report
 from .updater import SessionNotice, UpdateCheckResult, UpdateChecker, UpdateInfo
 from .version import APP_NAME, APP_VERSION
 
@@ -148,6 +150,23 @@ def center_window(window: tk.Misc) -> None:
     window.geometry(f"{width}x{height}+{x}+{y}")
     if hasattr(window, "minsize"):
         window.minsize(width, height)
+
+
+def open_folder(target_path: str | Path) -> None:
+    path = Path(target_path)
+    path.mkdir(parents=True, exist_ok=True)
+    if hasattr(os, "startfile"):
+        os.startfile(str(path))
+        return
+    webbrowser.open(path.as_uri())
+
+
+def open_file(target_path: str | Path) -> None:
+    path = Path(target_path)
+    if hasattr(os, "startfile"):
+        os.startfile(str(path))
+        return
+    webbrowser.open(path.as_uri())
 
 
 class DateField(ttk.Frame):
@@ -536,6 +555,26 @@ class DashboardWindow(tk.Toplevel):
         ).pack(anchor="center")
         self.refresh_security_notice()
 
+        reports_frame = ttk.LabelFrame(container, text="Rapports PDF", style="Card.TLabelframe")
+        reports_frame.pack(fill="x", pady=(0, 18))
+        ttk.Label(
+            reports_frame,
+            text=(
+                "Generez un rapport journalier pret a imprimer pour les donnees du stock, "
+                "des commandes, de la caisse et des commissions."
+            ),
+            wraplength=640,
+            justify="center",
+        ).pack(fill="x", pady=(0, 12))
+        report_buttons = ttk.Frame(reports_frame)
+        report_buttons.pack(anchor="center")
+        ttk.Button(report_buttons, text="Generer un rapport PDF", command=self.open_pdf_report).grid(
+            row=0, column=0, padx=6, pady=4
+        )
+        ttk.Button(report_buttons, text="Ouvrir le dossier", command=self.open_reports_folder).grid(
+            row=0, column=1, padx=6, pady=4
+        )
+
         maintenance_frame = ttk.LabelFrame(container, text="Sauvegarde et restauration", style="Card.TLabelframe")
         maintenance_frame.pack(fill="x", pady=(0, 18))
         ttk.Label(
@@ -705,11 +744,14 @@ class DashboardWindow(tk.Toplevel):
         self.root.destroy()
 
     def open_backups_folder(self) -> None:
-        DatabaseHelper.backups_dir.mkdir(parents=True, exist_ok=True)
-        if hasattr(os, "startfile"):
-            os.startfile(str(DatabaseHelper.backups_dir))
-            return
-        webbrowser.open(DatabaseHelper.backups_dir.as_uri())
+        open_folder(DatabaseHelper.backups_dir)
+
+    def open_reports_folder(self) -> None:
+        open_folder(DatabaseHelper.reports_dir)
+
+    def open_pdf_report(self) -> None:
+        window = PdfReportWindow(self)
+        self.wait_window(window)
 
     def show_update_dialog(self, update_info: UpdateInfo) -> None:
         message = (
@@ -812,6 +854,105 @@ class BaseModuleWindow(tk.Toplevel):
 
     def close_window(self) -> None:
         self.destroy()
+
+
+class PdfReportWindow(BaseModuleWindow):
+    def __init__(self, parent: DashboardWindow) -> None:
+        super().__init__(parent, "Rapport PDF journalier", "620x360")
+        self.open_after_generation_var = tk.BooleanVar(value=True)
+        self.message_var = tk.StringVar(value="")
+        self.build_ui()
+
+    def build_ui(self) -> None:
+        container = self.body
+
+        ttk.Label(container, text="Rapport PDF journalier", style="Header.TLabel").pack(pady=(0, 14))
+
+        intro = ttk.LabelFrame(container, text="Impression", style="Card.TLabelframe")
+        intro.pack(fill="x", pady=(0, 14))
+        ttk.Label(
+            intro,
+            text=(
+                "Choisissez une date puis generez un document PDF pret a imprimer. "
+                "Le rapport rassemble le stock, les commandes, la caisse et les commissions."
+            ),
+            wraplength=500,
+            justify="center",
+        ).pack(fill="x")
+
+        form = ttk.LabelFrame(container, text="Parametres du rapport", style="Card.TLabelframe")
+        form.pack(fill="x")
+
+        ttk.Label(form, text="Date du rapport").grid(row=0, column=0, sticky="w", pady=6)
+        self.date_field = DateField(form)
+        self.date_field.grid(row=0, column=1, sticky="ew", pady=6)
+
+        ttk.Checkbutton(
+            form,
+            text="Proposer l'ouverture du PDF apres generation",
+            variable=self.open_after_generation_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        actions = ttk.Frame(form)
+        actions.grid(row=2, column=0, columnspan=2, pady=(14, 0))
+        ttk.Button(actions, text="Generer le PDF", style="Primary.TButton", command=self.generate_report).grid(
+            row=0, column=0, padx=6
+        )
+        ttk.Button(actions, text="Ouvrir le dossier", command=self.open_reports_folder).grid(row=0, column=1, padx=6)
+        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=2, padx=6)
+
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            container,
+            textvariable=self.message_var,
+            foreground="#8b0000",
+            wraplength=520,
+            justify="center",
+        ).pack(fill="x", pady=(12, 0))
+
+    def generate_report(self) -> None:
+        try:
+            target_date = self.date_field.get_date()
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+
+        DatabaseHelper.reports_dir.mkdir(parents=True, exist_ok=True)
+        suggested_path = DatabaseHelper.reports_dir / f"rapport-journalier-{target_date.strftime('%Y%m%d')}.pdf"
+        destination = filedialog.asksaveasfilename(
+            title="Enregistrer le rapport PDF",
+            initialdir=str(DatabaseHelper.reports_dir),
+            initialfile=suggested_path.name,
+            defaultextension=".pdf",
+            filetypes=[("Fichiers PDF", "*.pdf")],
+        )
+        if not destination:
+            return
+
+        try:
+            report_path = create_daily_pdf_report(target_date, destination)
+        except ReportGenerationError as exc:
+            self.message_var.set(str(exc))
+            return
+        except Exception as exc:
+            self.message_var.set(f"Generation impossible : {exc}")
+            return
+
+        self.message_var.set(f"Rapport cree : {report_path}")
+        message = f"Le rapport PDF a ete cree avec succes.\n\nFichier : {report_path}"
+        if self.open_after_generation_var.get():
+            message += "\n\nVoulez-vous l'ouvrir maintenant ?"
+            if messagebox.askyesno("Rapport PDF", message):
+                open_file(report_path)
+            return
+
+        message += "\n\nVoulez-vous ouvrir le dossier qui contient ce rapport ?"
+        if messagebox.askyesno("Rapport PDF", message):
+            self.open_reports_folder()
+
+    def open_reports_folder(self) -> None:
+        open_folder(DatabaseHelper.reports_dir)
 
 
 class ChangePasswordWindow(BaseModuleWindow):

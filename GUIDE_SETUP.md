@@ -10,9 +10,10 @@ Placez-vous d'abord dans le dossier du projet :
 cd "A:\Mon application python"
 ```
 
-Installez les outils une seule fois :
+Installez d'abord les dependances du projet puis les outils de build :
 
 ```powershell
+.\.venv\Scripts\pip.exe install -r requirements.txt
 .\.venv\Scripts\pip.exe install pyinstaller
 ```
 

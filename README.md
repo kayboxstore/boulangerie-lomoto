@@ -9,6 +9,7 @@ Application desktop Python qui reprend la version VB.NET avec :
 - commandes
 - caisse
 - commissions
+- rapports PDF journaliers
 - verification hebdomadaire des mises a jour
 
 ## Lancement

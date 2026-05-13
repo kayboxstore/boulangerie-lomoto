@@ -35,6 +35,7 @@ class DatabaseHelper:
     ) / "BoulangerieLomoto"
     db_path = app_data_dir / "boulangerie.db"
     backups_dir = app_data_dir / "sauvegardes"
+    reports_dir = app_data_dir / "rapports"
     legacy_db_path = Path(__file__).resolve().parent.parent / "boulangerie.db"
 
     @classmethod
@@ -56,6 +57,7 @@ class DatabaseHelper:
     def initialize_database(cls) -> None:
         cls.db_path.parent.mkdir(parents=True, exist_ok=True)
         cls.backups_dir.mkdir(parents=True, exist_ok=True)
+        cls.reports_dir.mkdir(parents=True, exist_ok=True)
         if (
             not cls.db_path.exists()
             and cls.legacy_db_path.exists()
@@ -77,6 +79,11 @@ class DatabaseHelper:
     def build_backup_path(cls, prefix: str = "boulangerie-lomoto-backup") -> Path:
         cls.backups_dir.mkdir(parents=True, exist_ok=True)
         return cls.backups_dir / f"{prefix}-{cls._timestamp_for_filename()}.db"
+
+    @classmethod
+    def build_report_path(cls, prefix: str = "rapport-journalier") -> Path:
+        cls.reports_dir.mkdir(parents=True, exist_ok=True)
+        return cls.reports_dir / f"{prefix}-{cls._timestamp_for_filename()}.pdf"
 
     @classmethod
     def _validate_sqlite_database(cls, database_path: Path) -> None:
@@ -777,6 +784,18 @@ class DatabaseHelper:
             FROM StockSorties
             ORDER BY DateSortie DESC, Id DESC
             """
+        )
+
+    @classmethod
+    def list_stock_exits_by_date(cls, target_date: date) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT Id, DateSortie, SacsUtilises, PaquetsUtilises, KgSelUtilises, LitresHuileUtilises
+            FROM StockSorties
+            WHERE DateSortie = ?
+            ORDER BY Id DESC
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
         )
 
     @classmethod
