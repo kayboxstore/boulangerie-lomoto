@@ -17,6 +17,7 @@ from typing import Any, Iterator
 DB_DATE_FORMAT = "%Y-%m-%d"
 PASSWORD_PREFIX = "PBKDF2$"
 PASSWORD_ITERATIONS = 100_000
+DEFAULT_ADMIN_PASSWORD = "010203"
 
 
 @dataclass
@@ -397,7 +398,7 @@ class DatabaseHelper:
             INSERT INTO Utilisateurs (NomComplet, Identifiant, MotDePasse, Role)
             VALUES (?, ?, ?, ?)
             """,
-            ("Administrateur", "admin", cls.hash_password("010203"), "Admin"),
+            ("Administrateur", "admin", cls.hash_password(DEFAULT_ADMIN_PASSWORD), "Admin"),
         )
 
     @classmethod
@@ -524,6 +525,57 @@ class DatabaseHelper:
                 )
 
             return AuthenticatedUser(identifiant=row["Identifiant"], role=row["Role"])
+
+    @classmethod
+    def is_using_default_password(cls, identifiant: str) -> bool:
+        stored_password = cls._fetch_value(
+            "SELECT MotDePasse FROM Utilisateurs WHERE Identifiant = ?",
+            (identifiant,),
+        )
+        if stored_password is None:
+            return False
+        return cls.verify_password(DEFAULT_ADMIN_PASSWORD, str(stored_password))
+
+    @classmethod
+    def change_user_password(
+        cls,
+        identifiant: str,
+        current_password: str,
+        new_password: str,
+    ) -> None:
+        normalized_identifiant = identifiant.strip()
+        if not normalized_identifiant:
+            raise ValueError("Utilisateur introuvable.")
+
+        if not current_password.strip():
+            raise ValueError("Veuillez saisir le mot de passe actuel.")
+        if not new_password.strip():
+            raise ValueError("Veuillez saisir le nouveau mot de passe.")
+        if len(new_password.strip()) < 6:
+            raise ValueError("Le nouveau mot de passe doit contenir au moins 6 caracteres.")
+
+        with cls.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MotDePasse
+                FROM Utilisateurs
+                WHERE Identifiant = ?
+                """,
+                (normalized_identifiant,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Utilisateur introuvable.")
+
+            stored_password = str(row["MotDePasse"])
+            if not cls.verify_password(current_password, stored_password):
+                raise ValueError("Le mot de passe actuel est incorrect.")
+            if cls.verify_password(new_password, stored_password):
+                raise ValueError("Le nouveau mot de passe doit etre different de l'ancien.")
+
+            connection.execute(
+                "UPDATE Utilisateurs SET MotDePasse = ? WHERE Identifiant = ?",
+                (cls.hash_password(new_password), normalized_identifiant),
+            )
 
     @classmethod
     def search_users_by_identifiant(cls, identifiant: str) -> list[dict[str, Any]]:

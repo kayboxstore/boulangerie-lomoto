@@ -414,6 +414,23 @@ class DashboardWindow(tk.Toplevel):
         summary_frame.pack(fill="x", pady=18)
         ttk.Label(summary_frame, textvariable=self.summary_var, justify="center").pack(fill="x")
 
+        self.security_message_var = tk.StringVar(value="")
+        security_frame = ttk.LabelFrame(container, text="Securite du compte", style="Card.TLabelframe")
+        security_frame.pack(fill="x", pady=(0, 18))
+        self.security_label = ttk.Label(
+            security_frame,
+            textvariable=self.security_message_var,
+            wraplength=640,
+            justify="center",
+        )
+        self.security_label.pack(fill="x", pady=(0, 12))
+        ttk.Button(
+            security_frame,
+            text="Changer mon mot de passe",
+            command=self.open_change_password,
+        ).pack(anchor="center")
+        self.refresh_security_notice()
+
         maintenance_frame = ttk.LabelFrame(container, text="Sauvegarde et restauration", style="Card.TLabelframe")
         maintenance_frame.pack(fill="x", pady=(0, 18))
         ttk.Label(
@@ -490,6 +507,20 @@ class DashboardWindow(tk.Toplevel):
         except Exception:
             summary = "Statistiques indisponibles pour le moment."
         self.summary_var.set(summary)
+
+    def refresh_security_notice(self) -> None:
+        if DatabaseHelper.is_using_default_password(self.user.identifiant):
+            self.security_message_var.set(
+                "Attention : ce compte utilise encore le mot de passe par defaut. "
+                "Changez-le maintenant pour mieux proteger l'application."
+            )
+            self.security_label.configure(foreground="#8b0000")
+            return
+
+        self.security_message_var.set(
+            "Vous pouvez changer votre mot de passe a tout moment depuis ce tableau de bord."
+        )
+        self.security_label.configure(foreground="#2f5d3a")
 
     def start_weekly_update_check(self) -> None:
         if self.update_check_running:
@@ -648,6 +679,11 @@ class DashboardWindow(tk.Toplevel):
         self.destroy()
         self.on_logout_callback()
 
+    def open_change_password(self) -> None:
+        window = ChangePasswordWindow(self, self.user.identifiant, self.refresh_security_notice)
+        self.wait_window(window)
+        self.refresh_security_notice()
+
     def on_close_app(self) -> None:
         if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment quitter l'application ?"):
             return
@@ -667,6 +703,119 @@ class BaseModuleWindow(tk.Toplevel):
         self.after(0, lambda: center_window(self))
 
     def close_window(self) -> None:
+        self.destroy()
+
+
+class ChangePasswordWindow(BaseModuleWindow):
+    def __init__(
+        self,
+        parent: DashboardWindow,
+        identifiant: str,
+        on_password_changed: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(parent, "Securite du compte", "560x420")
+        self.identifiant = identifiant
+        self.on_password_changed = on_password_changed
+        self.current_password_var = tk.StringVar()
+        self.new_password_var = tk.StringVar()
+        self.confirm_password_var = tk.StringVar()
+        self.message_var = tk.StringVar(value="")
+        self.build_ui()
+
+    def build_ui(self) -> None:
+        container = ttk.Frame(self, padding=16)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(container, text="Changer mon mot de passe", style="Header.TLabel").pack(pady=(0, 14))
+
+        description = ttk.LabelFrame(container, text="Protection du compte", style="Card.TLabelframe")
+        description.pack(fill="x", pady=(0, 14))
+
+        if DatabaseHelper.is_using_default_password(self.identifiant):
+            description_text = (
+                "Ce compte utilise encore le mot de passe par defaut. "
+                "Choisissez-en un nouveau des maintenant."
+            )
+            description_color = "#8b0000"
+        else:
+            description_text = (
+                "Saisissez votre mot de passe actuel, puis choisissez un nouveau mot de passe "
+                "d'au moins 6 caracteres."
+            )
+            description_color = "#2f5d3a"
+
+        ttk.Label(
+            description,
+            text=description_text,
+            foreground=description_color,
+            wraplength=420,
+            justify="center",
+        ).pack(fill="x")
+
+        form = ttk.LabelFrame(container, text="Mot de passe", style="Card.TLabelframe")
+        form.pack(fill="x")
+
+        ttk.Label(form, text="Mot de passe actuel").grid(row=0, column=0, sticky="w", pady=6)
+        self.current_entry = ttk.Entry(form, textvariable=self.current_password_var, show="*", width=34)
+        self.current_entry.grid(row=0, column=1, sticky="ew", pady=6)
+
+        ttk.Label(form, text="Nouveau mot de passe").grid(row=1, column=0, sticky="w", pady=6)
+        self.new_entry = ttk.Entry(form, textvariable=self.new_password_var, show="*", width=34)
+        self.new_entry.grid(row=1, column=1, sticky="ew", pady=6)
+
+        ttk.Label(form, text="Confirmation").grid(row=2, column=0, sticky="w", pady=6)
+        self.confirm_entry = ttk.Entry(form, textvariable=self.confirm_password_var, show="*", width=34)
+        self.confirm_entry.grid(row=2, column=1, sticky="ew", pady=6)
+
+        buttons = ttk.Frame(form)
+        buttons.grid(row=3, column=0, columnspan=2, pady=(14, 0))
+        ttk.Button(buttons, text="Enregistrer", style="Primary.TButton", command=self.save_password).grid(
+            row=0, column=0, padx=6
+        )
+        ttk.Button(buttons, text="Fermer", command=self.close_window).grid(row=0, column=1, padx=6)
+
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            container,
+            textvariable=self.message_var,
+            foreground="#8b0000",
+            wraplength=440,
+            justify="center",
+        ).pack(fill="x", pady=(12, 0))
+
+        self.current_entry.focus()
+        self.current_entry.bind("<Return>", lambda _event: self.new_entry.focus())
+        self.new_entry.bind("<Return>", lambda _event: self.confirm_entry.focus())
+        self.confirm_entry.bind("<Return>", lambda _event: self.save_password())
+
+    def save_password(self) -> None:
+        current_password = self.current_password_var.get()
+        new_password = self.new_password_var.get()
+        confirm_password = self.confirm_password_var.get()
+
+        if not confirm_password.strip():
+            self.message_var.set("Veuillez confirmer le nouveau mot de passe.")
+            self.confirm_entry.focus()
+            return
+        if new_password != confirm_password:
+            self.message_var.set("La confirmation ne correspond pas au nouveau mot de passe.")
+            self.confirm_password_var.set("")
+            self.confirm_entry.focus()
+            return
+
+        try:
+            DatabaseHelper.change_user_password(self.identifiant, current_password, new_password)
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            self.current_password_var.set("")
+            self.current_entry.focus()
+            return
+
+        self.message_var.set("")
+        messagebox.showinfo("Securite", "Le mot de passe a ete modifie avec succes.")
+        if self.on_password_changed is not None:
+            self.on_password_changed()
         self.destroy()
 
 
