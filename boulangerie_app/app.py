@@ -233,18 +233,22 @@ class LoginWindow(ttk.Frame):
             row=1, column=0, columnspan=2, pady=(0, 12)
         )
 
-        ttk.Label(card, text="Identifiant").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Label(card, text="Edition stable 1.0.3", foreground="#1f6f43").grid(
+            row=2, column=0, columnspan=2, pady=(0, 10)
+        )
+
+        ttk.Label(card, text="Identifiant").grid(row=3, column=0, sticky="w", pady=6)
         self.user_var = tk.StringVar()
         user_entry = ttk.Entry(card, textvariable=self.user_var, width=30)
-        user_entry.grid(row=2, column=1, sticky="ew", pady=6)
+        user_entry.grid(row=3, column=1, sticky="ew", pady=6)
 
-        ttk.Label(card, text="Mot de passe").grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Label(card, text="Mot de passe").grid(row=4, column=0, sticky="w", pady=6)
         self.password_var = tk.StringVar()
         self.password_entry = ttk.Entry(card, textvariable=self.password_var, width=30, show="*")
-        self.password_entry.grid(row=3, column=1, sticky="ew", pady=6)
+        self.password_entry.grid(row=4, column=1, sticky="ew", pady=6)
 
         button_row = ttk.Frame(card)
-        button_row.grid(row=4, column=0, columnspan=2, pady=(14, 0))
+        button_row.grid(row=5, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(button_row, text="Connexion", style="Primary.TButton", command=self.login).grid(
             row=0, column=0, padx=6
         )
@@ -255,7 +259,7 @@ class LoginWindow(ttk.Frame):
             text="Compte par défaut disponible : identifiant admin",
             foreground="#444444",
         )
-        hint.grid(row=5, column=0, columnspan=2, pady=(14, 0))
+        hint.grid(row=6, column=0, columnspan=2, pady=(14, 0))
 
         card.columnconfigure(1, weight=1)
         user_entry.focus()
@@ -333,6 +337,12 @@ class DashboardWindow(tk.Toplevel):
             text=f"Version installee : {APP_VERSION}",
             foreground="#5a6570",
         ).pack(anchor="center", pady=(0, 12))
+
+        ttk.Label(
+            container,
+            text="Edition stable 1.0.3 : mise a jour fiabilisee",
+            foreground="#1f6f43",
+        ).pack(anchor="center", pady=(0, 14))
 
         grid = ttk.Frame(container)
         grid.pack(fill="x")

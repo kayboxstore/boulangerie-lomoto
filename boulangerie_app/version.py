@@ -1,6 +1,6 @@
 APP_NAME = "Boulangerie Lomoto"
-APP_VERSION = "1.0.2"
-APP_PUBLISHER = "Votre societe"
+APP_VERSION = "1.0.3"
+APP_PUBLISHER = "Kay Box Store"
 
 # Hypothese retenue pour GitHub :
 # - depot application : kayboxstore/boulangerie-lomoto
