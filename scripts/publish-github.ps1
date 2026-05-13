@@ -141,35 +141,35 @@ function Ensure-LocalGitIdentity {
 function Ensure-GhRepo {
     param(
         [string]$RepoName,
-        [string]$SourcePath,
         [switch]$PublicRepo
     )
 
-    $visibility = if ($PublicRepo) { "--public" } else { "--private" }
-
-    Push-Location $SourcePath
+    $repository = "$GitHubUsername/$RepoName"
+    $existing = $true
     try {
-        $remote = ""
-        try {
-            $remote = (git remote get-url origin) 2>$null
-        }
-        catch {
-            $remote = ""
-        }
-
-        if (-not $remote) {
-            gh repo create "$GitHubUsername/$RepoName" $visibility --source . --remote origin --push
-        }
+        gh repo view $repository | Out-Null
     }
-    finally {
-        Pop-Location
+    catch {
+        $existing = $false
+    }
+
+    if ($existing) {
+        return
+    }
+
+    if ($PublicRepo) {
+        gh repo create $repository --public
+    }
+    else {
+        gh repo create $repository --private
     }
 }
 
 function Commit-And-Push {
     param(
         [string]$RepoPath,
-        [string]$Message
+        [string]$Message,
+        [string]$RepoName
     )
 
     Push-Location $RepoPath
@@ -182,6 +182,14 @@ function Commit-And-Push {
         }
 
         git branch -M main
+        $originUrl = "https://github.com/$GitHubUsername/$RepoName.git"
+        $remote = (git remote get-url origin) 2>$null
+        if (-not $remote) {
+            git remote add origin $originUrl
+        }
+        else {
+            git remote set-url origin $originUrl
+        }
         git push -u origin main
     }
     finally {
@@ -230,8 +238,8 @@ function Publish-UpdatesRepo {
 
     Ensure-GitRepo -RootPath $publishRoot
     Ensure-LocalGitIdentity -RepoPath $publishRoot
-    Ensure-GhRepo -RepoName $UpdatesRepoName -SourcePath $publishRoot -PublicRepo
-    Commit-And-Push -RepoPath $publishRoot -Message "Publish update manifest $Version"
+    Ensure-GhRepo -RepoName $UpdatesRepoName -PublicRepo
+    Commit-And-Push -RepoPath $publishRoot -Message "Publish update manifest $Version" -RepoName $UpdatesRepoName
 }
 
 function Publish-AppRepo {
@@ -240,15 +248,15 @@ function Publish-AppRepo {
     $root = Get-ProjectRoot
     Ensure-GitRepo -RootPath $root
     Ensure-LocalGitIdentity -RepoPath $root
-    Ensure-GhRepo -RepoName $AppRepoName -SourcePath $root -PublicRepo
-    Commit-And-Push -RepoPath $root -Message "Publish app version $Version"
+    Ensure-GhRepo -RepoName $AppRepoName -PublicRepo
+    Commit-And-Push -RepoPath $root -Message "Publish app version $Version" -RepoName $AppRepoName
 }
 
 function Ensure-GitHubPages {
     $apiPath = "repos/$GitHubUsername/$UpdatesRepoName/pages"
     $headers = @(
         "-H", "Accept: application/vnd.github+json",
-        "-H", "X-GitHub-Api-Version: 2026-03-10"
+        "-H", "X-GitHub-Api-Version: 2022-11-28"
     )
 
     $siteExists = $true
