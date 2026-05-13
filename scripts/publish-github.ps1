@@ -15,7 +15,15 @@ function Resolve-CommandPath {
 
     $command = Get-Command $Name -ErrorAction SilentlyContinue
     if ($command) {
-        return $command.Source
+        if ($command.Source) {
+            return $command.Source
+        }
+        if ($command.Definition -and (Test-Path $command.Definition)) {
+            return $command.Definition
+        }
+        if ($command.Path) {
+            return $command.Path
+        }
     }
 
     foreach ($fallbackPath in $FallbackPaths) {
@@ -46,24 +54,32 @@ function Require-Command {
     Set-Alias -Name $Name -Value $resolvedPath -Scope Script
 }
 
-function Invoke-NativeCheck {
+function Invoke-CommandCheck {
     param(
-        [scriptblock]$Command
+        [string]$FilePath,
+        [string[]]$ArgumentList
     )
 
-    $hasNativePreference = Test-Path Variable:PSNativeCommandUseErrorActionPreference
-    if ($hasNativePreference) {
-        $previousNativePreference = $PSNativeCommandUseErrorActionPreference
-        $PSNativeCommandUseErrorActionPreference = $false
-    }
+    $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
+    $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
 
     try {
-        & $Command *> $null
-        return ($LASTEXITCODE -eq 0)
+        $process = Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList $ArgumentList `
+            -NoNewWindow `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+
+        return ($process.ExitCode -eq 0)
     }
     finally {
-        if ($hasNativePreference) {
-            $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path $path) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }
@@ -129,7 +145,8 @@ function Get-AppVersion {
 }
 
 function Ensure-GhAuth {
-    $authenticated = Invoke-NativeCheck { gh auth status }
+    $ghPath = Resolve-CommandPath -Name "gh"
+    $authenticated = Invoke-CommandCheck -FilePath $ghPath -ArgumentList @("auth", "status")
 
     if (-not $authenticated) {
         Write-Host "Connexion GitHub requise. Ouverture de l'authentification..." -ForegroundColor Yellow
@@ -204,7 +221,8 @@ function Ensure-GhRepo {
     )
 
     $repository = "$GitHubUsername/$RepoName"
-    $existing = Invoke-NativeCheck { gh repo view $repository }
+    $ghPath = Resolve-CommandPath -Name "gh"
+    $existing = Invoke-CommandCheck -FilePath $ghPath -ArgumentList @("repo", "view", $repository)
 
     if ($existing) {
         return
@@ -325,7 +343,8 @@ function Publish-Release {
     Push-Location $root
     try {
         $tag = "v$Version"
-        $releaseViewSucceeded = Invoke-NativeCheck { gh release view $tag --repo $repository }
+        $ghPath = Resolve-CommandPath -Name "gh"
+        $releaseViewSucceeded = Invoke-CommandCheck -FilePath $ghPath -ArgumentList @("release", "view", $tag, "--repo", $repository)
 
         if (-not $releaseViewSucceeded) {
             gh release create $tag $setupPath --repo $repository --title $tag --notes "Publication de la version $Version"
