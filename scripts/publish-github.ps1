@@ -183,8 +183,8 @@ function Commit-And-Push {
 
         git branch -M main
         $originUrl = "https://github.com/$GitHubUsername/$RepoName.git"
-        $remote = (git remote get-url origin) 2>$null
-        if (-not $remote) {
+        $remoteNames = @(git remote)
+        if ($remoteNames -notcontains "origin") {
             git remote add origin $originUrl
         }
         else {
