@@ -1,5 +1,5 @@
 APP_NAME = "Boulangerie Lomoto"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 APP_PUBLISHER = "Votre societe"
 
 # Hypothese retenue pour GitHub :

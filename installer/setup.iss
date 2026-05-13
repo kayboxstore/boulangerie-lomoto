@@ -1,5 +1,5 @@
 #define MyAppName "Boulangerie Lomoto"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "Votre societe"
 #define MyAppExeName "Boulangerie Lomoto.exe"
 
