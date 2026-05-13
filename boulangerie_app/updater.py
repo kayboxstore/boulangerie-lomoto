@@ -60,7 +60,7 @@ class UpdateChecker:
             "check_interval_days": UPDATE_CHECK_INTERVAL_DAYS,
         }
         try:
-            loaded = json.loads(cls.config_path.read_text(encoding="utf-8"))
+            loaded = json.loads(cls.config_path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             return defaults
 
@@ -181,7 +181,7 @@ class UpdateChecker:
         )
         try:
             with urlopen(request, timeout=10) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                payload = json.loads(response.read().decode("utf-8-sig"))
         except HTTPError as exc:
             raise RuntimeError(f"Echec HTTP pendant la verification des mises a jour : {exc.code}") from exc
         except URLError as exc:

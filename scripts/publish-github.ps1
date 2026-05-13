@@ -211,7 +211,9 @@ function Update-ManifestFile {
         notes = "Publication de la version $Version."
     }
 
-    $payload | ConvertTo-Json | Set-Content -Path $ManifestPath -Encoding UTF8
+    $json = $payload | ConvertTo-Json
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($ManifestPath, $json, $utf8NoBom)
 }
 
 function Publish-UpdatesRepo {
