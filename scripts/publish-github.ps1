@@ -46,6 +46,28 @@ function Require-Command {
     Set-Alias -Name $Name -Value $resolvedPath -Scope Script
 }
 
+function Invoke-NativeCheck {
+    param(
+        [scriptblock]$Command
+    )
+
+    $hasNativePreference = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+    if ($hasNativePreference) {
+        $previousNativePreference = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+
+    try {
+        & $Command *> $null
+        return ($LASTEXITCODE -eq 0)
+    }
+    finally {
+        if ($hasNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+        }
+    }
+}
+
 function Get-ProjectRoot {
     Split-Path -Parent $PSScriptRoot
 }
@@ -107,8 +129,7 @@ function Get-AppVersion {
 }
 
 function Ensure-GhAuth {
-    gh auth status *> $null
-    $authenticated = ($LASTEXITCODE -eq 0)
+    $authenticated = Invoke-NativeCheck { gh auth status }
 
     if (-not $authenticated) {
         Write-Host "Connexion GitHub requise. Ouverture de l'authentification..." -ForegroundColor Yellow
@@ -183,8 +204,7 @@ function Ensure-GhRepo {
     )
 
     $repository = "$GitHubUsername/$RepoName"
-    gh repo view $repository *> $null
-    $existing = ($LASTEXITCODE -eq 0)
+    $existing = Invoke-NativeCheck { gh repo view $repository }
 
     if ($existing) {
         return
@@ -305,8 +325,7 @@ function Publish-Release {
     Push-Location $root
     try {
         $tag = "v$Version"
-        gh release view $tag --repo $repository *> $null
-        $releaseViewSucceeded = ($LASTEXITCODE -eq 0)
+        $releaseViewSucceeded = Invoke-NativeCheck { gh release view $tag --repo $repository }
 
         if (-not $releaseViewSucceeded) {
             gh release create $tag $setupPath --repo $repository --title $tag --notes "Publication de la version $Version"
