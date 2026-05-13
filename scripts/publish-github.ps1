@@ -304,6 +304,7 @@ function Publish-Release {
 
     $root = Get-ProjectRoot
     $setupPath = Join-Path $root "installer\output\BoulangerieLomotoSetup.exe"
+    $repository = "$GitHubUsername/$AppRepoName"
 
     if (-not (Test-Path $setupPath)) {
         Write-Warning "Setup introuvable : $setupPath"
@@ -316,17 +317,17 @@ function Publish-Release {
         $tag = "v$Version"
         $releaseViewSucceeded = $true
         try {
-            gh release view $tag | Out-Null
+            gh release view $tag --repo $repository | Out-Null
         }
         catch {
             $releaseViewSucceeded = $false
         }
 
         if (-not $releaseViewSucceeded) {
-            gh release create $tag $setupPath --title $tag --notes "Publication de la version $Version"
+            gh release create $tag $setupPath --repo $repository --title $tag --notes "Publication de la version $Version"
         }
         else {
-            gh release upload $tag $setupPath --clobber
+            gh release upload $tag $setupPath --repo $repository --clobber
         }
     }
     finally {
