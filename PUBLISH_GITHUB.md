@@ -42,3 +42,9 @@ Le script peut demander une connexion web GitHub la premiere fois, puis continue
 Le manifeste public est lu depuis :
 
 `https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/update.json`
+
+Le script publie aussi un `download_url` fige sur la version courante, par exemple :
+
+`https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.0.2/BoulangerieLomotoSetup.exe`
+
+Cela evite qu'un lien `latest/download` renvoie temporairement une ancienne version.

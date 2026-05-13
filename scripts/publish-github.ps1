@@ -301,7 +301,7 @@ Require-Command gh -FallbackPaths @("C:\Program Files\GitHub CLI\gh.exe")
 Ensure-GhAuth
 
 $version = Get-AppVersion
-$downloadUrl = "https://github.com/$GitHubUsername/$AppRepoName/releases/latest/download/BoulangerieLomotoSetup.exe"
+$downloadUrl = "https://github.com/$GitHubUsername/$AppRepoName/releases/download/v$version/BoulangerieLomotoSetup.exe"
 $manifestUrl = "https://raw.githubusercontent.com/$GitHubUsername/$UpdatesRepoName/main/update.json"
 
 Publish-AppRepo -Version $version

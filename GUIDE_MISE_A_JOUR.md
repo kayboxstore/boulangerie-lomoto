@@ -35,9 +35,19 @@ Avec cette organisation :
 - manifeste de mise a jour :
   `https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/update.json`
 - setup a telecharger :
-  `https://github.com/kayboxstore/boulangerie-lomoto/releases/latest/download/BoulangerieLomotoSetup.exe`
+  `https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.0.2/BoulangerieLomotoSetup.exe`
 
 Cette URL de manifeste est deja configuree dans l'application.
+
+Important :
+
+Pour eviter qu'un ancien setup soit repris par cache, le champ `download_url` du manifeste doit toujours viser une version precise, par exemple :
+
+```text
+https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.0.2/BoulangerieLomotoSetup.exe
+```
+
+Il vaut mieux ne pas utiliser `releases/latest/download/...` dans le manifeste.
 
 ### Option 1 : dans le code avant de regenerer l'application
 
@@ -98,4 +108,4 @@ Quand vous publiez une nouvelle version :
 2. Vous augmentez aussi `MyAppVersion` dans [setup.iss](/A:/Mon application python/installer/setup.iss).
 3. Vous regenerez l'exe.
 4. Vous regenerez le setup.
-5. Vous mettez a jour le manifeste JSON en ligne.
+5. Vous mettez a jour le manifeste JSON en ligne avec le lien exact de la release publiee, par exemple `.../releases/download/v1.0.2/...`.

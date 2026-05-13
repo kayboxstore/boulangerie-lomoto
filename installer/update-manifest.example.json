@@ -1,6 +1,6 @@
 {
-  "version": "1.0.1",
-  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/latest/download/BoulangerieLomotoSetup.exe",
+  "version": "1.0.2",
+  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.0.2/BoulangerieLomotoSetup.exe",
   "published_at": "2026-05-13",
-  "notes": "Correction du module stock et amelioration de la caisse."
+  "notes": "Publication de la version 1.0.2."
 }
