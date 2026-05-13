@@ -57,6 +57,24 @@ Le setup sera genere dans :
 
 - `installer\output`
 
+Important :
+
+Le setup doit etre compile apres PyInstaller. Si vous recompilez seulement `setup.iss` sans regenerer d'abord `dist\Boulangerie Lomoto`, vous risquez de republier un ancien exe.
+
+## 4 bis. Methode recommandee en une seule commande
+
+Pour eviter un mauvais ordre de build, utilisez plutot :
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\publish-github.ps1" -SkipBuild:$false
+```
+
+Cette commande :
+
+1. regenere l'exe PyInstaller
+2. recompile le setup Inno Setup
+3. publie ensuite la release GitHub et le manifeste
+
 ## 5. Important sur la base SQLite
 
 L'application enregistre la base ici :
@@ -79,6 +97,7 @@ Quand vous voudrez refaire un setup :
 2. Lancer PyInstaller.
 3. Tester l'exe.
 4. Compiler `installer\setup.iss` avec Inno Setup.
+5. Publier seulement apres ces deux etapes.
 
 ## 7. Plus tard
 

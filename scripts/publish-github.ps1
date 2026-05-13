@@ -1,7 +1,8 @@
 param(
     [string]$GitHubUsername = "kayboxstore",
     [string]$AppRepoName = "boulangerie-lomoto",
-    [string]$UpdatesRepoName = "boulangerie-lomoto-updates"
+    [string]$UpdatesRepoName = "boulangerie-lomoto-updates",
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +57,43 @@ function Get-VenvPython {
         throw "Python du venv introuvable : $pythonPath"
     }
     return $pythonPath
+}
+
+function Get-InnoCompiler {
+    $fallbackPaths = @(
+        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        "C:\Program Files\Inno Setup 6\ISCC.exe"
+    )
+    $resolvedPath = Resolve-CommandPath -Name "iscc" -FallbackPaths $fallbackPaths
+    if (-not $resolvedPath) {
+        throw "Le compilateur Inno Setup est introuvable. Installez Inno Setup 6 puis reessayez."
+    }
+    return $resolvedPath
+}
+
+function Build-ReleaseArtifacts {
+    $root = Get-ProjectRoot
+    $python = Get-VenvPython
+    $innoCompiler = Get-InnoCompiler
+    $setupScript = Join-Path $root "installer\setup.iss"
+
+    Push-Location $root
+    try {
+        Write-Host "Build PyInstaller en cours..." -ForegroundColor Cyan
+        & $python -m PyInstaller --noconfirm --clean --windowed --onedir --name "Boulangerie Lomoto" main.py
+        if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller a echoue."
+        }
+
+        Write-Host "Compilation du setup Inno Setup..." -ForegroundColor Cyan
+        & $innoCompiler $setupScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "La compilation Inno Setup a echoue."
+        }
+    }
+    finally {
+        Pop-Location
+    }
 }
 
 function Get-AppVersion {
@@ -299,6 +337,10 @@ function Publish-Release {
 Require-Command git -FallbackPaths @("C:\Program Files\Git\cmd\git.exe")
 Require-Command gh -FallbackPaths @("C:\Program Files\GitHub CLI\gh.exe")
 Ensure-GhAuth
+
+if (-not $SkipBuild) {
+    Build-ReleaseArtifacts
+}
 
 $version = Get-AppVersion
 $downloadUrl = "https://github.com/$GitHubUsername/$AppRepoName/releases/download/v$version/BoulangerieLomotoSetup.exe"

@@ -6,12 +6,14 @@ Le script principal pour publier le projet sur GitHub est :
 
 ## Ce que fait le script
 
-1. Initialise le depot Git local si besoin.
-2. Lance la connexion GitHub si elle n'est pas deja faite.
-3. Cree le depot GitHub de l'application.
-4. Cree la release GitHub avec le setup.
-5. Cree le depot du manifeste `update.json`.
-6. Publie le manifeste de mise a jour.
+1. Regenere l'executable PyInstaller.
+2. Recompile le setup Inno Setup.
+3. Initialise le depot Git local si besoin.
+4. Lance la connexion GitHub si elle n'est pas deja faite.
+5. Cree le depot GitHub de l'application.
+6. Cree ou met a jour la release GitHub avec le setup.
+7. Cree le depot du manifeste `update.json`.
+8. Publie le manifeste de mise a jour.
 
 ## Commande
 
@@ -30,6 +32,12 @@ cd "A:\Mon application python"
   `installer\output\BoulangerieLomotoSetup.exe`
 
 Le script peut demander une connexion web GitHub la premiere fois, puis continue tout seul.
+
+Si vous avez deja regenere l'exe et le setup vous-meme, vous pouvez ignorer la reconstruction automatique avec :
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\publish-github.ps1" -SkipBuild
+```
 
 ## Noms retenus
 

@@ -1,6 +1,6 @@
 #define MyAppName "Boulangerie Lomoto"
 #define MyAppVersion "1.0.2"
-#define MyAppPublisher "Votre societe"
+#define MyAppPublisher "Kay Box Store"
 #define MyAppExeName "Boulangerie Lomoto.exe"
 #define MyAppIdEscaped "{{D8D3424B-4C91-4C10-A7F5-84AB2F483F11}"
 #define MyAppIdValue "{D8D3424B-4C91-4C10-A7F5-84AB2F483F11}"
@@ -10,6 +10,8 @@ AppId={#MyAppIdEscaped}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputDir=output
