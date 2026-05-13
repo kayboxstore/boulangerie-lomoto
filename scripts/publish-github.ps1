@@ -107,13 +107,8 @@ function Get-AppVersion {
 }
 
 function Ensure-GhAuth {
-    $authenticated = $true
-    try {
-        gh auth status | Out-Null
-    }
-    catch {
-        $authenticated = $false
-    }
+    gh auth status *> $null
+    $authenticated = ($LASTEXITCODE -eq 0)
 
     if (-not $authenticated) {
         Write-Host "Connexion GitHub requise. Ouverture de l'authentification..." -ForegroundColor Yellow
@@ -188,13 +183,8 @@ function Ensure-GhRepo {
     )
 
     $repository = "$GitHubUsername/$RepoName"
-    $existing = $true
-    try {
-        gh repo view $repository | Out-Null
-    }
-    catch {
-        $existing = $false
-    }
+    gh repo view $repository *> $null
+    $existing = ($LASTEXITCODE -eq 0)
 
     if ($existing) {
         return
@@ -315,13 +305,8 @@ function Publish-Release {
     Push-Location $root
     try {
         $tag = "v$Version"
-        $releaseViewSucceeded = $true
-        try {
-            gh release view $tag --repo $repository | Out-Null
-        }
-        catch {
-            $releaseViewSucceeded = $false
-        }
+        gh release view $tag --repo $repository *> $null
+        $releaseViewSucceeded = ($LASTEXITCODE -eq 0)
 
         if (-not $releaseViewSucceeded) {
             gh release create $tag $setupPath --repo $repository --title $tag --notes "Publication de la version $Version"
