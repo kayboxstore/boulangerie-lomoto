@@ -1,0 +1,1198 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import os
+import secrets
+import shutil
+import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Any, Iterator
+
+
+DB_DATE_FORMAT = "%Y-%m-%d"
+PASSWORD_PREFIX = "PBKDF2$"
+PASSWORD_ITERATIONS = 100_000
+
+
+@dataclass
+class AuthenticatedUser:
+    identifiant: str
+    role: str
+
+
+class DatabaseHelper:
+    app_data_dir = Path(
+        os.environ.get(
+            "LOCALAPPDATA",
+            str(Path.home() / "AppData" / "Local"),
+        )
+    ) / "BoulangerieLomoto"
+    db_path = app_data_dir / "boulangerie.db"
+    legacy_db_path = Path(__file__).resolve().parent.parent / "boulangerie.db"
+
+    @classmethod
+    @contextmanager
+    def connect(cls) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(cls.db_path, timeout=10)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @classmethod
+    def initialize_database(cls) -> None:
+        cls.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if (
+            not cls.db_path.exists()
+            and cls.legacy_db_path.exists()
+            and cls.legacy_db_path.resolve() != cls.db_path.resolve()
+        ):
+            shutil.copy2(cls.legacy_db_path, cls.db_path)
+        with cls.connect() as connection:
+            cls._create_tables(connection)
+            cls._migrate_orders_table(connection)
+            cls._migrate_commissions_table(connection)
+            cls._insert_default_admin(connection)
+            cls._insert_default_stock_config(connection)
+
+    @classmethod
+    def _create_tables(cls, connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS Utilisateurs (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                NomComplet TEXT NOT NULL,
+                Identifiant TEXT NOT NULL UNIQUE,
+                MotDePasse TEXT NOT NULL,
+                Role TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ConfigurationStock (
+                Id INTEGER PRIMARY KEY CHECK (Id = 1),
+                FarineInitial REAL NOT NULL,
+                LevureInitial REAL NOT NULL,
+                SelInitial REAL NOT NULL,
+                HuileInitial REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS StockSorties (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateSortie TEXT NOT NULL,
+                SacsUtilises REAL NOT NULL,
+                PaquetsUtilises REAL NOT NULL,
+                KgSelUtilises REAL NOT NULL,
+                LitresHuileUtilises REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS StockJournalier (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateJour TEXT NOT NULL UNIQUE,
+                FarineOuverture REAL NOT NULL,
+                LevureOuverture REAL NOT NULL,
+                SelOuverture REAL NOT NULL,
+                HuileOuverture REAL NOT NULL,
+                FarineCloture REAL NOT NULL,
+                LevureCloture REAL NOT NULL,
+                SelCloture REAL NOT NULL,
+                HuileCloture REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS CaisseVentes (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateVente TEXT NOT NULL,
+                Produit TEXT NOT NULL,
+                Quantite INTEGER NOT NULL,
+                PrixUnitaire REAL NOT NULL,
+                Total REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS CaisseJournaliere (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateCaisse TEXT NOT NULL UNIQUE,
+                MontantTotalDepenses REAL NOT NULL,
+                DepensesEffectuees TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS Commandes (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateCommande TEXT NOT NULL,
+                Client TEXT NOT NULL,
+                Statut TEXT NOT NULL,
+                NombreBacs INTEGER NOT NULL,
+                MontantAPercevoir REAL NOT NULL,
+                MontantRecu REAL NOT NULL,
+                Dette REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS Commissions (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateCommission TEXT NOT NULL,
+                Nom TEXT NOT NULL,
+                Statut TEXT NOT NULL,
+                NombreBacs INTEGER NOT NULL,
+                MontantPaye REAL NOT NULL,
+                Commissions REAL NOT NULL,
+                Dettes REAL NOT NULL,
+                NetAPayer REAL NOT NULL
+            );
+            """
+        )
+
+    @classmethod
+    def _migrate_orders_table(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "Commandes")
+        if not columns:
+            return
+
+        has_new_schema = {
+            "DateCommande",
+            "Client",
+            "Statut",
+            "NombreBacs",
+            "MontantAPercevoir",
+            "MontantRecu",
+            "Dette",
+        }.issubset(columns) and "Produit" not in columns
+        if has_new_schema:
+            return
+
+        connection.execute("DROP TABLE IF EXISTS Commandes_Nouvelle")
+        connection.execute(
+            """
+            CREATE TABLE Commandes_Nouvelle (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateCommande TEXT NOT NULL,
+                Client TEXT NOT NULL,
+                Statut TEXT NOT NULL,
+                NombreBacs INTEGER NOT NULL,
+                MontantAPercevoir REAL NOT NULL,
+                MontantRecu REAL NOT NULL,
+                Dette REAL NOT NULL
+            )
+            """
+        )
+
+        if "Produit" in columns:
+            connection.execute(
+                """
+                INSERT INTO Commandes_Nouvelle
+                    (Id, DateCommande, Client, Statut, NombreBacs, MontantAPercevoir, MontantRecu, Dette)
+                SELECT
+                    Id,
+                    DateCommande,
+                    Client,
+                    Statut,
+                    Quantite,
+                    Montant,
+                    Montant,
+                    0
+                FROM Commandes
+                """
+            )
+        else:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO Commandes_Nouvelle
+                        (Id, DateCommande, Client, Statut, NombreBacs, MontantAPercevoir, MontantRecu, Dette)
+                    SELECT
+                        Id,
+                        DateCommande,
+                        Client,
+                        IFNULL(Statut, ''),
+                        IFNULL(NombreBacs, 0),
+                        IFNULL(MontantAPercevoir, 0),
+                        IFNULL(MontantRecu, 0),
+                        IFNULL(Dette, 0)
+                    FROM Commandes
+                    """
+                )
+            except sqlite3.DatabaseError:
+                pass
+
+        connection.execute("DROP TABLE Commandes")
+        connection.execute("ALTER TABLE Commandes_Nouvelle RENAME TO Commandes")
+
+    @classmethod
+    def _migrate_commissions_table(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "Commissions")
+        if not columns:
+            return
+
+        has_new_schema = {
+            "DateCommission",
+            "Nom",
+            "Statut",
+            "NombreBacs",
+            "MontantPaye",
+            "Commissions",
+            "Dettes",
+            "NetAPayer",
+        }.issubset(columns)
+        if has_new_schema:
+            return
+
+        connection.execute("DROP TABLE IF EXISTS Commissions_Nouvelle")
+        connection.execute(
+            """
+            CREATE TABLE Commissions_Nouvelle (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateCommission TEXT NOT NULL,
+                Nom TEXT NOT NULL,
+                Statut TEXT NOT NULL,
+                NombreBacs INTEGER NOT NULL,
+                MontantPaye REAL NOT NULL,
+                Commissions REAL NOT NULL,
+                Dettes REAL NOT NULL,
+                NetAPayer REAL NOT NULL
+            )
+            """
+        )
+
+        if "Beneficiaire" in columns:
+            connection.execute(
+                """
+                INSERT INTO Commissions_Nouvelle
+                    (Id, DateCommission, Nom, Statut, NombreBacs, MontantPaye, Commissions, Dettes, NetAPayer)
+                SELECT Id, DateCommission, Beneficiaire, '', 0, 0, Montant, 0, Montant
+                FROM Commissions
+                """
+            )
+        else:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO Commissions_Nouvelle
+                        (Id, DateCommission, Nom, Statut, NombreBacs, MontantPaye, Commissions, Dettes, NetAPayer)
+                    SELECT
+                        Id,
+                        DateCommission,
+                        IFNULL(Nom, ''),
+                        IFNULL(Statut, ''),
+                        IFNULL(NombreBacs, 0),
+                        IFNULL(MontantPaye, 0),
+                        IFNULL(Commissions, 0),
+                        IFNULL(Dettes, 0),
+                        IFNULL(NetAPayer, 0)
+                    FROM Commissions
+                    """
+                )
+            except sqlite3.DatabaseError:
+                pass
+
+        connection.execute("DROP TABLE Commissions")
+        connection.execute("ALTER TABLE Commissions_Nouvelle RENAME TO Commissions")
+
+    @staticmethod
+    def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
+        rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {row["name"] for row in rows}
+
+    @classmethod
+    def _insert_default_admin(cls, connection: sqlite3.Connection) -> None:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM Utilisateurs WHERE Role = 'Admin'"
+        ).fetchone()[0]
+        if count:
+            return
+
+        connection.execute(
+            """
+            INSERT INTO Utilisateurs (NomComplet, Identifiant, MotDePasse, Role)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("Administrateur", "admin", cls.hash_password("010203"), "Admin"),
+        )
+
+    @classmethod
+    def _insert_default_stock_config(cls, connection: sqlite3.Connection) -> None:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM ConfigurationStock WHERE Id = 1"
+        ).fetchone()[0]
+        if count:
+            return
+
+        connection.execute(
+            """
+            INSERT INTO ConfigurationStock
+                (Id, FarineInitial, LevureInitial, SelInitial, HuileInitial)
+            VALUES (1, 100, 80, 50, 60)
+            """
+        )
+
+    @staticmethod
+    def hash_password(plain_password: str) -> str:
+        salt = secrets.token_bytes(16)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            plain_password.encode("utf-8"),
+            salt,
+            PASSWORD_ITERATIONS,
+            dklen=32,
+        )
+        salt_b64 = base64.b64encode(salt).decode("ascii")
+        digest_b64 = base64.b64encode(digest).decode("ascii")
+        return f"{PASSWORD_PREFIX}{PASSWORD_ITERATIONS}${salt_b64}${digest_b64}"
+
+    @staticmethod
+    def is_hashed_password(stored_password: str) -> bool:
+        return stored_password.startswith(PASSWORD_PREFIX)
+
+    @classmethod
+    def verify_password(cls, candidate: str, stored_password: str) -> bool:
+        if not cls.is_hashed_password(stored_password):
+            return hmac.compare_digest(candidate, stored_password)
+
+        parts = stored_password.split("$")
+        if len(parts) != 4:
+            return False
+
+        try:
+            iterations = int(parts[1])
+            salt = base64.b64decode(parts[2])
+            expected = base64.b64decode(parts[3])
+        except (ValueError, TypeError):
+            return False
+
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            candidate.encode("utf-8"),
+            salt,
+            iterations,
+            dklen=len(expected),
+        )
+        return hmac.compare_digest(expected, digest)
+
+    @classmethod
+    def add_user(cls, full_name: str, identifiant: str, password: str, role: str) -> None:
+        with cls.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO Utilisateurs (NomComplet, Identifiant, MotDePasse, Role)
+                VALUES (?, ?, ?, ?)
+                """,
+                (full_name, identifiant, cls.hash_password(password), role),
+            )
+
+    @classmethod
+    def update_user(
+        cls,
+        original_identifiant: str,
+        full_name: str,
+        password: str,
+        role: str,
+    ) -> int:
+        with cls.connect() as connection:
+            if password.strip():
+                cursor = connection.execute(
+                    """
+                    UPDATE Utilisateurs
+                    SET NomComplet = ?, MotDePasse = ?, Role = ?
+                    WHERE Identifiant = ?
+                    """,
+                    (full_name, cls.hash_password(password), role, original_identifiant),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE Utilisateurs
+                    SET NomComplet = ?, Role = ?
+                    WHERE Identifiant = ?
+                    """,
+                    (full_name, role, original_identifiant),
+                )
+            return cursor.rowcount
+
+    @classmethod
+    def find_user_for_login(cls, identifiant: str, password: str) -> AuthenticatedUser | None:
+        with cls.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT Identifiant, MotDePasse, Role
+                FROM Utilisateurs
+                WHERE Identifiant = ?
+                """,
+                (identifiant,),
+            ).fetchone()
+            if row is None:
+                return None
+
+            stored_password = row["MotDePasse"]
+            if not cls.verify_password(password, stored_password):
+                return None
+
+            if not cls.is_hashed_password(stored_password):
+                connection.execute(
+                    "UPDATE Utilisateurs SET MotDePasse = ? WHERE Identifiant = ?",
+                    (cls.hash_password(password), row["Identifiant"]),
+                )
+
+            return AuthenticatedUser(identifiant=row["Identifiant"], role=row["Role"])
+
+    @classmethod
+    def search_users_by_identifiant(cls, identifiant: str) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT Id, NomComplet, Identifiant, '********' AS MotDePasse, Role
+            FROM Utilisateurs
+            WHERE Identifiant LIKE ?
+            ORDER BY Identifiant
+            """,
+            (f"%{identifiant}%",),
+        )
+
+    @classmethod
+    def delete_user(cls, identifiant: str) -> int:
+        return cls._execute(
+            "DELETE FROM Utilisateurs WHERE Identifiant = ?",
+            (identifiant,),
+        )
+
+    @classmethod
+    def list_users(cls) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT Id, NomComplet, Identifiant, '********' AS MotDePasse, Role
+            FROM Utilisateurs
+            ORDER BY Id
+            """
+        )
+
+    @classmethod
+    def count_admins(cls) -> int:
+        return int(
+            cls._fetch_value("SELECT COUNT(*) FROM Utilisateurs WHERE Role = 'Admin'")
+        )
+
+    @classmethod
+    def get_user_role(cls, identifiant: str) -> str:
+        value = cls._fetch_value(
+            "SELECT Role FROM Utilisateurs WHERE Identifiant = ?",
+            (identifiant,),
+        )
+        return "" if value is None else str(value)
+
+    @classmethod
+    def count_users(cls) -> int:
+        return int(cls._fetch_value("SELECT COUNT(*) FROM Utilisateurs"))
+
+    @classmethod
+    def get_stock_configuration(cls) -> dict[str, Any]:
+        row = cls._fetch_one(
+            """
+            SELECT Id, FarineInitial, LevureInitial, SelInitial, HuileInitial
+            FROM ConfigurationStock
+            WHERE Id = 1
+            """
+        )
+        return row or {}
+
+    @classmethod
+    def update_stock_configuration(
+        cls,
+        farine: float,
+        levure: float,
+        sel: float,
+        huile: float,
+    ) -> None:
+        cls._execute(
+            """
+            UPDATE ConfigurationStock
+            SET FarineInitial = ?, LevureInitial = ?, SelInitial = ?, HuileInitial = ?
+            WHERE Id = 1
+            """,
+            (farine, levure, sel, huile),
+        )
+
+    @classmethod
+    def get_stock_summary(cls, exclude_exit_id: int = 0) -> dict[str, Any]:
+        sql = """
+            SELECT
+                p.FarineInitial - IFNULL(SUM(s.SacsUtilises), 0) AS FarineRestante,
+                p.LevureInitial - IFNULL(SUM(s.PaquetsUtilises), 0) AS LevureRestante,
+                p.SelInitial - IFNULL(SUM(s.KgSelUtilises), 0) AS SelRestant,
+                p.HuileInitial - IFNULL(SUM(s.LitresHuileUtilises), 0) AS HuileRestante
+            FROM ConfigurationStock p
+            LEFT JOIN StockSorties s ON 1 = 1
+        """
+        params: list[Any] = []
+        if exclude_exit_id > 0:
+            sql += " AND s.Id <> ?"
+            params.append(exclude_exit_id)
+
+        sql += """
+            WHERE p.Id = 1
+            GROUP BY p.FarineInitial, p.LevureInitial, p.SelInitial, p.HuileInitial
+        """
+        return cls._fetch_one(sql, tuple(params)) or {}
+
+    @classmethod
+    def initialize_stock_day(cls, target_date: date) -> bool:
+        date_text = target_date.strftime(DB_DATE_FORMAT)
+        if int(
+            cls._fetch_value(
+                "SELECT COUNT(*) FROM StockJournalier WHERE DateJour = ?",
+                (date_text,),
+            )
+        ):
+            return False
+
+        summary = cls.get_stock_summary()
+        if not summary:
+            return False
+
+        cls._execute(
+            """
+            INSERT INTO StockJournalier (
+                DateJour,
+                FarineOuverture,
+                LevureOuverture,
+                SelOuverture,
+                HuileOuverture,
+                FarineCloture,
+                LevureCloture,
+                SelCloture,
+                HuileCloture
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                date_text,
+                summary["FarineRestante"],
+                summary["LevureRestante"],
+                summary["SelRestant"],
+                summary["HuileRestante"],
+                summary["FarineRestante"],
+                summary["LevureRestante"],
+                summary["SelRestant"],
+                summary["HuileRestante"],
+            ),
+        )
+        return True
+
+    @classmethod
+    def get_stock_journal(cls, target_date: date) -> dict[str, Any]:
+        row = cls._fetch_one(
+            """
+            SELECT
+                Id,
+                DateJour,
+                FarineOuverture,
+                LevureOuverture,
+                SelOuverture,
+                HuileOuverture,
+                FarineCloture,
+                LevureCloture,
+                SelCloture,
+                HuileCloture
+            FROM StockJournalier
+            WHERE DateJour = ?
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+        return row or {}
+
+    @classmethod
+    def update_stock_closing(cls, target_date: date) -> None:
+        summary = cls.get_stock_summary()
+        if not summary:
+            return
+
+        cls._execute(
+            """
+            UPDATE StockJournalier
+            SET
+                FarineCloture = ?,
+                LevureCloture = ?,
+                SelCloture = ?,
+                HuileCloture = ?
+            WHERE DateJour = ?
+            """,
+            (
+                summary["FarineRestante"],
+                summary["LevureRestante"],
+                summary["SelRestant"],
+                summary["HuileRestante"],
+                target_date.strftime(DB_DATE_FORMAT),
+            ),
+        )
+
+    @classmethod
+    def count_stock_exits(cls) -> int:
+        return int(cls._fetch_value("SELECT COUNT(*) FROM StockSorties"))
+
+    @classmethod
+    def list_stock_exits(cls) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT Id, DateSortie, SacsUtilises, PaquetsUtilises, KgSelUtilises, LitresHuileUtilises
+            FROM StockSorties
+            ORDER BY DateSortie DESC, Id DESC
+            """
+        )
+
+    @classmethod
+    def add_stock_exit(
+        cls,
+        target_date: date,
+        sacs: float,
+        paquets: float,
+        kg_sel: float,
+        litres_huile: float,
+    ) -> None:
+        cls._execute(
+            """
+            INSERT INTO StockSorties (
+                DateSortie, SacsUtilises, PaquetsUtilises, KgSelUtilises, LitresHuileUtilises
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                sacs,
+                paquets,
+                kg_sel,
+                litres_huile,
+            ),
+        )
+
+    @classmethod
+    def update_stock_exit(
+        cls,
+        exit_id: int,
+        target_date: date,
+        sacs: float,
+        paquets: float,
+        kg_sel: float,
+        litres_huile: float,
+    ) -> int:
+        return cls._execute(
+            """
+            UPDATE StockSorties
+            SET
+                DateSortie = ?,
+                SacsUtilises = ?,
+                PaquetsUtilises = ?,
+                KgSelUtilises = ?,
+                LitresHuileUtilises = ?
+            WHERE Id = ?
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                sacs,
+                paquets,
+                kg_sel,
+                litres_huile,
+                exit_id,
+            ),
+        )
+
+    @classmethod
+    def delete_stock_exit(cls, exit_id: int) -> int:
+        return cls._execute("DELETE FROM StockSorties WHERE Id = ?", (exit_id,))
+
+    @classmethod
+    def get_orders_summary_for_date(cls, target_date: date) -> dict[str, Any]:
+        row = cls._fetch_one(
+            """
+            SELECT
+                IFNULL(SUM(NombreBacs), 0) AS NombreTotalBacs,
+                IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
+                IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
+                IFNULL(SUM(Dette), 0) AS TotalDettes
+            FROM Commandes
+            WHERE DateCommande = ?
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+        return row or {}
+
+    @classmethod
+    def get_global_orders_summary(cls) -> dict[str, Any]:
+        row = cls._fetch_one(
+            """
+            SELECT
+                COUNT(*) AS NombreCommandes,
+                IFNULL(SUM(NombreBacs), 0) AS TotalBacs,
+                IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
+                IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
+                IFNULL(SUM(Dette), 0) AS TotalDettes,
+                IFNULL(SUM(CASE WHEN Dette > 0 THEN 1 ELSE 0 END), 0) AS NombreAvecDette
+            FROM Commandes
+            """
+        )
+        return row or {}
+
+    @classmethod
+    def get_cash_for_date(cls, target_date: date) -> dict[str, Any]:
+        row = cls._fetch_one(
+            """
+            SELECT Id, DateCaisse, MontantTotalDepenses, DepensesEffectuees
+            FROM CaisseJournaliere
+            WHERE DateCaisse = ?
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+        return row or {}
+
+    @classmethod
+    def save_cash_day(
+        cls,
+        target_date: date,
+        total_expenses: float,
+        expense_details: str,
+    ) -> None:
+        date_text = target_date.strftime(DB_DATE_FORMAT)
+        exists = int(
+            cls._fetch_value(
+                "SELECT COUNT(*) FROM CaisseJournaliere WHERE DateCaisse = ?",
+                (date_text,),
+            )
+        )
+        if exists:
+            cls._execute(
+                """
+                UPDATE CaisseJournaliere
+                SET MontantTotalDepenses = ?, DepensesEffectuees = ?
+                WHERE DateCaisse = ?
+                """,
+                (total_expenses, expense_details, date_text),
+            )
+        else:
+            cls._execute(
+                """
+                INSERT INTO CaisseJournaliere (DateCaisse, MontantTotalDepenses, DepensesEffectuees)
+                VALUES (?, ?, ?)
+                """,
+                (date_text, total_expenses, expense_details),
+            )
+
+    @classmethod
+    def list_cash_days(cls) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT
+                c.Id,
+                c.DateCaisse,
+                IFNULL(cmd.NombreTotalBacs, 0) AS NombreTotalBacs,
+                IFNULL(cmd.MontantAttendu, 0) AS MontantAttendu,
+                IFNULL(cmd.MontantRecu, 0) AS MontantRecu,
+                IFNULL(cmd.TotalDettes, 0) AS TotalDettes,
+                c.MontantTotalDepenses,
+                (IFNULL(cmd.MontantAttendu, 0) - c.MontantTotalDepenses) AS Solde,
+                c.DepensesEffectuees
+            FROM CaisseJournaliere c
+            LEFT JOIN (
+                SELECT
+                    DateCommande,
+                    SUM(NombreBacs) AS NombreTotalBacs,
+                    SUM(MontantAPercevoir) AS MontantAttendu,
+                    SUM(MontantRecu) AS MontantRecu,
+                    SUM(Dette) AS TotalDettes
+                FROM Commandes
+                GROUP BY DateCommande
+            ) cmd ON cmd.DateCommande = c.DateCaisse
+            ORDER BY c.DateCaisse DESC
+            """
+        )
+
+    @classmethod
+    def list_cash_days_by_date(cls, target_date: date) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT
+                c.Id,
+                c.DateCaisse,
+                IFNULL(cmd.NombreTotalBacs, 0) AS NombreTotalBacs,
+                IFNULL(cmd.MontantAttendu, 0) AS MontantAttendu,
+                IFNULL(cmd.MontantRecu, 0) AS MontantRecu,
+                IFNULL(cmd.TotalDettes, 0) AS TotalDettes,
+                c.MontantTotalDepenses,
+                (IFNULL(cmd.MontantAttendu, 0) - c.MontantTotalDepenses) AS Solde,
+                c.DepensesEffectuees
+            FROM CaisseJournaliere c
+            LEFT JOIN (
+                SELECT
+                    DateCommande,
+                    SUM(NombreBacs) AS NombreTotalBacs,
+                    SUM(MontantAPercevoir) AS MontantAttendu,
+                    SUM(MontantRecu) AS MontantRecu,
+                    SUM(Dette) AS TotalDettes
+                FROM Commandes
+                GROUP BY DateCommande
+            ) cmd ON cmd.DateCommande = c.DateCaisse
+            WHERE c.DateCaisse = ?
+            ORDER BY c.Id DESC
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+
+    @classmethod
+    def delete_cash_day(cls, cash_id: int) -> int:
+        return cls._execute("DELETE FROM CaisseJournaliere WHERE Id = ?", (cash_id,))
+
+    @classmethod
+    def get_total_cash(cls) -> float:
+        value = cls._fetch_value(
+            """
+            SELECT IFNULL(SUM(cmd.MontantAttendu - IFNULL(c.MontantTotalDepenses, 0)), 0)
+            FROM (
+                SELECT DateCommande, SUM(MontantAPercevoir) AS MontantAttendu
+                FROM Commandes
+                GROUP BY DateCommande
+            ) cmd
+            LEFT JOIN CaisseJournaliere c ON c.DateCaisse = cmd.DateCommande
+            """
+        )
+        return float(value or 0)
+
+    @classmethod
+    def list_orders(cls) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT Id, DateCommande, Client, Statut, NombreBacs, MontantAPercevoir, MontantRecu, Dette
+            FROM Commandes
+            ORDER BY DateCommande DESC, Id DESC
+            """
+        )
+
+    @classmethod
+    def list_orders_by_date(cls, target_date: date) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT Id, DateCommande, Client, Statut, NombreBacs, MontantAPercevoir, MontantRecu, Dette
+            FROM Commandes
+            WHERE DateCommande = ?
+            ORDER BY Id DESC
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+
+    @classmethod
+    def add_order(
+        cls,
+        target_date: date,
+        client: str,
+        status: str,
+        number_of_trays: int,
+        amount_due: float,
+        amount_received: float,
+        debt: float,
+    ) -> None:
+        cls._execute(
+            """
+            INSERT INTO Commandes
+                (DateCommande, Client, Statut, NombreBacs, MontantAPercevoir, MontantRecu, Dette)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                client,
+                status,
+                number_of_trays,
+                amount_due,
+                amount_received,
+                debt,
+            ),
+        )
+
+    @classmethod
+    def count_orders_with_debt(cls) -> int:
+        return int(cls._fetch_value("SELECT COUNT(*) FROM Commandes WHERE Dette > 0"))
+
+    @classmethod
+    def update_order(
+        cls,
+        order_id: int,
+        target_date: date,
+        client: str,
+        status: str,
+        number_of_trays: int,
+        amount_due: float,
+        amount_received: float,
+        debt: float,
+    ) -> int:
+        return cls._execute(
+            """
+            UPDATE Commandes
+            SET
+                DateCommande = ?,
+                Client = ?,
+                Statut = ?,
+                NombreBacs = ?,
+                MontantAPercevoir = ?,
+                MontantRecu = ?,
+                Dette = ?
+            WHERE Id = ?
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                client,
+                status,
+                number_of_trays,
+                amount_due,
+                amount_received,
+                debt,
+                order_id,
+            ),
+        )
+
+    @classmethod
+    def delete_order(cls, order_id: int) -> int:
+        return cls._execute("DELETE FROM Commandes WHERE Id = ?", (order_id,))
+
+    @classmethod
+    def find_existing_order(
+        cls,
+        target_date: date,
+        client: str,
+        exclude_id: int = 0,
+    ) -> int:
+        sql = """
+            SELECT Id
+            FROM Commandes
+            WHERE DateCommande = ?
+              AND UPPER(TRIM(Client)) = UPPER(TRIM(?))
+        """
+        params: list[Any] = [target_date.strftime(DB_DATE_FORMAT), client.strip()]
+        if exclude_id > 0:
+            sql += " AND Id <> ?"
+            params.append(exclude_id)
+        sql += " ORDER BY Id DESC LIMIT 1"
+        value = cls._fetch_value(sql, tuple(params))
+        return int(value or 0)
+
+    @classmethod
+    def list_commissions(cls) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT Id, DateCommission, Nom, Statut, NombreBacs, MontantPaye, Commissions, Dettes, NetAPayer
+            FROM Commissions
+            ORDER BY DateCommission DESC, Id DESC
+            """
+        )
+
+    @classmethod
+    def list_commissions_by_date(cls, target_date: date) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT Id, DateCommission, Nom, Statut, NombreBacs, MontantPaye, Commissions, Dettes, NetAPayer
+            FROM Commissions
+            WHERE DateCommission = ?
+            ORDER BY Id DESC
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+
+    @classmethod
+    def list_clients_from_orders_by_date(cls, target_date: date) -> list[str]:
+        rows = cls._fetch_all(
+            """
+            SELECT DISTINCT Client
+            FROM Commandes
+            WHERE DateCommande = ?
+            ORDER BY Client
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+        return [row["Client"] for row in rows]
+
+    @classmethod
+    def get_commission_synthesis_from_orders(
+        cls,
+        target_date: date,
+        client: str,
+    ) -> dict[str, Any]:
+        row = cls._fetch_one(
+            """
+            SELECT
+                CASE
+                    WHEN COUNT(DISTINCT Statut) = 1 THEN MAX(Statut)
+                    ELSE 'Mixte'
+                END AS Statut,
+                IFNULL(SUM(NombreBacs), 0) AS NombreBacs,
+                IFNULL(SUM(MontantRecu), 0) AS MontantPaye,
+                IFNULL(SUM(
+                    CASE
+                        WHEN Statut = 'Maman' THEN NombreBacs * 1650
+                        WHEN Statut = 'Vente cash' THEN 0
+                        WHEN Statut = 'VC' THEN 0
+                        WHEN Statut = 'Depositaire 6.000Fc' THEN NombreBacs * 1900
+                        WHEN Statut = 'Dépositaire 6.000Fc' THEN NombreBacs * 1900
+                        WHEN Statut = 'Depositaire 4.100Fc' THEN 0
+                        WHEN Statut = 'Dépositaire 4.100Fc' THEN 0
+                        ELSE 0
+                    END
+                ), 0) AS Commissions,
+                IFNULL(SUM(Dette), 0) AS Dettes,
+                (
+                    IFNULL(SUM(
+                        CASE
+                            WHEN Statut = 'Maman' THEN NombreBacs * 1650
+                            WHEN Statut = 'Vente cash' THEN 0
+                            WHEN Statut = 'VC' THEN 0
+                            WHEN Statut = 'Depositaire 6.000Fc' THEN NombreBacs * 1900
+                            WHEN Statut = 'Dépositaire 6.000Fc' THEN NombreBacs * 1900
+                            WHEN Statut = 'Depositaire 4.100Fc' THEN 0
+                            WHEN Statut = 'Dépositaire 4.100Fc' THEN 0
+                            ELSE 0
+                        END
+                    ), 0) - IFNULL(SUM(Dette), 0)
+                ) AS NetAPayer
+            FROM Commandes
+            WHERE DateCommande = ? AND Client = ?
+            """,
+            (target_date.strftime(DB_DATE_FORMAT), client),
+        )
+        return row or {}
+
+    @classmethod
+    def find_existing_commission(
+        cls,
+        target_date: date,
+        name: str,
+        exclude_id: int = 0,
+    ) -> int:
+        sql = """
+            SELECT Id
+            FROM Commissions
+            WHERE DateCommission = ?
+              AND UPPER(TRIM(Nom)) = UPPER(TRIM(?))
+        """
+        params: list[Any] = [target_date.strftime(DB_DATE_FORMAT), name.strip()]
+        if exclude_id > 0:
+            sql += " AND Id <> ?"
+            params.append(exclude_id)
+        sql += " ORDER BY Id DESC LIMIT 1"
+        value = cls._fetch_value(sql, tuple(params))
+        return int(value or 0)
+
+    @classmethod
+    def add_commission(
+        cls,
+        target_date: date,
+        name: str,
+        status: str,
+        number_of_trays: int,
+        amount_paid: float,
+        commissions: float,
+        debts: float,
+        net_to_pay: float,
+    ) -> None:
+        cls._execute(
+            """
+            INSERT INTO Commissions
+                (DateCommission, Nom, Statut, NombreBacs, MontantPaye, Commissions, Dettes, NetAPayer)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                name,
+                status,
+                number_of_trays,
+                amount_paid,
+                commissions,
+                debts,
+                net_to_pay,
+            ),
+        )
+
+    @classmethod
+    def update_commission(
+        cls,
+        commission_id: int,
+        target_date: date,
+        name: str,
+        status: str,
+        number_of_trays: int,
+        amount_paid: float,
+        commissions: float,
+        debts: float,
+        net_to_pay: float,
+    ) -> int:
+        return cls._execute(
+            """
+            UPDATE Commissions
+            SET
+                DateCommission = ?,
+                Nom = ?,
+                Statut = ?,
+                NombreBacs = ?,
+                MontantPaye = ?,
+                Commissions = ?,
+                Dettes = ?,
+                NetAPayer = ?
+            WHERE Id = ?
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                name,
+                status,
+                number_of_trays,
+                amount_paid,
+                commissions,
+                debts,
+                net_to_pay,
+                commission_id,
+            ),
+        )
+
+    @classmethod
+    def delete_commission(cls, commission_id: int) -> int:
+        return cls._execute("DELETE FROM Commissions WHERE Id = ?", (commission_id,))
+
+    @classmethod
+    def get_total_commissions(cls) -> float:
+        value = cls._fetch_value("SELECT IFNULL(SUM(Commissions), 0) FROM Commissions")
+        return float(value or 0)
+
+    @classmethod
+    def _fetch_all(
+        cls,
+        sql: str,
+        params: tuple[Any, ...] = (),
+    ) -> list[dict[str, Any]]:
+        with cls.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+            return [dict(row) for row in rows]
+
+    @classmethod
+    def _fetch_one(
+        cls,
+        sql: str,
+        params: tuple[Any, ...] = (),
+    ) -> dict[str, Any] | None:
+        with cls.connect() as connection:
+            row = connection.execute(sql, params).fetchone()
+            return None if row is None else dict(row)
+
+    @classmethod
+    def _fetch_value(
+        cls,
+        sql: str,
+        params: tuple[Any, ...] = (),
+    ) -> Any:
+        with cls.connect() as connection:
+            row = connection.execute(sql, params).fetchone()
+            return None if row is None else row[0]
+
+    @classmethod
+    def _execute(
+        cls,
+        sql: str,
+        params: tuple[Any, ...] = (),
+    ) -> int:
+        with cls.connect() as connection:
+            cursor = connection.execute(sql, params)
+            return cursor.rowcount

@@ -1,0 +1,14 @@
+.idea/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+build/
+dist/
+*.spec
+installer/output/
+
+boulangerie.db
+.github-publish/
