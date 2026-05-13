@@ -252,29 +252,6 @@ function Publish-AppRepo {
     Commit-And-Push -RepoPath $root -Message "Publish app version $Version" -RepoName $AppRepoName
 }
 
-function Ensure-GitHubPages {
-    $apiPath = "repos/$GitHubUsername/$UpdatesRepoName/pages"
-    $headers = @(
-        "-H", "Accept: application/vnd.github+json",
-        "-H", "X-GitHub-Api-Version: 2022-11-28"
-    )
-
-    $siteExists = $true
-    try {
-        gh api $apiPath @headers | Out-Null
-    }
-    catch {
-        $siteExists = $false
-    }
-
-    if ($siteExists) {
-        gh api --method PUT $apiPath @headers --field "source[branch]=main" --field "source[path]=/"
-    }
-    else {
-        gh api --method POST $apiPath @headers --field "source[branch]=main" --field "source[path]=/"
-    }
-}
-
 function Publish-Release {
     param([string]$Version)
 
@@ -316,13 +293,13 @@ Ensure-GhAuth
 
 $version = Get-AppVersion
 $downloadUrl = "https://github.com/$GitHubUsername/$AppRepoName/releases/latest/download/BoulangerieLomotoSetup.exe"
+$manifestUrl = "https://raw.githubusercontent.com/$GitHubUsername/$UpdatesRepoName/main/update.json"
 
 Publish-AppRepo -Version $version
 Publish-Release -Version $version
 Publish-UpdatesRepo -Version $version -DownloadUrl $downloadUrl
-Ensure-GitHubPages
 
 Write-Host ""
 Write-Host "Publication terminee." -ForegroundColor Green
 Write-Host "Application : https://github.com/$GitHubUsername/$AppRepoName"
-Write-Host "Manifeste : https://$GitHubUsername.github.io/$UpdatesRepoName/update.json"
+Write-Host "Manifeste : $manifestUrl"

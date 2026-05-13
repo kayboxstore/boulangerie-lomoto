@@ -10,9 +10,8 @@ Le script principal pour publier le projet sur GitHub est :
 2. Lance la connexion GitHub si elle n'est pas deja faite.
 3. Cree le depot GitHub de l'application.
 4. Cree la release GitHub avec le setup.
-5. Cree le depot GitHub Pages pour `update.json`.
+5. Cree le depot du manifeste `update.json`.
 6. Publie le manifeste de mise a jour.
-7. Active ou met a jour GitHub Pages automatiquement.
 
 ## Commande
 
@@ -37,3 +36,9 @@ Le script peut demander une connexion web GitHub la premiere fois, puis continue
 - utilisateur GitHub : `kayboxstore`
 - depot application : `boulangerie-lomoto`
 - depot updates : `boulangerie-lomoto-updates`
+
+## URL finale du manifeste
+
+Le manifeste public est lu depuis :
+
+`https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/update.json`

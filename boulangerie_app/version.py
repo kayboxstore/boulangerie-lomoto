@@ -4,7 +4,7 @@ APP_PUBLISHER = "Votre societe"
 
 # Hypothese retenue pour GitHub :
 # - depot application : kayboxstore/boulangerie-lomoto
-# - depot GitHub Pages : kayboxstore/boulangerie-lomoto-updates
-DEFAULT_UPDATE_MANIFEST_URL = "https://kayboxstore.github.io/boulangerie-lomoto-updates/update.json"
+# - depot manifeste : kayboxstore/boulangerie-lomoto-updates
+DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/update.json"
 
 UPDATE_CHECK_INTERVAL_DAYS = 7

@@ -28,12 +28,12 @@ Vous avez 2 options.
 Comme votre nom d'utilisateur GitHub est `kayboxstore`, je vous recommande :
 
 1. Depot application : `boulangerie-lomoto`
-2. Depot GitHub Pages : `boulangerie-lomoto-updates`
+2. Depot manifeste : `boulangerie-lomoto-updates`
 
 Avec cette organisation :
 
 - manifeste de mise a jour :
-  `https://kayboxstore.github.io/boulangerie-lomoto-updates/update.json`
+  `https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/update.json`
 - setup a telecharger :
   `https://github.com/kayboxstore/boulangerie-lomoto/releases/latest/download/BoulangerieLomotoSetup.exe`
 
@@ -48,7 +48,7 @@ Editez ce fichier :
 Renseignez cette variable :
 
 ```python
-DEFAULT_UPDATE_MANIFEST_URL = "https://kayboxstore.github.io/boulangerie-lomoto-updates/update.json"
+DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/update.json"
 ```
 
 Puis regenerez l'exe et le setup.
@@ -65,7 +65,7 @@ Exemple :
 
 ```json
 {
-  "manifest_url": "https://kayboxstore.github.io/boulangerie-lomoto-updates/update.json",
+  "manifest_url": "https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/update.json",
   "check_interval_days": 7
 }
 ```
