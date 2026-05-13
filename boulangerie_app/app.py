@@ -41,8 +41,8 @@ def run_app() -> None:
     DatabaseHelper.initialize_database()
     root = tk.Tk()
     root.title(f"{APP_NAME} - Connexion - v{APP_VERSION}")
-    root.geometry("520x320")
-    root.minsize(520, 320)
+    root.geometry("580x380")
+    root.minsize(580, 380)
     root.configure(bg="#dfeaf4")
     configure_styles()
     LoginWindow(root)
@@ -308,8 +308,8 @@ class DashboardWindow(tk.Toplevel):
         self.update_result_queue: Queue[UpdateCheckResult] = Queue()
         self.update_check_running = False
         self.title(f"{APP_NAME} - Tableau de bord - v{APP_VERSION}")
-        self.geometry("760x420")
-        self.minsize(720, 400)
+        self.geometry("900x560")
+        self.minsize(860, 520)
         self.configure(bg="#dfeaf4")
         self.protocol("WM_DELETE_WINDOW", self.on_close_app)
         self.build_ui()
@@ -516,7 +516,7 @@ class BaseModuleWindow(tk.Toplevel):
 
 class UsersWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Gestion des utilisateurs", "980x620")
+        super().__init__(parent, "Gestion des utilisateurs", "1060x700")
         self.edit_mode = False
         self.original_identifiant = ""
         self.build_ui()
@@ -685,7 +685,7 @@ class UsersWindow(BaseModuleWindow):
 
 class StockWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Gestion du stock", "1080x700")
+        super().__init__(parent, "Gestion du stock", "1160x780")
         self.edit_mode = False
         self.selected_exit_id = 0
         self.first_open_of_day = DatabaseHelper.initialize_stock_day(date.today())
@@ -905,6 +905,7 @@ class StockWindow(BaseModuleWindow):
             return
 
         dialog = tk.Toplevel(self)
+        dialog.geometry("460x300")
         dialog.title("Paramètres du stock")
         dialog.transient(self)
         dialog.grab_set()
@@ -973,7 +974,7 @@ class StockWindow(BaseModuleWindow):
 
 class OrdersWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Gestion des commandes", "1160x760")
+        super().__init__(parent, "Gestion des commandes", "1240x840")
         self.edit_mode = False
         self.selected_order_id = 0
         self.show_all_dates = False
@@ -1330,7 +1331,7 @@ class OrdersWindow(BaseModuleWindow):
 
 class CashWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Gestion de la caisse", "1200x820")
+        super().__init__(parent, "Gestion de la caisse", "1280x900")
         self.show_all_dates = False
         self.selected_cash_id = 0
         self.trays_today = 0.0
@@ -1594,7 +1595,7 @@ class CashWindow(BaseModuleWindow):
 
 class CommissionsWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Gestion des commissions", "1180x760")
+        super().__init__(parent, "Gestion des commissions", "1260x840")
         self.selected_commission_id = 0
         self.edit_mode = False
         self.show_all_dates = False
