@@ -37,6 +37,11 @@ function Require-Command {
         throw "L'outil '$Name' n'est pas installe ou n'est pas disponible dans le PATH."
     }
 
+    $commandDirectory = Split-Path -Parent $resolvedPath
+    if ($env:Path -notlike "*$commandDirectory*") {
+        $env:Path = "$commandDirectory;$env:Path"
+    }
+
     Set-Alias -Name $Name -Value $resolvedPath -Scope Script
 }
 
@@ -225,12 +230,16 @@ function Publish-UpdatesRepo {
     $root = Get-ProjectRoot
     $publishRoot = Join-Path $root ".github-publish\$UpdatesRepoName"
     $sourceRoot = Join-Path $root "github-pages"
+    $repoUrl = "https://github.com/$GitHubUsername/$UpdatesRepoName.git"
+
+    Ensure-GhRepo -RepoName $UpdatesRepoName -PublicRepo
 
     if (Test-Path $publishRoot) {
         Remove-Item -Recurse -Force $publishRoot
     }
 
-    New-Item -ItemType Directory -Path $publishRoot | Out-Null
+    git clone $repoUrl $publishRoot | Out-Null
+    Get-ChildItem -Path $publishRoot -Force | Where-Object { $_.Name -ne ".git" } | Remove-Item -Recurse -Force
     Get-ChildItem -Path $sourceRoot -Force | ForEach-Object {
         Copy-Item -Path $_.FullName -Destination $publishRoot -Recurse -Force
     }
@@ -238,9 +247,7 @@ function Publish-UpdatesRepo {
     $manifestPath = Join-Path $publishRoot "update.json"
     Update-ManifestFile -ManifestPath $manifestPath -Version $Version -DownloadUrl $DownloadUrl
 
-    Ensure-GitRepo -RootPath $publishRoot
     Ensure-LocalGitIdentity -RepoPath $publishRoot
-    Ensure-GhRepo -RepoName $UpdatesRepoName -PublicRepo
     Commit-And-Push -RepoPath $publishRoot -Message "Publish update manifest $Version" -RepoName $UpdatesRepoName
 }
 
