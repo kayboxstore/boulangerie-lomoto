@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 from queue import Empty, Queue
 import tkinter as tk
 import webbrowser
 from datetime import date, datetime
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable
 
@@ -400,6 +401,38 @@ class DashboardWindow(tk.Toplevel):
         summary_frame.pack(fill="x", pady=18)
         ttk.Label(summary_frame, textvariable=self.summary_var, justify="center").pack(fill="x")
 
+        maintenance_frame = ttk.LabelFrame(container, text="Sauvegarde et restauration", style="Card.TLabelframe")
+        maintenance_frame.pack(fill="x", pady=(0, 18))
+        ttk.Label(
+            maintenance_frame,
+            text=(
+                "Sauvegardez la base dans le dossier local de l'application, puis restaurez une sauvegarde si besoin."
+            ),
+            wraplength=640,
+            justify="center",
+        ).pack(fill="x", pady=(0, 12))
+
+        maintenance_buttons = ttk.Frame(maintenance_frame)
+        maintenance_buttons.pack(anchor="center")
+        self.backup_button = ttk.Button(
+            maintenance_buttons,
+            text="Sauvegarder la base",
+            command=self.backup_database,
+        )
+        self.backup_button.grid(row=0, column=0, padx=6, pady=4)
+        self.restore_button = ttk.Button(
+            maintenance_buttons,
+            text="Restaurer une sauvegarde",
+            command=self.restore_database,
+        )
+        self.restore_button.grid(row=0, column=1, padx=6, pady=4)
+        self.backup_folder_button = ttk.Button(
+            maintenance_buttons,
+            text="Ouvrir le dossier",
+            command=self.open_backups_folder,
+        )
+        self.backup_folder_button.grid(row=0, column=2, padx=6, pady=4)
+
         actions = ttk.Frame(container)
         actions.pack(anchor="center", pady=(8, 0))
         ttk.Button(actions, text="Déconnexion", command=self.logout).grid(row=0, column=0, padx=8)
@@ -429,6 +462,8 @@ class DashboardWindow(tk.Toplevel):
             self.commandes_button.state(["disabled"])
         if "Commissions" not in allowed:
             self.commissions_button.state(["disabled"])
+        self.backup_button.state(["disabled"])
+        self.restore_button.state(["disabled"])
 
     def refresh_summary(self) -> None:
         try:
@@ -463,6 +498,69 @@ class DashboardWindow(tk.Toplevel):
         self.update_check_running = False
         if result.status == "update_available" and result.update_info is not None:
             self.show_update_dialog(result.update_info)
+
+    def backup_database(self) -> None:
+        try:
+            backup_path = DatabaseHelper.backup_database()
+        except Exception as exc:
+            messagebox.showerror("Sauvegarde", str(exc))
+            return
+
+        open_folder = messagebox.askyesno(
+            "Sauvegarde terminée",
+            (
+                "La sauvegarde a ete creee avec succes.\n\n"
+                f"Fichier : {backup_path}\n\n"
+                "Voulez-vous ouvrir le dossier des sauvegardes ?"
+            ),
+        )
+        if open_folder:
+            self.open_backups_folder()
+
+    def restore_database(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="Choisir une sauvegarde",
+            initialdir=str(DatabaseHelper.backups_dir),
+            filetypes=[
+                ("Bases SQLite", "*.db *.sqlite *.sqlite3 *.bak"),
+                ("Tous les fichiers", "*.*"),
+            ],
+        )
+        if not file_path:
+            return
+
+        if not messagebox.askyesno(
+            "Restaurer une sauvegarde",
+            (
+                "La restauration va remplacer les donnees actuelles.\n"
+                "Une sauvegarde de securite sera creee automatiquement avant la restauration.\n\n"
+                "Voulez-vous continuer ?"
+            ),
+        ):
+            return
+
+        try:
+            safety_backup, _ = DatabaseHelper.restore_database(file_path)
+        except Exception as exc:
+            messagebox.showerror("Restauration", str(exc))
+            return
+
+        details = f"Sauvegarde restauree depuis : {file_path}"
+        if safety_backup is not None:
+            details += f"\nSauvegarde de securite creee ici : {safety_backup}"
+
+        messagebox.showinfo(
+            "Restauration terminée",
+            details + "\n\nL'application va se fermer pour recharger les nouvelles donnees.",
+        )
+        self.root.destroy()
+
+    def open_backups_folder(self) -> None:
+        DatabaseHelper.backups_dir.mkdir(parents=True, exist_ok=True)
+        if hasattr(os, "startfile"):
+            os.startfile(str(DatabaseHelper.backups_dir))
+            return
+        webbrowser.open(DatabaseHelper.backups_dir.as_uri())
 
     def show_update_dialog(self, update_info: UpdateInfo) -> None:
         message = (

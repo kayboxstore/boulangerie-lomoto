@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -33,6 +33,7 @@ class DatabaseHelper:
         )
     ) / "BoulangerieLomoto"
     db_path = app_data_dir / "boulangerie.db"
+    backups_dir = app_data_dir / "sauvegardes"
     legacy_db_path = Path(__file__).resolve().parent.parent / "boulangerie.db"
 
     @classmethod
@@ -53,6 +54,7 @@ class DatabaseHelper:
     @classmethod
     def initialize_database(cls) -> None:
         cls.db_path.parent.mkdir(parents=True, exist_ok=True)
+        cls.backups_dir.mkdir(parents=True, exist_ok=True)
         if (
             not cls.db_path.exists()
             and cls.legacy_db_path.exists()
@@ -65,6 +67,89 @@ class DatabaseHelper:
             cls._migrate_commissions_table(connection)
             cls._insert_default_admin(connection)
             cls._insert_default_stock_config(connection)
+
+    @classmethod
+    def _timestamp_for_filename(cls) -> str:
+        return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    @classmethod
+    def build_backup_path(cls, prefix: str = "boulangerie-lomoto-backup") -> Path:
+        cls.backups_dir.mkdir(parents=True, exist_ok=True)
+        return cls.backups_dir / f"{prefix}-{cls._timestamp_for_filename()}.db"
+
+    @classmethod
+    def _validate_sqlite_database(cls, database_path: Path) -> None:
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(database_path)
+            connection.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("Le fichier selectionne n'est pas une base SQLite valide.") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @classmethod
+    def backup_database(cls, destination: Path | None = None) -> Path:
+        cls.initialize_database()
+        target_path = Path(destination) if destination is not None else cls.build_backup_path()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if target_path.resolve() == cls.db_path.resolve():
+            raise ValueError("Le fichier de sauvegarde doit etre different de la base active.")
+
+        if target_path.exists():
+            target_path.unlink()
+
+        source_connection: sqlite3.Connection | None = None
+        target_connection: sqlite3.Connection | None = None
+        try:
+            source_connection = sqlite3.connect(cls.db_path, timeout=10)
+            target_connection = sqlite3.connect(target_path, timeout=10)
+            source_connection.backup(target_connection)
+        finally:
+            if target_connection is not None:
+                target_connection.close()
+            if source_connection is not None:
+                source_connection.close()
+
+        return target_path
+
+    @classmethod
+    def restore_database(cls, source_path: str | Path) -> tuple[Path | None, Path]:
+        cls.backups_dir.mkdir(parents=True, exist_ok=True)
+        source = Path(source_path)
+        if not source.exists():
+            raise FileNotFoundError("Le fichier de sauvegarde est introuvable.")
+        if source.resolve() == cls.db_path.resolve():
+            raise ValueError("Impossible de restaurer directement la base active.")
+
+        cls._validate_sqlite_database(source)
+
+        safety_backup: Path | None = None
+        if cls.db_path.exists():
+            safety_backup = cls.backup_database(cls.build_backup_path("avant-restauration"))
+
+        source_connection: sqlite3.Connection | None = None
+        target_connection: sqlite3.Connection | None = None
+        try:
+            source_connection = sqlite3.connect(source, timeout=10)
+            target_connection = sqlite3.connect(cls.db_path, timeout=10)
+            source_connection.backup(target_connection)
+        finally:
+            if target_connection is not None:
+                target_connection.close()
+            if source_connection is not None:
+                source_connection.close()
+
+        with cls.connect() as connection:
+            cls._create_tables(connection)
+            cls._migrate_orders_table(connection)
+            cls._migrate_commissions_table(connection)
+            cls._insert_default_admin(connection)
+            cls._insert_default_stock_config(connection)
+
+        return safety_backup, cls.db_path
 
     @classmethod
     def _create_tables(cls, connection: sqlite3.Connection) -> None:
