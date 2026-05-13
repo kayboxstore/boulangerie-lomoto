@@ -121,12 +121,22 @@ def _measure_window_size(window: tk.Misc) -> tuple[int, int]:
     return window.winfo_reqwidth(), window.winfo_reqheight()
 
 
+def _measure_requested_content_size(window: tk.Misc) -> tuple[int, int]:
+    scrollable_content = getattr(window, "scrollable_content", None)
+    content = getattr(scrollable_content, "content", None)
+    if content is not None:
+        content.update_idletasks()
+        return content.winfo_reqwidth(), content.winfo_reqheight()
+    return window.winfo_reqwidth(), window.winfo_reqheight()
+
+
 def center_window(window: tk.Misc) -> None:
     window.update_idletasks()
     width, height = _measure_window_size(window)
 
-    required_width = window.winfo_reqwidth() + 24
-    required_height = window.winfo_reqheight() + 36
+    requested_width, requested_height = _measure_requested_content_size(window)
+    required_width = requested_width + 24
+    required_height = requested_height + 36
     max_width = max(int(window.winfo_screenwidth() * 0.96), 320)
     max_height = max(int(window.winfo_screenheight() * 0.92), 240)
 
@@ -226,6 +236,99 @@ class DataTable(ttk.Frame):
         if not selection:
             return None
         return self.rows_by_item.get(selection[0])
+
+
+class ScrollableContent(ttk.Frame):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        padding: int | tuple[int, int, int, int] = 0,
+        background: str | None = None,
+    ) -> None:
+        super().__init__(parent)
+        canvas_background = background
+        if canvas_background is None:
+            try:
+                canvas_background = str(parent.cget("bg"))
+            except tk.TclError:
+                canvas_background = "#eef3f8"
+
+        self.canvas = tk.Canvas(
+            self,
+            highlightthickness=0,
+            borderwidth=0,
+            background=canvas_background,
+        )
+        self.vertical_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.horizontal_scrollbar = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(
+            yscrollcommand=self._sync_vertical_scrollbar,
+            xscrollcommand=self._sync_horizontal_scrollbar,
+        )
+
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.vertical_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self.content = ttk.Frame(self.canvas, padding=padding)
+        self._content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        self.content.bind("<Configure>", self._on_content_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel, add="+")
+        self.canvas.bind("<Shift-MouseWheel>", self._on_shift_mousewheel, add="+")
+        self.after_idle(self._refresh_scroll_region)
+
+    def _on_content_configure(self, _event: tk.Event[tk.Misc]) -> None:
+        self._refresh_scroll_region()
+
+    def _on_canvas_configure(self, event: tk.Event[tk.Misc]) -> None:
+        requested_width = self.content.winfo_reqwidth()
+        target_width = event.width if requested_width <= event.width else requested_width
+        self.canvas.itemconfigure(self._content_window, width=target_width)
+        self._refresh_scroll_region()
+
+    def _refresh_scroll_region(self) -> None:
+        self.canvas.update_idletasks()
+        bbox = self.canvas.bbox(self._content_window)
+        if bbox is not None:
+            self.canvas.configure(scrollregion=bbox)
+
+    def _sync_vertical_scrollbar(self, first: str, last: str) -> None:
+        self.vertical_scrollbar.set(first, last)
+        if float(first) <= 0.0 and float(last) >= 1.0:
+            self.vertical_scrollbar.grid_remove()
+        else:
+            self.vertical_scrollbar.grid()
+
+    def _sync_horizontal_scrollbar(self, first: str, last: str) -> None:
+        self.horizontal_scrollbar.set(first, last)
+        if float(first) <= 0.0 and float(last) >= 1.0:
+            self.horizontal_scrollbar.grid_remove()
+        else:
+            self.horizontal_scrollbar.grid()
+
+    def _on_mousewheel(self, event: tk.Event[tk.Misc]) -> str | None:
+        if not self.vertical_scrollbar.winfo_ismapped():
+            return None
+        delta = event.delta
+        if delta == 0:
+            return None
+        units = -1 * int(delta / 120) if delta % 120 == 0 else (-1 if delta > 0 else 1)
+        self.canvas.yview_scroll(units, "units")
+        return "break"
+
+    def _on_shift_mousewheel(self, event: tk.Event[tk.Misc]) -> str | None:
+        if not self.horizontal_scrollbar.winfo_ismapped():
+            return None
+        delta = event.delta
+        if delta == 0:
+            return None
+        units = -1 * int(delta / 120) if delta % 120 == 0 else (-1 if delta > 0 else 1)
+        self.canvas.xview_scroll(units, "units")
+        return "break"
 
 
 class LoginWindow(ttk.Frame):
@@ -354,6 +457,9 @@ class DashboardWindow(tk.Toplevel):
         self.minsize(860, 520)
         self.configure(bg="#dfeaf4")
         self.protocol("WM_DELETE_WINDOW", self.on_close_app)
+        self.scrollable_content = ScrollableContent(self, padding=20, background="#dfeaf4")
+        self.scrollable_content.pack(fill="both", expand=True)
+        self.body = self.scrollable_content.content
         self.build_ui()
         self.refresh_summary()
         center_window(self)
@@ -361,8 +467,7 @@ class DashboardWindow(tk.Toplevel):
         self.after(1000, self.start_weekly_update_check)
 
     def build_ui(self) -> None:
-        container = ttk.Frame(self, padding=20)
-        container.pack(fill="both", expand=True)
+        container = self.body
 
         ttk.Label(
             container,
@@ -700,6 +805,9 @@ class BaseModuleWindow(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
+        self.scrollable_content = ScrollableContent(self, padding=16, background="#eef3f8")
+        self.scrollable_content.pack(fill="both", expand=True)
+        self.body = self.scrollable_content.content
         self.after(0, lambda: center_window(self))
 
     def close_window(self) -> None:
@@ -723,8 +831,7 @@ class ChangePasswordWindow(BaseModuleWindow):
         self.build_ui()
 
     def build_ui(self) -> None:
-        container = ttk.Frame(self, padding=16)
-        container.pack(fill="both", expand=True)
+        container = self.body
 
         ttk.Label(container, text="Changer mon mot de passe", style="Header.TLabel").pack(pady=(0, 14))
 
@@ -828,8 +935,7 @@ class UsersWindow(BaseModuleWindow):
         self.refresh_users()
 
     def build_ui(self) -> None:
-        container = ttk.Frame(self, padding=16)
-        container.pack(fill="both", expand=True)
+        container = self.body
 
         ttk.Label(container, text="Gestion des utilisateurs", style="Header.TLabel").pack(pady=(0, 14))
 
@@ -1001,8 +1107,7 @@ class StockWindow(BaseModuleWindow):
             self.show_opening_message()
 
     def build_ui(self) -> None:
-        container = ttk.Frame(self, padding=16)
-        container.pack(fill="both", expand=True)
+        container = self.body
         ttk.Label(container, text="Gestion du stock", style="Header.TLabel").pack(pady=(0, 12))
 
         info_frame = ttk.LabelFrame(container, text="Stock du jour", style="Card.TLabelframe")
@@ -1288,8 +1393,7 @@ class OrdersWindow(BaseModuleWindow):
         self.refresh_orders()
 
     def build_ui(self) -> None:
-        container = ttk.Frame(self, padding=16)
-        container.pack(fill="both", expand=True)
+        container = self.body
         ttk.Label(container, text="Gestion des commandes", style="Header.TLabel").pack(pady=(0, 12))
 
         content = ttk.Frame(container)
@@ -1648,8 +1752,7 @@ class CashWindow(BaseModuleWindow):
         self.refresh_data()
 
     def build_ui(self) -> None:
-        container = ttk.Frame(self, padding=16)
-        container.pack(fill="both", expand=True)
+        container = self.body
         ttk.Label(container, text="Gestion de la caisse", style="Header.TLabel").pack(pady=(0, 12))
 
         content = ttk.Frame(container)
@@ -1916,8 +2019,7 @@ class CommissionsWindow(BaseModuleWindow):
         self.refresh_commissions()
 
     def build_ui(self) -> None:
-        container = ttk.Frame(self, padding=16)
-        container.pack(fill="both", expand=True)
+        container = self.body
         ttk.Label(container, text="Gestion des commissions", style="Header.TLabel").pack(pady=(0, 12))
 
         content = ttk.Frame(container)
