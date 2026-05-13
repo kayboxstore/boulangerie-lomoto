@@ -103,28 +103,41 @@ def format_number(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
-def center_window(window: tk.Misc) -> None:
-    window.update_idletasks()
+def _measure_window_size(window: tk.Misc) -> tuple[int, int]:
     width = window.winfo_width()
     height = window.winfo_height()
 
-    if width <= 1 or height <= 1:
-        geometry = str(window.winfo_geometry()).split("+")[0]
-        if "x" in geometry:
-            width_text, height_text = geometry.split("x", 1)
-            try:
-                width = int(width_text)
-                height = int(height_text)
-            except ValueError:
-                width = window.winfo_reqwidth()
-                height = window.winfo_reqheight()
-        else:
-            width = window.winfo_reqwidth()
-            height = window.winfo_reqheight()
+    if width > 1 and height > 1:
+        return width, height
+
+    geometry = str(window.winfo_geometry()).split("+")[0]
+    if "x" in geometry:
+        width_text, height_text = geometry.split("x", 1)
+        try:
+            return int(width_text), int(height_text)
+        except ValueError:
+            pass
+
+    return window.winfo_reqwidth(), window.winfo_reqheight()
+
+
+def center_window(window: tk.Misc) -> None:
+    window.update_idletasks()
+    width, height = _measure_window_size(window)
+
+    required_width = window.winfo_reqwidth() + 24
+    required_height = window.winfo_reqheight() + 36
+    max_width = max(int(window.winfo_screenwidth() * 0.96), 320)
+    max_height = max(int(window.winfo_screenheight() * 0.92), 240)
+
+    width = min(max(width, required_width), max_width)
+    height = min(max(height, required_height), max_height)
 
     x = max((window.winfo_screenwidth() - width) // 2, 0)
     y = max((window.winfo_screenheight() - height) // 2, 0)
     window.geometry(f"{width}x{height}+{x}+{y}")
+    if hasattr(window, "minsize"):
+        window.minsize(width, height)
 
 
 class DateField(ttk.Frame):
