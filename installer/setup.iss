@@ -1,5 +1,5 @@
 #define MyAppName "Boulangerie Lomoto"
-#define MyAppVersion "1.0.3"
+#define MyAppVersion "1.0.4"
 #define MyAppPublisher "Kay Box Store"
 #define MyAppExeName "Boulangerie Lomoto.exe"
 #define MyAppIdEscaped "{{D8D3424B-4C91-4C10-A7F5-84AB2F483F11}"

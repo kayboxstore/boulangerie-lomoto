@@ -9,7 +9,7 @@ from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable
 
 from .database import AuthenticatedUser, DatabaseHelper
-from .updater import UpdateCheckResult, UpdateChecker, UpdateInfo
+from .updater import SessionNotice, UpdateCheckResult, UpdateChecker, UpdateInfo
 from .version import APP_NAME, APP_VERSION
 
 
@@ -39,13 +39,14 @@ COMMISSION_FILTERS = [
 
 def run_app() -> None:
     DatabaseHelper.initialize_database()
+    post_update_notice = UpdateChecker.consume_post_update_notice()
     root = tk.Tk()
     root.title(f"{APP_NAME} - Connexion - v{APP_VERSION}")
     root.geometry("580x380")
     root.minsize(580, 380)
     root.configure(bg="#dfeaf4")
     configure_styles()
-    LoginWindow(root)
+    LoginWindow(root, post_update_notice)
     center_window(root)
     root.mainloop()
 
@@ -214,9 +215,11 @@ class DataTable(ttk.Frame):
 
 
 class LoginWindow(ttk.Frame):
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, post_update_notice: SessionNotice | None = None) -> None:
         super().__init__(root, padding=24)
         self.root = root
+        self.post_update_notice = post_update_notice
+        self.notice_label: ttk.Label | None = None
         self.pack(fill="both", expand=True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
         self.build_ui()
@@ -233,33 +236,45 @@ class LoginWindow(ttk.Frame):
             row=1, column=0, columnspan=2, pady=(0, 12)
         )
 
-        ttk.Label(card, text="Edition stable 1.0.3", foreground="#1f6f43").grid(
-            row=2, column=0, columnspan=2, pady=(0, 10)
-        )
+        row_index = 2
+        if self.post_update_notice is not None and self.post_update_notice.remaining_ms() > 0:
+            self.notice_label = ttk.Label(
+                card,
+                text=self.post_update_notice.message,
+                foreground=self.post_update_notice.foreground,
+                justify="center",
+                wraplength=360,
+            )
+            self.notice_label.grid(row=row_index, column=0, columnspan=2, pady=(0, 10))
+            self.after(self.post_update_notice.remaining_ms(), self.hide_notice)
+            row_index += 1
 
-        ttk.Label(card, text="Identifiant").grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Label(card, text="Identifiant").grid(row=row_index, column=0, sticky="w", pady=6)
         self.user_var = tk.StringVar()
         user_entry = ttk.Entry(card, textvariable=self.user_var, width=30)
-        user_entry.grid(row=3, column=1, sticky="ew", pady=6)
+        user_entry.grid(row=row_index, column=1, sticky="ew", pady=6)
+        row_index += 1
 
-        ttk.Label(card, text="Mot de passe").grid(row=4, column=0, sticky="w", pady=6)
+        ttk.Label(card, text="Mot de passe").grid(row=row_index, column=0, sticky="w", pady=6)
         self.password_var = tk.StringVar()
         self.password_entry = ttk.Entry(card, textvariable=self.password_var, width=30, show="*")
-        self.password_entry.grid(row=4, column=1, sticky="ew", pady=6)
+        self.password_entry.grid(row=row_index, column=1, sticky="ew", pady=6)
+        row_index += 1
 
         button_row = ttk.Frame(card)
-        button_row.grid(row=5, column=0, columnspan=2, pady=(14, 0))
+        button_row.grid(row=row_index, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(button_row, text="Connexion", style="Primary.TButton", command=self.login).grid(
             row=0, column=0, padx=6
         )
         ttk.Button(button_row, text="Quitter", command=self.on_quit).grid(row=0, column=1, padx=6)
+        row_index += 1
 
         hint = ttk.Label(
             card,
             text="Compte par défaut disponible : identifiant admin",
             foreground="#444444",
         )
-        hint.grid(row=6, column=0, columnspan=2, pady=(14, 0))
+        hint.grid(row=row_index, column=0, columnspan=2, pady=(14, 0))
 
         card.columnconfigure(1, weight=1)
         user_entry.focus()
@@ -286,8 +301,14 @@ class LoginWindow(ttk.Frame):
         self.user_var.set("")
         self.password_var.set("")
         self.root.withdraw()
-        dashboard = DashboardWindow(self.root, user, self.show_login)
+        dashboard = DashboardWindow(self.root, user, self.show_login, self.post_update_notice)
         self.root.wait_window(dashboard)
+
+    def hide_notice(self) -> None:
+        if self.notice_label is None:
+            return
+        self.notice_label.destroy()
+        self.notice_label = None
 
     def show_login(self) -> None:
         self.root.deiconify()
@@ -304,11 +325,14 @@ class DashboardWindow(tk.Toplevel):
         root: tk.Tk,
         user: AuthenticatedUser,
         on_logout: Callable[[], None],
+        post_update_notice: SessionNotice | None = None,
     ) -> None:
         super().__init__(root)
         self.root = root
         self.user = user
         self.on_logout_callback = on_logout
+        self.post_update_notice = post_update_notice
+        self.notice_label: ttk.Label | None = None
         self.update_result_queue: Queue[UpdateCheckResult] = Queue()
         self.update_check_running = False
         self.title(f"{APP_NAME} - Tableau de bord - v{APP_VERSION}")
@@ -338,11 +362,16 @@ class DashboardWindow(tk.Toplevel):
             foreground="#5a6570",
         ).pack(anchor="center", pady=(0, 12))
 
-        ttk.Label(
-            container,
-            text="Edition stable 1.0.3 : mise a jour fiabilisee",
-            foreground="#1f6f43",
-        ).pack(anchor="center", pady=(0, 14))
+        if self.post_update_notice is not None and self.post_update_notice.remaining_ms() > 0:
+            self.notice_label = ttk.Label(
+                container,
+                text=self.post_update_notice.message,
+                foreground=self.post_update_notice.foreground,
+                justify="center",
+                wraplength=540,
+            )
+            self.notice_label.pack(anchor="center", pady=(0, 14))
+            self.after(self.post_update_notice.remaining_ms(), self.hide_notice)
 
         grid = ttk.Frame(container)
         grid.pack(fill="x")
@@ -377,6 +406,12 @@ class DashboardWindow(tk.Toplevel):
         ttk.Button(actions, text="Quitter", command=self.on_close_app).grid(row=0, column=1, padx=8)
 
         self.apply_permissions()
+
+    def hide_notice(self) -> None:
+        if self.notice_label is None:
+            return
+        self.notice_label.destroy()
+        self.notice_label = None
 
     def apply_permissions(self) -> None:
         if self.user.role == "Admin":

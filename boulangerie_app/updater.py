@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from itertools import zip_longest
 from pathlib import Path
 from queue import Queue
+from time import monotonic
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -33,9 +34,35 @@ class UpdateCheckResult:
     error_message: str = ""
 
 
+@dataclass
+class SessionNotice:
+    message: str
+    duration_ms: int = 60_000
+    foreground: str = "#1f6f43"
+    expires_at: float = 0.0
+
+    @classmethod
+    def create(
+        cls,
+        message: str,
+        duration_ms: int = 60_000,
+        foreground: str = "#1f6f43",
+    ) -> "SessionNotice":
+        return cls(
+            message=message,
+            duration_ms=duration_ms,
+            foreground=foreground,
+            expires_at=monotonic() + (duration_ms / 1000),
+        )
+
+    def remaining_ms(self) -> int:
+        return max(int((self.expires_at - monotonic()) * 1000), 0)
+
+
 class UpdateChecker:
     state_path = DatabaseHelper.app_data_dir / "update_state.json"
     config_path = DatabaseHelper.app_data_dir / "update_config.json"
+    app_state_path = DatabaseHelper.app_data_dir / "app_state.json"
 
     @classmethod
     def ensure_config_file(cls) -> None:
@@ -105,6 +132,41 @@ class UpdateChecker:
         cls.state_path.write_text(
             json.dumps(state, indent=2, ensure_ascii=True),
             encoding="utf-8",
+        )
+
+    @classmethod
+    def load_app_state(cls) -> dict[str, Any]:
+        if not cls.app_state_path.exists():
+            return {}
+        try:
+            return json.loads(cls.app_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    @classmethod
+    def save_app_state(cls, state: dict[str, Any]) -> None:
+        cls.app_state_path.parent.mkdir(parents=True, exist_ok=True)
+        cls.app_state_path.write_text(
+            json.dumps(state, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+    @classmethod
+    def consume_post_update_notice(cls) -> SessionNotice | None:
+        state = cls.load_app_state()
+        previous_version = str(state.get("last_started_version") or "").strip()
+        state["last_started_version"] = APP_VERSION
+        cls.save_app_state(state)
+
+        if not previous_version or previous_version == APP_VERSION:
+            return None
+
+        if not cls.is_newer_version(APP_VERSION, previous_version):
+            return None
+
+        return SessionNotice.create(
+            f"Mise a jour reussie : vous utilisez maintenant la version {APP_VERSION} "
+            f"(ancienne version : {previous_version})."
         )
 
     @classmethod
