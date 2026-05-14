@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from queue import Empty, Queue
 import tkinter as tk
@@ -12,9 +13,12 @@ from typing import Any, Callable
 
 from .connected_mode import (
     ConnectionSettings,
+    DiscoveredServerInfo,
     REMOTE_DEFAULT_PORT,
+    REMOTE_DISCOVERY_TIMEOUT_SECONDS,
     REMOTE_REFRESH_INTERVAL_MS,
     RemoteDatabaseClient,
+    discover_remote_servers,
 )
 from .connected_server import (
     get_embedded_server_status,
@@ -391,9 +395,12 @@ class LoginWindow(ttk.Frame):
         self.root = root
         self.post_update_notice = post_update_notice
         self.notice_label: ttk.Label | None = None
+        self.discovery_queue: Queue[tuple[str, Any, bool]] = Queue()
+        self.discovery_in_progress = False
         self.pack(fill="both", expand=True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
         self.build_ui()
+        self.after(300, self.auto_discover_server_if_needed)
 
     def build_ui(self) -> None:
         card = ttk.LabelFrame(self, text="Connexion", style="Card.TLabelframe", padding=18)
@@ -450,6 +457,9 @@ class LoginWindow(ttk.Frame):
         ttk.Button(button_row, text="Parametres reseau", command=self.open_connection_settings).grid(
             row=0, column=2, padx=6
         )
+        ttk.Button(button_row, text="Detecter le serveur", command=self.detect_server_now).grid(
+            row=0, column=3, padx=6
+        )
         row_index += 1
 
         hint = ttk.Label(
@@ -471,6 +481,93 @@ class LoginWindow(ttk.Frame):
         dialog = ConnectionSettingsDialog(self)
         self.wait_window(dialog)
         self.refresh_connection_status()
+
+    def auto_discover_server_if_needed(self) -> None:
+        settings = DatabaseHelper.get_connection_settings()
+        if settings.normalized_mode() == "remote" and not settings.normalized_url():
+            self.start_server_discovery(auto_apply=True)
+
+    def detect_server_now(self) -> None:
+        self.start_server_discovery(auto_apply=False)
+
+    def start_server_discovery(self, auto_apply: bool) -> None:
+        if self.discovery_in_progress:
+            return
+
+        self.discovery_in_progress = True
+        self.connection_status_var.set("Recherche automatique du serveur central sur le reseau local...")
+
+        def worker() -> None:
+            try:
+                servers = discover_remote_servers(timeout_seconds=REMOTE_DISCOVERY_TIMEOUT_SECONDS)
+                self.discovery_queue.put(("ok", servers, auto_apply))
+            except Exception as exc:
+                self.discovery_queue.put(("error", [str(exc)], auto_apply))
+
+        threading.Thread(target=worker, name="boulangerie-auto-discovery", daemon=True).start()
+        self.after(200, self.poll_server_discovery_results)
+
+    def poll_server_discovery_results(self) -> None:
+        try:
+            item = self.discovery_queue.get_nowait()
+        except Empty:
+            if self.discovery_in_progress:
+                self.after(200, self.poll_server_discovery_results)
+            return
+
+        self.discovery_in_progress = False
+        status = str(item[0])
+        auto_apply = bool(item[2])
+
+        if status == "error":
+            self.refresh_connection_status()
+            if not auto_apply:
+                messagebox.showwarning("Recherche automatique", str(item[1][0]))
+            return
+
+        servers = item[1]
+        if not isinstance(servers, list):
+            servers = []
+
+        if not servers:
+            self.refresh_connection_status()
+            if not auto_apply:
+                messagebox.showinfo(
+                    "Recherche automatique",
+                    "Aucun serveur central n'a ete detecte automatiquement sur le reseau local.",
+                )
+            return
+
+        selected_server = servers[0]
+        settings = DatabaseHelper.get_connection_settings()
+        updated_settings = ConnectionSettings(
+            mode="remote",
+            server_url=selected_server.server_url,
+            api_token=settings.api_token,
+        )
+        DatabaseHelper.save_connection_settings(updated_settings)
+        self.refresh_connection_status()
+
+        if auto_apply:
+            self.connection_status_var.set(
+                f"Serveur detecte automatiquement : {selected_server.server_name} - {selected_server.server_url}"
+            )
+            return
+
+        extra = ""
+        if len(servers) > 1:
+            extra = f"\n\n{len(servers)} serveurs ont ete detectes. Le premier a ete preselectionne."
+        token_line = "\nJeton requis." if selected_server.token_required else "\nAucun jeton requis."
+        messagebox.showinfo(
+            "Recherche automatique",
+            (
+                "Serveur central detecte automatiquement :\n"
+                f"{selected_server.server_name}\n"
+                f"{selected_server.server_url}"
+                f"{token_line}"
+                f"{extra}"
+            ),
+        )
 
     def login(self) -> None:
         identifiant = self.user_var.get().strip()
@@ -537,6 +634,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.build_ui()
         self.refresh_server_status()
         self.update_mode_fields()
+        self.after(250, self.auto_discover_if_needed)
         self.after(0, lambda: center_window(self))
 
     def build_ui(self) -> None:
@@ -585,8 +683,13 @@ class ConnectionSettingsDialog(tk.Toplevel):
         ttk.Button(remote_actions, text="Tester la connexion", command=self.test_connection).grid(
             row=0, column=0, padx=6
         )
+        ttk.Button(
+            remote_actions,
+            text="Rechercher automatiquement",
+            command=self.discover_servers_automatically,
+        ).grid(row=0, column=1, padx=6)
         ttk.Button(remote_actions, text="Utiliser l'adresse locale du serveur", command=self.use_local_server_url).grid(
-            row=0, column=1, padx=6
+            row=0, column=2, padx=6
         )
         remote_frame.columnconfigure(1, weight=1)
 
@@ -643,6 +746,10 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.server_url_entry.state([target_state])
         self.api_token_entry.state([target_state])
 
+    def auto_discover_if_needed(self) -> None:
+        if self.mode_var.get().strip().lower() == "remote" and not self.server_url_var.get().strip():
+            self.discover_servers_automatically(silent=True)
+
     def refresh_server_status(self) -> None:
         handle = get_embedded_server_status()
         if handle is None:
@@ -693,6 +800,35 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.message_var.set(
             f"Connexion reussie avec le serveur central sur le port {server_port}."
         )
+
+    def discover_servers_automatically(self, silent: bool = False) -> None:
+        self.message_var.set("Recherche automatique des serveurs centraux en cours...")
+        servers = discover_remote_servers(timeout_seconds=REMOTE_DISCOVERY_TIMEOUT_SECONDS)
+        if not servers:
+            self.message_var.set("Aucun serveur central n'a ete detecte automatiquement sur le reseau local.")
+            return
+
+        selected_server = servers[0]
+        self.mode_var.set("remote")
+        self.update_mode_fields()
+        self.server_url_var.set(selected_server.server_url)
+
+        extra = ""
+        if len(servers) > 1:
+            extra = f" {len(servers)} serveurs ont ete trouves. Le premier a ete preselectionne."
+
+        token_hint = (
+            " Ce serveur demande un jeton d'acces."
+            if selected_server.token_required and not self.api_token_var.get().strip()
+            else ""
+        )
+        message = (
+            f"Serveur detecte : {selected_server.server_name} - {selected_server.server_url}."
+            f"{token_hint}{extra}"
+        )
+        self.message_var.set(message)
+        if not silent:
+            messagebox.showinfo("Recherche automatique", message)
 
     def toggle_local_server(self) -> None:
         if is_embedded_server_running():

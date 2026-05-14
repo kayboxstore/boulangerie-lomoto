@@ -10,8 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from .connected_mode import (
+    DISCOVERY_APP_ID,
+    DISCOVERY_REQUEST_ACTION,
+    DISCOVERY_RESPONSE_ACTION,
     REMOTE_DATABASE_METHODS,
     REMOTE_DEFAULT_PORT,
+    REMOTE_DISCOVERY_PORT,
     deserialize_value,
     serialize_value,
 )
@@ -26,6 +30,8 @@ class EmbeddedServerHandle:
     port: int
     api_token: str
     urls: list[str]
+    discovery_thread: threading.Thread | None = None
+    discovery_stop_event: threading.Event | None = None
 
     @property
     def preferred_url(self) -> str:
@@ -34,8 +40,12 @@ class EmbeddedServerHandle:
         return f"http://127.0.0.1:{self.port}"
 
     def stop(self) -> None:
+        if self.discovery_stop_event is not None:
+            self.discovery_stop_event.set()
         self.server.shutdown()
         self.server.server_close()
+        if self.discovery_thread is not None:
+            self.discovery_thread.join(timeout=5)
         self.thread.join(timeout=5)
 
 
@@ -161,6 +171,59 @@ def list_local_server_urls(port: int) -> list[str]:
     return urls
 
 
+def _run_discovery_listener(
+    stop_event: threading.Event,
+    server_port: int,
+    api_token: str,
+) -> None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.bind(("", REMOTE_DISCOVERY_PORT))
+            sock.settimeout(1.0)
+
+            while not stop_event.is_set():
+                try:
+                    payload_bytes, source_address = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+
+                try:
+                    payload = json.loads(payload_bytes.decode("utf-8-sig"))
+                except ValueError:
+                    continue
+
+                if not isinstance(payload, dict):
+                    continue
+                if str(payload.get("app", "")) != DISCOVERY_APP_ID:
+                    continue
+                if str(payload.get("action", "")) != DISCOVERY_REQUEST_ACTION:
+                    continue
+
+                response_payload = json.dumps(
+                    {
+                        "app": DISCOVERY_APP_ID,
+                        "action": DISCOVERY_RESPONSE_ACTION,
+                        "server_name": socket.gethostname(),
+                        "app_name": APP_NAME,
+                        "app_version": APP_VERSION,
+                        "server_port": server_port,
+                        "token_required": bool(api_token.strip()),
+                    },
+                    ensure_ascii=True,
+                ).encode("utf-8")
+
+                try:
+                    sock.sendto(response_payload, source_address)
+                except OSError:
+                    continue
+    except OSError:
+        return
+
+
 def is_embedded_server_running() -> bool:
     return _embedded_server_handle is not None
 
@@ -191,6 +254,15 @@ def start_embedded_server(
     thread = threading.Thread(target=server.serve_forever, name="boulangerie-sync-server", daemon=True)
     thread.start()
 
+    discovery_stop_event = threading.Event()
+    discovery_thread = threading.Thread(
+        target=_run_discovery_listener,
+        args=(discovery_stop_event, port, api_token.strip()),
+        name="boulangerie-sync-discovery",
+        daemon=True,
+    )
+    discovery_thread.start()
+
     _embedded_server_handle = EmbeddedServerHandle(
         server=server,
         thread=thread,
@@ -198,6 +270,8 @@ def start_embedded_server(
         port=port,
         api_token=api_token.strip(),
         urls=list_local_server_urls(port),
+        discovery_thread=discovery_thread,
+        discovery_stop_event=discovery_stop_event,
     )
     return _embedded_server_handle
 

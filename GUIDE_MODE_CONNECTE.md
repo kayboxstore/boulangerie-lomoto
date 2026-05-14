@@ -35,16 +35,22 @@ Sur chaque autre poste :
 1. Ouvrez l'application
 2. Cliquez sur `Parametres reseau`
 3. Choisissez `Mode connecte au serveur central`
-4. Collez l'adresse du serveur, par exemple :
+4. Cliquez d'abord sur `Rechercher automatiquement`
+5. Si un seul serveur est trouve, son adresse sera remplie automatiquement
+6. Sinon, collez l'adresse du serveur, par exemple :
 
 ```text
 http://192.168.1.10:8765
 ```
 
-5. Si vous utilisez un jeton, saisissez-le aussi
-6. Cliquez sur `Tester la connexion`
-7. Cliquez sur `Enregistrer`
-8. Connectez-vous normalement
+7. Si vous utilisez un jeton, saisissez-le aussi
+8. Cliquez sur `Tester la connexion`
+9. Cliquez sur `Enregistrer`
+10. Connectez-vous normalement
+
+Alternative rapide :
+
+- depuis l'ecran de connexion, le bouton `Detecter le serveur` permet aussi de retrouver automatiquement l'adresse du serveur central
 
 ## Variante avec serveur dedie
 

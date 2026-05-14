@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import time
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -10,8 +12,13 @@ from urllib.request import Request, urlopen
 
 
 REMOTE_DEFAULT_PORT = 8765
+REMOTE_DISCOVERY_PORT = 8766
+REMOTE_DISCOVERY_TIMEOUT_SECONDS = 1.8
 REMOTE_REFRESH_INTERVAL_MS = 5000
 CONNECTION_CONFIG_FILENAME = "connection_settings.json"
+DISCOVERY_APP_ID = "boulangerie-lomoto-sync"
+DISCOVERY_REQUEST_ACTION = "discover_server"
+DISCOVERY_RESPONSE_ACTION = "server_available"
 
 REMOTE_DATABASE_METHODS = {
     "find_user_for_login",
@@ -66,6 +73,20 @@ REMOTE_DATABASE_METHODS = {
 
 class RemoteDatabaseError(RuntimeError):
     pass
+
+
+@dataclass
+class DiscoveredServerInfo:
+    server_url: str
+    server_name: str
+    app_version: str
+    token_required: bool = False
+    raw_address: str = ""
+
+    @property
+    def label(self) -> str:
+        suffix = " - jeton requis" if self.token_required else ""
+        return f"{self.server_name} - {self.server_url}{suffix}"
 
 
 @dataclass
@@ -126,6 +147,83 @@ def save_connection_settings(app_data_dir: Path, settings: ConnectionSettings) -
         encoding="utf-8",
     )
     return config_path
+
+
+def discover_remote_servers(
+    timeout_seconds: float = REMOTE_DISCOVERY_TIMEOUT_SECONDS,
+    discovery_port: int = REMOTE_DISCOVERY_PORT,
+) -> list[DiscoveredServerInfo]:
+    request_payload = json.dumps(
+        {
+            "app": DISCOVERY_APP_ID,
+            "action": DISCOVERY_REQUEST_ACTION,
+        },
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+    discovered: dict[tuple[str, int], DiscoveredServerInfo] = {}
+    deadline = time.monotonic() + max(timeout_seconds, 0.3)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.settimeout(0.35)
+            sock.bind(("", 0))
+
+            for target in (("255.255.255.255", discovery_port), ("127.0.0.1", discovery_port)):
+                try:
+                    sock.sendto(request_payload, target)
+                except OSError:
+                    continue
+
+            while time.monotonic() < deadline:
+                try:
+                    raw_payload, source_address = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+
+                try:
+                    payload = json.loads(raw_payload.decode("utf-8-sig"))
+                except ValueError:
+                    continue
+
+                if not isinstance(payload, dict):
+                    continue
+                if str(payload.get("app", "")) != DISCOVERY_APP_ID:
+                    continue
+                if str(payload.get("action", "")) != DISCOVERY_RESPONSE_ACTION:
+                    continue
+
+                server_port = int(payload.get("server_port", REMOTE_DEFAULT_PORT) or REMOTE_DEFAULT_PORT)
+                source_ip = str(source_address[0] or "")
+                if not source_ip:
+                    continue
+
+                server_name = str(payload.get("server_name", source_ip))
+                server_url = f"http://{source_ip}:{server_port}"
+                discovered_info = DiscoveredServerInfo(
+                    server_url=server_url,
+                    server_name=server_name,
+                    app_version=str(payload.get("app_version", "")),
+                    token_required=bool(payload.get("token_required", False)),
+                    raw_address=source_ip,
+                )
+                discovered_key = (server_name.lower(), server_port)
+                existing_info = discovered.get(discovered_key)
+                if existing_info is None:
+                    discovered[discovered_key] = discovered_info
+                    continue
+
+                existing_is_loopback = existing_info.raw_address.startswith("127.")
+                current_is_loopback = discovered_info.raw_address.startswith("127.")
+                if existing_is_loopback and not current_is_loopback:
+                    discovered[discovered_key] = discovered_info
+    except OSError:
+        return []
+
+    return sorted(discovered.values(), key=lambda item: (item.server_name.lower(), item.server_url.lower()))
 
 
 def serialize_value(value: Any) -> Any:
