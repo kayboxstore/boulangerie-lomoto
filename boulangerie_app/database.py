@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import os
 import secrets
 import shutil
 import sqlite3
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterator
+
+from .connected_mode import (
+    REMOTE_DATABASE_METHODS,
+    ConnectionSettings,
+    RemoteDatabaseClient,
+    load_connection_settings,
+    save_connection_settings,
+)
 
 
 DB_DATE_FORMAT = "%Y-%m-%d"
@@ -29,14 +39,125 @@ class AuthenticatedUser:
 class DatabaseHelper:
     app_data_dir = Path(
         os.environ.get(
-            "LOCALAPPDATA",
-            str(Path.home() / "AppData" / "Local"),
+            "BOULANGERIE_APPDATA_DIR",
+            str(
+                Path(
+                    os.environ.get(
+                        "LOCALAPPDATA",
+                        str(Path.home() / "AppData" / "Local"),
+                    )
+                )
+                / "BoulangerieLomoto"
+            ),
         )
-    ) / "BoulangerieLomoto"
+    )
     db_path = app_data_dir / "boulangerie.db"
     backups_dir = app_data_dir / "sauvegardes"
     reports_dir = app_data_dir / "rapports"
     legacy_db_path = Path(__file__).resolve().parent.parent / "boulangerie.db"
+    _connection_settings = ConnectionSettings()
+    _connection_settings_loaded = False
+    _remote_client: RemoteDatabaseClient | None = None
+    _execution_context = threading.local()
+
+    @classmethod
+    def set_storage_root(cls, base_dir: Path) -> None:
+        cls.app_data_dir = Path(base_dir)
+        cls.db_path = cls.app_data_dir / "boulangerie.db"
+        cls.backups_dir = cls.app_data_dir / "sauvegardes"
+        cls.reports_dir = cls.app_data_dir / "rapports"
+        cls.reload_connection_settings()
+
+    @classmethod
+    def apply_connection_settings(cls, settings: ConnectionSettings, persist: bool = False) -> None:
+        normalized_settings = ConnectionSettings(
+            mode=settings.normalized_mode(),
+            server_url=settings.normalized_url(),
+            api_token=settings.api_token.strip(),
+        )
+        if persist:
+            save_connection_settings(cls.app_data_dir, normalized_settings)
+        cls._connection_settings = normalized_settings
+        cls._connection_settings_loaded = True
+        cls._remote_client = (
+            RemoteDatabaseClient(
+                normalized_settings.normalized_url(),
+                api_token=normalized_settings.api_token,
+            )
+            if normalized_settings.is_remote()
+            else None
+        )
+
+    @classmethod
+    def reload_connection_settings(cls) -> ConnectionSettings:
+        cls._connection_settings_loaded = False
+        cls._remote_client = None
+        return cls.get_connection_settings()
+
+    @classmethod
+    def get_connection_settings(cls) -> ConnectionSettings:
+        if not cls._connection_settings_loaded:
+            settings = load_connection_settings(cls.app_data_dir)
+            cls.apply_connection_settings(settings, persist=False)
+        return ConnectionSettings(
+            mode=cls._connection_settings.mode,
+            server_url=cls._connection_settings.server_url,
+            api_token=cls._connection_settings.api_token,
+        )
+
+    @classmethod
+    def save_connection_settings(cls, settings: ConnectionSettings) -> Path:
+        cls.apply_connection_settings(settings, persist=True)
+        return cls.app_data_dir / "connection_settings.json"
+
+    @classmethod
+    def is_remote_mode(cls) -> bool:
+        return cls._should_use_remote()
+
+    @classmethod
+    def get_connection_status_text(cls) -> str:
+        settings = cls.get_connection_settings()
+        if settings.is_remote():
+            return f"Mode connecte - Serveur central : {settings.normalized_url()}"
+        return "Mode local - donnees stockees sur ce poste"
+
+    @classmethod
+    @contextmanager
+    def local_calls_only(cls) -> Iterator[None]:
+        previous = bool(getattr(cls._execution_context, "force_local", False))
+        cls._execution_context.force_local = True
+        try:
+            yield
+        finally:
+            cls._execution_context.force_local = previous
+
+    @classmethod
+    def invoke_local_method(cls, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        with cls.local_calls_only():
+            return getattr(cls, method_name)(*args, **kwargs)
+
+    @classmethod
+    def _should_use_remote(cls) -> bool:
+        if bool(getattr(cls._execution_context, "force_local", False)):
+            return False
+        settings = cls.get_connection_settings()
+        return settings.is_remote() and cls._remote_client is not None
+
+    @classmethod
+    def _remote_call(cls, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        if cls._remote_client is None:
+            raise RuntimeError("Le client distant n'est pas initialise.")
+
+        result = cls._remote_client.call(method_name, *args, **kwargs)
+        if method_name == "find_user_for_login" and result:
+            if not isinstance(result, dict):
+                raise RuntimeError("La reponse du serveur central pour la connexion est invalide.")
+            result.pop("__remote_dataclass__", None)
+            return AuthenticatedUser(
+                identifiant=str(result.get("identifiant", "")),
+                role=str(result.get("role", "")),
+            )
+        return result
 
     @classmethod
     @contextmanager
@@ -44,6 +165,7 @@ class DatabaseHelper:
         connection = sqlite3.connect(cls.db_path, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 10000")
         try:
             yield connection
             connection.commit()
@@ -55,6 +177,16 @@ class DatabaseHelper:
 
     @classmethod
     def initialize_database(cls) -> None:
+        if cls._should_use_remote():
+            cls.app_data_dir.mkdir(parents=True, exist_ok=True)
+            cls.backups_dir.mkdir(parents=True, exist_ok=True)
+            cls.reports_dir.mkdir(parents=True, exist_ok=True)
+            return
+
+        cls.initialize_local_database()
+
+    @classmethod
+    def initialize_local_database(cls) -> None:
         cls.db_path.parent.mkdir(parents=True, exist_ok=True)
         cls.backups_dir.mkdir(parents=True, exist_ok=True)
         cls.reports_dir.mkdir(parents=True, exist_ok=True)
@@ -70,6 +202,7 @@ class DatabaseHelper:
             cls._migrate_commissions_table(connection)
             cls._insert_default_admin(connection)
             cls._insert_default_stock_config(connection)
+            connection.execute("PRAGMA journal_mode = WAL")
 
     @classmethod
     def _timestamp_for_filename(cls) -> str:
@@ -113,6 +246,10 @@ class DatabaseHelper:
 
     @classmethod
     def backup_database(cls, destination: Path | None = None) -> Path:
+        if cls._should_use_remote():
+            raise RuntimeError(
+                "Les sauvegardes locales sont desactivees en mode connecte. Utilisez le poste serveur central."
+            )
         cls.initialize_database()
         target_path = Path(destination) if destination is not None else cls.build_backup_path()
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +276,10 @@ class DatabaseHelper:
 
     @classmethod
     def restore_database(cls, source_path: str | Path) -> tuple[Path | None, Path]:
+        if cls._should_use_remote():
+            raise RuntimeError(
+                "La restauration locale est desactivee en mode connecte. Utilisez le poste serveur central."
+            )
         cls.backups_dir.mkdir(parents=True, exist_ok=True)
         source = Path(source_path)
         if not source.exists():
@@ -1366,3 +1507,29 @@ class DatabaseHelper:
         with cls.connect() as connection:
             cursor = connection.execute(sql, params)
             return cursor.rowcount
+
+
+def _install_remote_database_proxies() -> None:
+    for method_name in REMOTE_DATABASE_METHODS:
+        descriptor = DatabaseHelper.__dict__.get(method_name)
+        if not isinstance(descriptor, classmethod):
+            continue
+
+        original_method = descriptor.__func__
+
+        def make_wrapper(
+            wrapped_method_name: str,
+            wrapped_original_method: Any,
+        ) -> classmethod:
+            @functools.wraps(wrapped_original_method)
+            def wrapper(cls: type[DatabaseHelper], *args: Any, **kwargs: Any) -> Any:
+                if cls._should_use_remote():
+                    return cls._remote_call(wrapped_method_name, *args, **kwargs)
+                return wrapped_original_method(cls, *args, **kwargs)
+
+            return classmethod(wrapper)
+
+        setattr(DatabaseHelper, method_name, make_wrapper(method_name, original_method))
+
+
+_install_remote_database_proxies()

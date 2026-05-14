@@ -11,6 +11,7 @@ Application desktop Python qui reprend la version VB.NET avec :
 - commissions
 - rapports PDF journaliers
 - verification hebdomadaire des mises a jour
+- mode connecte avec serveur central
 
 ## Lancement
 
@@ -45,3 +46,7 @@ Le guide pas a pas est disponible dans [GUIDE_SETUP.md](/A:/Mon application pyth
 ## Mises a jour
 
 Le guide de configuration des mises a jour est disponible dans [GUIDE_MISE_A_JOUR.md](/A:/Mon application python/GUIDE_MISE_A_JOUR.md).
+
+## Mode connecte
+
+Le guide de mise en reseau est disponible dans [GUIDE_MODE_CONNECTE.md](/A:/Mon application python/GUIDE_MODE_CONNECTE.md).

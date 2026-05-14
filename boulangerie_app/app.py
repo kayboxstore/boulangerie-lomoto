@@ -10,6 +10,18 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable
 
+from .connected_mode import (
+    ConnectionSettings,
+    REMOTE_DEFAULT_PORT,
+    REMOTE_REFRESH_INTERVAL_MS,
+    RemoteDatabaseClient,
+)
+from .connected_server import (
+    get_embedded_server_status,
+    is_embedded_server_running,
+    start_embedded_server,
+    stop_embedded_server,
+)
 from .database import AuthenticatedUser, DatabaseHelper
 from .reports import (
     ReportGenerationError,
@@ -395,7 +407,16 @@ class LoginWindow(ttk.Frame):
             row=1, column=0, columnspan=2, pady=(0, 12)
         )
 
-        row_index = 2
+        self.connection_status_var = tk.StringVar(value=DatabaseHelper.get_connection_status_text())
+        ttk.Label(
+            card,
+            textvariable=self.connection_status_var,
+            foreground="#2f5d3a",
+            wraplength=360,
+            justify="center",
+        ).grid(row=2, column=0, columnspan=2, pady=(0, 12))
+
+        row_index = 3
         if self.post_update_notice is not None and self.post_update_notice.remaining_ms() > 0:
             self.notice_label = ttk.Label(
                 card,
@@ -426,6 +447,9 @@ class LoginWindow(ttk.Frame):
             row=0, column=0, padx=6
         )
         ttk.Button(button_row, text="Quitter", command=self.on_quit).grid(row=0, column=1, padx=6)
+        ttk.Button(button_row, text="Parametres reseau", command=self.open_connection_settings).grid(
+            row=0, column=2, padx=6
+        )
         row_index += 1
 
         hint = ttk.Label(
@@ -440,6 +464,14 @@ class LoginWindow(ttk.Frame):
         user_entry.bind("<Return>", lambda _event: self.password_entry.focus())
         self.password_entry.bind("<Return>", lambda _event: self.login())
 
+    def refresh_connection_status(self) -> None:
+        self.connection_status_var.set(DatabaseHelper.get_connection_status_text())
+
+    def open_connection_settings(self) -> None:
+        dialog = ConnectionSettingsDialog(self)
+        self.wait_window(dialog)
+        self.refresh_connection_status()
+
     def login(self) -> None:
         identifiant = self.user_var.get().strip()
         mot_de_passe = self.password_var.get().strip()
@@ -450,7 +482,11 @@ class LoginWindow(ttk.Frame):
             messagebox.showwarning("Connexion", "Veuillez entrer un mot de passe.")
             return
 
-        user = DatabaseHelper.find_user_for_login(identifiant, mot_de_passe)
+        try:
+            user = DatabaseHelper.find_user_for_login(identifiant, mot_de_passe)
+        except Exception as exc:
+            messagebox.showerror("Connexion", str(exc))
+            return
         if user is None:
             messagebox.showwarning("Connexion", "Identifiants incorrects.")
             self.password_var.set("")
@@ -478,6 +514,248 @@ class LoginWindow(ttk.Frame):
             self.root.destroy()
 
 
+class ConnectionSettingsDialog(tk.Toplevel):
+    def __init__(self, parent: LoginWindow) -> None:
+        super().__init__(parent)
+        self.parent = parent
+        self.title("Parametres reseau")
+        self.geometry("700x520")
+        self.minsize(680, 500)
+        self.configure(bg="#eef3f8")
+        self.transient(parent)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.close_window)
+
+        settings = DatabaseHelper.get_connection_settings()
+        self.mode_var = tk.StringVar(value=settings.mode)
+        self.server_url_var = tk.StringVar(value=settings.server_url)
+        self.api_token_var = tk.StringVar(value=settings.api_token)
+        self.message_var = tk.StringVar(value="")
+        self.server_status_var = tk.StringVar(value="")
+        self.server_button_var = tk.StringVar(value="Demarrer le serveur sur ce poste")
+
+        self.build_ui()
+        self.refresh_server_status()
+        self.update_mode_fields()
+        self.after(0, lambda: center_window(self))
+
+    def build_ui(self) -> None:
+        frame = ttk.Frame(self, padding=18)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Mode connecte", style="Header.TLabel").pack(pady=(0, 12))
+        ttk.Label(
+            frame,
+            text=(
+                "Choisissez si ce poste travaille en local, ou s'il doit utiliser un serveur central. "
+                "Le serveur central permet a plusieurs postes de partager les memes donnees en temps reel."
+            ),
+            wraplength=620,
+            justify="center",
+        ).pack(fill="x", pady=(0, 16))
+
+        mode_frame = ttk.LabelFrame(frame, text="Mode de travail", style="Card.TLabelframe")
+        mode_frame.pack(fill="x", pady=(0, 12))
+        ttk.Radiobutton(
+            mode_frame,
+            text="Mode local",
+            value="local",
+            variable=self.mode_var,
+            command=self.update_mode_fields,
+        ).grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Radiobutton(
+            mode_frame,
+            text="Mode connecte au serveur central",
+            value="remote",
+            variable=self.mode_var,
+            command=self.update_mode_fields,
+        ).grid(row=1, column=0, sticky="w", pady=4)
+
+        remote_frame = ttk.LabelFrame(frame, text="Serveur central", style="Card.TLabelframe")
+        remote_frame.pack(fill="x", pady=(0, 12))
+        ttk.Label(remote_frame, text="Adresse du serveur").grid(row=0, column=0, sticky="w", pady=6)
+        self.server_url_entry = ttk.Entry(remote_frame, textvariable=self.server_url_var, width=48)
+        self.server_url_entry.grid(row=0, column=1, sticky="ew", pady=6)
+        ttk.Label(remote_frame, text="Jeton d'acces").grid(row=1, column=0, sticky="w", pady=6)
+        self.api_token_entry = ttk.Entry(remote_frame, textvariable=self.api_token_var, width=48, show="*")
+        self.api_token_entry.grid(row=1, column=1, sticky="ew", pady=6)
+
+        remote_actions = ttk.Frame(remote_frame)
+        remote_actions.grid(row=2, column=0, columnspan=2, pady=(12, 0))
+        ttk.Button(remote_actions, text="Tester la connexion", command=self.test_connection).grid(
+            row=0, column=0, padx=6
+        )
+        ttk.Button(remote_actions, text="Utiliser l'adresse locale du serveur", command=self.use_local_server_url).grid(
+            row=0, column=1, padx=6
+        )
+        remote_frame.columnconfigure(1, weight=1)
+
+        server_frame = ttk.LabelFrame(frame, text="Serveur sur ce poste", style="Card.TLabelframe")
+        server_frame.pack(fill="x", pady=(0, 12))
+        ttk.Label(
+            server_frame,
+            text=(
+                "Vous pouvez demarrer un serveur central directement sur ce poste. "
+                "Les autres postes devront alors se connecter a l'adresse affichee ci-dessous."
+            ),
+            wraplength=620,
+            justify="center",
+        ).pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            server_frame,
+            textvariable=self.server_status_var,
+            foreground="#2f5d3a",
+            wraplength=620,
+            justify="center",
+        ).pack(fill="x", pady=(0, 10))
+        server_buttons = ttk.Frame(server_frame)
+        server_buttons.pack()
+        ttk.Button(server_buttons, textvariable=self.server_button_var, command=self.toggle_local_server).grid(
+            row=0, column=0, padx=6
+        )
+
+        footer = ttk.Frame(frame)
+        footer.pack(fill="x", pady=(8, 0))
+        ttk.Label(
+            footer,
+            textvariable=self.message_var,
+            foreground="#8b0000",
+            wraplength=620,
+            justify="center",
+        ).pack(fill="x", pady=(0, 12))
+        button_row = ttk.Frame(footer)
+        button_row.pack()
+        ttk.Button(button_row, text="Enregistrer", style="Primary.TButton", command=self.save_settings).grid(
+            row=0, column=0, padx=6
+        )
+        ttk.Button(button_row, text="Fermer", command=self.close_window).grid(row=0, column=1, padx=6)
+
+    def current_settings(self) -> ConnectionSettings:
+        return ConnectionSettings(
+            mode=self.mode_var.get(),
+            server_url=self.server_url_var.get(),
+            api_token=self.api_token_var.get(),
+        )
+
+    def update_mode_fields(self) -> None:
+        remote_enabled = self.mode_var.get().strip().lower() == "remote"
+        target_state = "!disabled" if remote_enabled else "disabled"
+        self.server_url_entry.state([target_state])
+        self.api_token_entry.state([target_state])
+
+    def refresh_server_status(self) -> None:
+        handle = get_embedded_server_status()
+        if handle is None:
+            self.server_status_var.set(
+                f"Aucun serveur local n'est actif. Port recommande : {REMOTE_DEFAULT_PORT}."
+            )
+            self.server_button_var.set("Demarrer le serveur sur ce poste")
+            return
+
+        addresses = "\n".join(handle.urls)
+        token_line = "Jeton : defini" if handle.api_token else "Jeton : aucun"
+        self.server_status_var.set(
+            "Serveur central actif sur ce poste.\n"
+            f"{addresses}\n"
+            f"{token_line}\n"
+            "Laissez cette application ouverte pour garder le serveur disponible."
+        )
+        self.server_button_var.set("Arreter le serveur sur ce poste")
+
+    def use_local_server_url(self) -> None:
+        handle = get_embedded_server_status()
+        if handle is None:
+            self.message_var.set(
+                "Demarrez d'abord le serveur sur ce poste, ou saisissez l'adresse du serveur central."
+            )
+            return
+        self.server_url_var.set(handle.preferred_url)
+        if handle.api_token and not self.api_token_var.get().strip():
+            self.api_token_var.set(handle.api_token)
+        self.message_var.set("L'adresse locale du serveur a ete reportee dans le champ ci-dessus.")
+
+    def test_connection(self) -> None:
+        settings = self.current_settings()
+        if not settings.is_remote():
+            self.message_var.set("Activez d'abord le mode connecte puis saisissez une adresse serveur.")
+            return
+
+        try:
+            health = RemoteDatabaseClient(
+                settings.normalized_url(),
+                api_token=settings.api_token,
+            ).ping()
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+
+        server_port = health.get("server_port", REMOTE_DEFAULT_PORT)
+        self.message_var.set(
+            f"Connexion reussie avec le serveur central sur le port {server_port}."
+        )
+
+    def toggle_local_server(self) -> None:
+        if is_embedded_server_running():
+            stop_embedded_server()
+            self.refresh_server_status()
+            self.message_var.set("Le serveur local a ete arrete.")
+            return
+
+        try:
+            handle = start_embedded_server(
+                port=REMOTE_DEFAULT_PORT,
+                api_token=self.api_token_var.get().strip(),
+                data_dir=DatabaseHelper.app_data_dir,
+            )
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+
+        if not self.server_url_var.get().strip():
+            self.server_url_var.set(handle.preferred_url)
+        self.refresh_server_status()
+        self.message_var.set(
+            "Le serveur local est demarre. Utilisez l'adresse affichee pour connecter les autres postes."
+        )
+
+    def save_settings(self) -> None:
+        settings = self.current_settings()
+        if settings.normalized_mode() == "remote" and not settings.normalized_url():
+            self.message_var.set("Saisissez l'adresse du serveur central avant d'enregistrer le mode connecte.")
+            return
+        if settings.is_remote():
+            try:
+                RemoteDatabaseClient(
+                    settings.normalized_url(),
+                    api_token=settings.api_token,
+                ).ping()
+            except Exception as exc:
+                self.message_var.set(str(exc))
+                return
+
+        try:
+            DatabaseHelper.save_connection_settings(settings)
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+
+        self.parent.refresh_connection_status()
+        if settings.is_remote():
+            messagebox.showinfo(
+                "Mode connecte",
+                "Les parametres reseau ont ete enregistres. Les prochaines connexions utiliseront le serveur central.",
+            )
+        else:
+            messagebox.showinfo(
+                "Mode local",
+                "Les parametres reseau ont ete enregistres. Ce poste utilise maintenant sa base locale.",
+            )
+        self.close_window()
+
+    def close_window(self) -> None:
+        self.destroy()
+
+
 class DashboardWindow(tk.Toplevel):
     def __init__(
         self,
@@ -494,6 +772,7 @@ class DashboardWindow(tk.Toplevel):
         self.notice_label: ttk.Label | None = None
         self.update_result_queue: Queue[UpdateCheckResult] = Queue()
         self.update_check_running = False
+        self.live_refresh_after_id: str | None = None
         self.title(f"{APP_NAME} - Tableau de bord - v{APP_VERSION}")
         self.geometry("900x560")
         self.minsize(860, 520)
@@ -507,6 +786,8 @@ class DashboardWindow(tk.Toplevel):
         center_window(self)
         self.bind("<FocusIn>", lambda _event: self.refresh_summary())
         self.after(1000, self.start_weekly_update_check)
+        if self.is_live_sync_enabled():
+            self.schedule_live_refresh()
 
     def build_ui(self) -> None:
         container = self.body
@@ -521,6 +802,14 @@ class DashboardWindow(tk.Toplevel):
             container,
             text=f"Version installee : {APP_VERSION}",
             foreground="#5a6570",
+        ).pack(anchor="center", pady=(0, 12))
+
+        ttk.Label(
+            container,
+            text=DatabaseHelper.get_connection_status_text(),
+            foreground="#2f5d3a",
+            wraplength=680,
+            justify="center",
         ).pack(anchor="center", pady=(0, 12))
 
         if self.post_update_notice is not None and self.post_update_notice.remaining_ms() > 0:
@@ -602,9 +891,7 @@ class DashboardWindow(tk.Toplevel):
         maintenance_frame.pack(fill="x", pady=(0, 18))
         ttk.Label(
             maintenance_frame,
-            text=(
-                "Sauvegardez la base dans le dossier local de l'application, puis restaurez une sauvegarde si besoin."
-            ),
+            text=self.get_maintenance_text(),
             wraplength=640,
             justify="center",
         ).pack(fill="x", pady=(0, 12))
@@ -637,6 +924,31 @@ class DashboardWindow(tk.Toplevel):
 
         self.apply_permissions()
 
+    def is_live_sync_enabled(self) -> bool:
+        return DatabaseHelper.is_remote_mode() or is_embedded_server_running()
+
+    def schedule_live_refresh(self) -> None:
+        if self.live_refresh_after_id is not None:
+            self.after_cancel(self.live_refresh_after_id)
+        self.live_refresh_after_id = self.after(REMOTE_REFRESH_INTERVAL_MS, self.perform_live_refresh)
+
+    def perform_live_refresh(self) -> None:
+        self.live_refresh_after_id = None
+        if not self.winfo_exists():
+            return
+        self.refresh_summary()
+        self.refresh_security_notice()
+        if self.is_live_sync_enabled():
+            self.schedule_live_refresh()
+
+    def get_maintenance_text(self) -> str:
+        if DatabaseHelper.is_remote_mode():
+            return (
+                "En mode connecte, les sauvegardes et restaurations doivent etre faites sur le poste "
+                "serveur central afin de proteger la base partagee."
+            )
+        return "Sauvegardez la base dans le dossier local de l'application, puis restaurez une sauvegarde si besoin."
+
     def hide_notice(self) -> None:
         if self.notice_label is None:
             return
@@ -644,6 +956,11 @@ class DashboardWindow(tk.Toplevel):
         self.notice_label = None
 
     def apply_permissions(self) -> None:
+        if DatabaseHelper.is_remote_mode():
+            self.backup_button.state(["disabled"])
+            self.restore_button.state(["disabled"])
+            self.backup_folder_button.state(["disabled"])
+
         if self.user.role == "Admin":
             return
         allowed = {
@@ -661,6 +978,7 @@ class DashboardWindow(tk.Toplevel):
             self.commissions_button.state(["disabled"])
         self.backup_button.state(["disabled"])
         self.restore_button.state(["disabled"])
+        self.backup_folder_button.state(["disabled"])
 
     def refresh_summary(self) -> None:
         try:
@@ -785,6 +1103,12 @@ class DashboardWindow(tk.Toplevel):
             self.show_update_dialog(result.update_info)
 
     def backup_database(self) -> None:
+        if DatabaseHelper.is_remote_mode():
+            messagebox.showwarning(
+                "Sauvegarde",
+                "Les sauvegardes sont disponibles uniquement sur le poste serveur central en mode connecte.",
+            )
+            return
         try:
             backup_path = DatabaseHelper.backup_database()
         except Exception as exc:
@@ -803,6 +1127,12 @@ class DashboardWindow(tk.Toplevel):
             self.open_backups_folder()
 
     def restore_database(self) -> None:
+        if DatabaseHelper.is_remote_mode():
+            messagebox.showwarning(
+                "Restauration",
+                "La restauration est disponible uniquement sur le poste serveur central en mode connecte.",
+            )
+            return
         file_path = filedialog.askopenfilename(
             title="Choisir une sauvegarde",
             initialdir=str(DatabaseHelper.backups_dir),
@@ -841,6 +1171,12 @@ class DashboardWindow(tk.Toplevel):
         self.root.destroy()
 
     def open_backups_folder(self) -> None:
+        if DatabaseHelper.is_remote_mode():
+            messagebox.showwarning(
+                "Sauvegardes",
+                "Le dossier des sauvegardes est gere sur le poste serveur central en mode connecte.",
+            )
+            return
         open_folder(DatabaseHelper.backups_dir)
 
     def open_reports_folder(self) -> None:
@@ -931,6 +1267,9 @@ class DashboardWindow(tk.Toplevel):
     def on_close_app(self) -> None:
         if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment quitter l'application ?"):
             return
+        if self.live_refresh_after_id is not None:
+            self.after_cancel(self.live_refresh_after_id)
+            self.live_refresh_after_id = None
         self.root.destroy()
 
 
@@ -938,6 +1277,7 @@ class BaseModuleWindow(tk.Toplevel):
     def __init__(self, parent: DashboardWindow, title: str, geometry: str) -> None:
         super().__init__(parent)
         self.parent = parent
+        self.live_refresh_after_id: str | None = None
         self.title(title)
         self.geometry(geometry)
         self.configure(bg="#eef3f8")
@@ -948,9 +1288,51 @@ class BaseModuleWindow(tk.Toplevel):
         self.scrollable_content.pack(fill="both", expand=True)
         self.body = self.scrollable_content.content
         self.after(0, lambda: center_window(self))
+        if self.parent.is_live_sync_enabled():
+            self.schedule_live_refresh()
 
     def close_window(self) -> None:
+        if self.live_refresh_after_id is not None:
+            self.after_cancel(self.live_refresh_after_id)
+            self.live_refresh_after_id = None
         self.destroy()
+
+    def schedule_live_refresh(self) -> None:
+        if self.live_refresh_after_id is not None:
+            self.after_cancel(self.live_refresh_after_id)
+        self.live_refresh_after_id = self.after(REMOTE_REFRESH_INTERVAL_MS, self.perform_live_refresh)
+
+    def perform_live_refresh(self) -> None:
+        self.live_refresh_after_id = None
+        if not self.winfo_exists():
+            return
+        if not self.should_pause_live_refresh():
+            try:
+                self.refresh_live_view()
+            except Exception:
+                pass
+        if self.parent.is_live_sync_enabled():
+            self.schedule_live_refresh()
+
+    def should_pause_live_refresh(self) -> bool:
+        if bool(getattr(self, "edit_mode", False)):
+            return True
+        widget = self.focus_get()
+        if widget is None:
+            return False
+        return str(widget.winfo_class()) in {
+            "Entry",
+            "TEntry",
+            "Text",
+            "TCombobox",
+            "Combobox",
+            "Spinbox",
+            "TSpinbox",
+            "Treeview",
+        }
+
+    def refresh_live_view(self) -> None:
+        return
 
 
 class PdfReportWindow(BaseModuleWindow):
@@ -1262,6 +1644,9 @@ class UsersWindow(BaseModuleWindow):
     def toggle_password_visibility(self) -> None:
         self.password_entry.configure(show="" if self.show_password_var.get() else "*")
 
+    def refresh_live_view(self) -> None:
+        self.refresh_users()
+
     def search_user(self) -> None:
         identifiant = self.identifiant_var.get().strip()
         if not identifiant:
@@ -1425,6 +1810,9 @@ class StockWindow(BaseModuleWindow):
     def _make_entry(self, parent: ttk.LabelFrame, label: str, variable: tk.StringVar, row: int) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
         ttk.Entry(parent, textvariable=variable, width=20).grid(row=row, column=1, sticky="ew", pady=6)
+
+    def refresh_live_view(self) -> None:
+        self.refresh_data()
 
     def refresh_data(self) -> None:
         DatabaseHelper.update_stock_closing(date.today())
@@ -1895,6 +2283,9 @@ class OrdersWindow(BaseModuleWindow):
         self.show_all_dates = True
         self.refresh_orders()
 
+    def refresh_live_view(self) -> None:
+        self.refresh_orders()
+
     def refresh_orders(self) -> None:
         try:
             target_date = self.date_field.get_date()
@@ -2211,6 +2602,9 @@ class CashWindow(BaseModuleWindow):
         )
         self.update_summary(len(rows))
 
+    def refresh_live_view(self) -> None:
+        self.refresh_data()
+
     def show_all(self) -> None:
         self.show_all_dates = True
         self.refresh_data()
@@ -2454,6 +2848,9 @@ class CommissionsWindow(BaseModuleWindow):
             else DatabaseHelper.list_commissions_by_date(target_date)
         )
         self.apply_filter()
+
+    def refresh_live_view(self) -> None:
+        self.refresh_commissions()
 
     def apply_filter(self) -> None:
         filter_value = self.filter_var.get()

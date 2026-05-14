@@ -1,5 +1,5 @@
 APP_NAME = "Boulangerie Lomoto"
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.1.0"
 APP_PUBLISHER = "Kay Box Store"
 
 # Hypothese retenue pour GitHub :
