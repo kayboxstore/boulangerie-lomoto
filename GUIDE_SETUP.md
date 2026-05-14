@@ -1,8 +1,8 @@
 # Guide setup Windows
 
-Ce guide montre une methode simple pour creer vous-meme le setup de l'application.
+Ce guide montre une méthode simple pour créer vous-même le setup de l'application.
 
-## 1. Preparer l'environnement
+## 1. Préparer l'environnement
 
 Placez-vous d'abord dans le dossier du projet :
 
@@ -10,7 +10,7 @@ Placez-vous d'abord dans le dossier du projet :
 cd "A:\Mon application python"
 ```
 
-Installez d'abord les dependances du projet puis les outils de build :
+Installez d'abord les dépendances du projet puis les outils de build :
 
 ```powershell
 .\.venv\Scripts\pip.exe install -r requirements.txt
@@ -21,19 +21,21 @@ Installez aussi Inno Setup sur Windows :
 
 - site officiel : https://jrsoftware.org/isinfo.php
 
-## 2. Generer l'executable
+## 2. Générer les exécutables
 
 Depuis le dossier du projet, lancez :
 
 ```powershell
 .\.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --onedir --name "Boulangerie Lomoto" main.py
+.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --console --onefile --name "Boulangerie Lomoto Service" --distpath ".\dist\Boulangerie Lomoto" --workpath ".\build\service" serveur_windows_service.py
 ```
 
-Resultat attendu :
+Résultat attendu :
 
-- executable : `dist\Boulangerie Lomoto\Boulangerie Lomoto.exe`
+- exécutable : `dist\Boulangerie Lomoto\Boulangerie Lomoto.exe`
+- service Windows : `dist\Boulangerie Lomoto\Boulangerie Lomoto Service.exe`
 
-## 3. Tester l'executable
+## 3. Tester l'exécutable
 
 Avant de fabriquer le setup, testez d'abord l'exe :
 
@@ -46,25 +48,25 @@ Si le chemin contient des espaces, PowerShell doit recevoir :
 - le chemin entre guillemets
 - et l'operateur `&` devant
 
-## 4. Creer le setup avec Inno Setup
+## 4. Créer le setup avec Inno Setup
 
-Le projet contient deja un script exemple :
+Le projet contient déjà un script exemple :
 
 - `installer\setup.iss`
 
 Ouvrez ce fichier avec Inno Setup, puis cliquez sur **Compile**.
 
-Le setup sera genere dans :
+Le setup sera généré dans :
 
 - `installer\output`
 
 Important :
 
-Le setup doit etre compile apres PyInstaller. Si vous recompilez seulement `setup.iss` sans regenerer d'abord `dist\Boulangerie Lomoto`, vous risquez de republier un ancien exe.
+Le setup doit être compilé après PyInstaller. Si vous recompilez seulement `setup.iss` sans régénérer d'abord `dist\Boulangerie Lomoto`, vous risquez de republier un ancien exe.
 
-## 4 bis. Methode recommandee en une seule commande
+## 4 bis. Méthode recommandée en une seule commande
 
-Pour eviter un mauvais ordre de build, utilisez plutot :
+Pour éviter un mauvais ordre de build, utilisez plutôt :
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File ".\scripts\publish-github.ps1" -SkipBuild:$false
@@ -72,9 +74,10 @@ powershell -ExecutionPolicy Bypass -File ".\scripts\publish-github.ps1" -SkipBui
 
 Cette commande :
 
-1. regenere l'exe PyInstaller
-2. recompile le setup Inno Setup
-3. publie ensuite la release GitHub et le manifeste
+1. régénère l'exe PyInstaller
+2. régénère aussi l'exe du service Windows
+3. recompile le setup Inno Setup
+4. publie ensuite la release GitHub et le manifeste
 
 ## 5. Important sur la base SQLite
 
@@ -87,8 +90,8 @@ L'application enregistre la base ici :
 Donc :
 
 - le setup peut installer le programme dans `Program Files`
-- les donnees utilisateur restent modifiables
-- une mise a jour ne supprime pas automatiquement la base
+- les données utilisateur restent modifiables
+- une mise à jour ne supprime pas automatiquement la base
 
 ## 6. Commande de travail la plus simple
 
@@ -96,9 +99,10 @@ Quand vous voudrez refaire un setup :
 
 1. Ouvrir le projet.
 2. Lancer PyInstaller.
-3. Tester l'exe.
-4. Compiler `installer\setup.iss` avec Inno Setup.
-5. Publier seulement apres ces deux etapes.
+3. Vérifier aussi `Boulangerie Lomoto Service.exe`.
+4. Tester l'exe principal.
+5. Compiler `installer\setup.iss` avec Inno Setup.
+6. Publier seulement apres ces etapes.
 
 ## 7. Plus tard
 
@@ -107,4 +111,4 @@ Vous pourrez ensuite ajouter :
 - une icone avec `--icon chemin\\vers\\icone.ico`
 - un numero de version dans le script Inno Setup
 - un raccourci bureau
-- une verification de mise a jour
+- une vérification de mise à jour

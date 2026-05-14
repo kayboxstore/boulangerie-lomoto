@@ -22,6 +22,7 @@ from .connected_mode import (
     load_connection_settings,
     save_connection_settings,
 )
+from .status_labels import DEPOSITARY_STATUS, LEGACY_DEPOSITARY_6000_STATUS
 
 
 DB_DATE_FORMAT = "%Y-%m-%d"
@@ -118,8 +119,8 @@ class DatabaseHelper:
     def get_connection_status_text(cls) -> str:
         settings = cls.get_connection_settings()
         if settings.is_remote():
-            return f"Mode connecte - Serveur central : {settings.normalized_url()}"
-        return "Mode local - donnees stockees sur ce poste"
+            return f"Mode connecté - Serveur central : {settings.normalized_url()}"
+        return "Mode local - données stockées sur ce poste"
 
     @classmethod
     @contextmanager
@@ -146,12 +147,12 @@ class DatabaseHelper:
     @classmethod
     def _remote_call(cls, method_name: str, *args: Any, **kwargs: Any) -> Any:
         if cls._remote_client is None:
-            raise RuntimeError("Le client distant n'est pas initialise.")
+            raise RuntimeError("Le client distant n'est pas initialis?.")
 
         result = cls._remote_client.call(method_name, *args, **kwargs)
         if method_name == "find_user_for_login" and result:
             if not isinstance(result, dict):
-                raise RuntimeError("La reponse du serveur central pour la connexion est invalide.")
+                raise RuntimeError("La réponse du serveur central pour la connexion est invalide.")
             result.pop("__remote_dataclass__", None)
             return AuthenticatedUser(
                 identifiant=str(result.get("identifiant", "")),
@@ -200,6 +201,7 @@ class DatabaseHelper:
             cls._create_tables(connection)
             cls._migrate_orders_table(connection)
             cls._migrate_commissions_table(connection)
+            cls._normalize_status_values(connection)
             cls._insert_default_admin(connection)
             cls._insert_default_stock_config(connection)
             connection.execute("PRAGMA journal_mode = WAL")
@@ -212,6 +214,47 @@ class DatabaseHelper:
     def build_backup_path(cls, prefix: str = "boulangerie-lomoto-backup") -> Path:
         cls.backups_dir.mkdir(parents=True, exist_ok=True)
         return cls.backups_dir / f"{prefix}-{cls._timestamp_for_filename()}.db"
+
+    @classmethod
+    def get_backups_directory(cls) -> Path:
+        cls.backups_dir.mkdir(parents=True, exist_ok=True)
+        return cls.backups_dir
+
+    @classmethod
+    def list_backup_files(cls, limit: int = 200) -> list[dict[str, Any]]:
+        backup_dir = cls.get_backups_directory()
+        max_items = max(int(limit), 0)
+        if max_items == 0:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        try:
+            candidates = sorted(
+                backup_dir.iterdir(),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return rows
+
+        for backup_path in candidates:
+            if not backup_path.is_file():
+                continue
+            try:
+                stat = backup_path.stat()
+            except OSError:
+                continue
+            rows.append(
+                {
+                    "NomFichier": backup_path.name,
+                    "CheminComplet": backup_path,
+                    "TailleOctets": int(stat.st_size),
+                    "DateModification": datetime.fromtimestamp(stat.st_mtime),
+                }
+            )
+            if len(rows) >= max_items:
+                break
+        return rows
 
     @classmethod
     def build_report_path(cls, prefix: str = "rapport-journalier") -> Path:
@@ -239,7 +282,7 @@ class DatabaseHelper:
             connection = sqlite3.connect(database_path)
             connection.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
         except sqlite3.DatabaseError as exc:
-            raise ValueError("Le fichier selectionne n'est pas une base SQLite valide.") from exc
+            raise ValueError("Le fichier sélectionné n'est pas une base SQLite valide.") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -248,14 +291,14 @@ class DatabaseHelper:
     def backup_database(cls, destination: Path | None = None) -> Path:
         if cls._should_use_remote():
             raise RuntimeError(
-                "Les sauvegardes locales sont desactivees en mode connecte. Utilisez le poste serveur central."
+                "Les sauvegardes locales sont désactivées en mode connecté. Utilisez le poste serveur central."
             )
         cls.initialize_database()
         target_path = Path(destination) if destination is not None else cls.build_backup_path()
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         if target_path.resolve() == cls.db_path.resolve():
-            raise ValueError("Le fichier de sauvegarde doit etre different de la base active.")
+            raise ValueError("Le fichier de sauvegarde doit être différent de la base active.")
 
         if target_path.exists():
             target_path.unlink()
@@ -278,7 +321,7 @@ class DatabaseHelper:
     def restore_database(cls, source_path: str | Path) -> tuple[Path | None, Path]:
         if cls._should_use_remote():
             raise RuntimeError(
-                "La restauration locale est desactivee en mode connecte. Utilisez le poste serveur central."
+                "La restauration locale est désactivée en mode connecté. Utilisez le poste serveur central."
             )
         cls.backups_dir.mkdir(parents=True, exist_ok=True)
         source = Path(source_path)
@@ -309,6 +352,7 @@ class DatabaseHelper:
             cls._create_tables(connection)
             cls._migrate_orders_table(connection)
             cls._migrate_commissions_table(connection)
+            cls._normalize_status_values(connection)
             cls._insert_default_admin(connection)
             cls._insert_default_stock_config(connection)
 
@@ -396,6 +440,31 @@ class DatabaseHelper:
             );
             """
         )
+
+    @classmethod
+    def _normalize_status_values(cls, connection: sqlite3.Connection) -> None:
+        for table_name in ("Commandes", "Commissions"):
+            connection.execute(
+                f"""
+                UPDATE {table_name}
+                SET Statut = CASE
+                    WHEN Statut IN ('Depositaire', 'Dépositaire', 'Depositaire 4.100Fc', 'Dépositaire 4.100Fc')
+                        THEN ?
+                    WHEN Statut IN ('Depositaire 6.000Fc', 'Dépositaire 6.000Fc')
+                        THEN ?
+                    ELSE Statut
+                END
+                WHERE Statut IN (
+                    'Depositaire',
+                    'Dépositaire',
+                    'Depositaire 4.100Fc',
+                    'Dépositaire 4.100Fc',
+                    'Depositaire 6.000Fc',
+                    'Dépositaire 6.000Fc'
+                )
+                """,
+                (DEPOSITARY_STATUS, LEGACY_DEPOSITARY_6000_STATUS),
+            )
 
     @classmethod
     def _migrate_orders_table(cls, connection: sqlite3.Connection) -> None:
@@ -1339,8 +1408,10 @@ class DatabaseHelper:
                         WHEN Statut = 'Maman' THEN NombreBacs * 1650
                         WHEN Statut = 'Vente cash' THEN 0
                         WHEN Statut = 'VC' THEN 0
-                        WHEN Statut = 'Depositaire 6.000Fc' THEN NombreBacs * 1900
-                        WHEN Statut = 'Dépositaire 6.000Fc' THEN NombreBacs * 1900
+                        WHEN Statut = 'Depositaire 6.000Fc' THEN 0
+                        WHEN Statut = 'Dépositaire 6.000Fc' THEN 0
+                        WHEN Statut = 'Depositaire' THEN 0
+                        WHEN Statut = 'Dépositaire' THEN 0
                         WHEN Statut = 'Depositaire 4.100Fc' THEN 0
                         WHEN Statut = 'Dépositaire 4.100Fc' THEN 0
                         ELSE 0
@@ -1353,8 +1424,10 @@ class DatabaseHelper:
                             WHEN Statut = 'Maman' THEN NombreBacs * 1650
                             WHEN Statut = 'Vente cash' THEN 0
                             WHEN Statut = 'VC' THEN 0
-                            WHEN Statut = 'Depositaire 6.000Fc' THEN NombreBacs * 1900
-                            WHEN Statut = 'Dépositaire 6.000Fc' THEN NombreBacs * 1900
+                            WHEN Statut = 'Depositaire 6.000Fc' THEN 0
+                            WHEN Statut = 'Dépositaire 6.000Fc' THEN 0
+                            WHEN Statut = 'Depositaire' THEN 0
+                            WHEN Statut = 'Dépositaire' THEN 0
                             WHEN Statut = 'Depositaire 4.100Fc' THEN 0
                             WHEN Statut = 'Dépositaire 4.100Fc' THEN 0
                             ELSE 0

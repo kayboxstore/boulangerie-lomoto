@@ -12,6 +12,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .database import DatabaseHelper
+from .status_labels import normalize_status_label
 from .version import APP_NAME
 
 REPORT_SECTIONS_BY_ROLE: dict[str, tuple[str, ...]] = {
@@ -196,7 +197,7 @@ def create_daily_pdf_report(
         _paragraph(f"Profil du rapport : {scope_label}", styles["body"]),
         _paragraph(scope_description, styles["note"]),
         _paragraph(
-            f"Document genere le {datetime.now().strftime('%d/%m/%Y a %H:%M')}.",
+            f"Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}.",
             styles["note"],
         ),
         Spacer(1, 6 * mm),
@@ -216,14 +217,14 @@ def create_daily_pdf_report(
                 ["Commandes du jour", str(len(orders))],
                 ["Total bacs", str(total_trays)],
                 ["Montant attendu", _format_fc(total_expected)],
-                ["Montant recu", _format_fc(total_received)],
+                ["Montant reçu", _format_fc(total_received)],
                 ["Dettes", _format_fc(total_debts)],
             ]
         )
     if "cash" in allowed_sections:
         overview_rows.extend(
             [
-                ["Depenses", _format_fc(total_expenses)],
+                ["Dépenses", _format_fc(total_expenses)],
                 ["Solde du jour", _format_fc(balance)],
             ]
         )
@@ -250,7 +251,7 @@ def create_daily_pdf_report(
                     _format_number(float(stock_journal.get("HuileOuverture", 0) or 0)),
                 ],
                 [
-                    "Cloture",
+                    "Clôture",
                     _format_number(float(stock_journal.get("FarineCloture", 0) or 0)),
                     _format_number(float(stock_journal.get("LevureCloture", 0) or 0)),
                     _format_number(float(stock_journal.get("SelCloture", 0) or 0)),
@@ -277,18 +278,18 @@ def create_daily_pdf_report(
             elements.append(_make_table(stock_exit_rows, [36 * mm, 31 * mm, 31 * mm, 31 * mm, 31 * mm]))
         else:
             elements.append(Spacer(1, 2 * mm))
-            elements.append(_paragraph("Aucune sortie de stock enregistree pour cette date.", styles["note"]))
+            elements.append(_paragraph("Aucune sortie de stock enregistrée pour cette date.", styles["note"]))
         elements.append(Spacer(1, 6 * mm))
 
     if "orders" in allowed_sections:
         elements.append(_paragraph("Commandes", styles["section"]))
         if orders:
-            order_rows: list[list[Any]] = [["Client", "Statut", "Bacs", "A percevoir", "Recu", "Dette"]]
+            order_rows: list[list[Any]] = [["Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]]
             for row in orders:
                 order_rows.append(
                     [
                         _safe_text(row.get("Client")),
-                        _safe_text(row.get("Statut")),
+                        normalize_status_label(row.get("Statut")),
                         str(int(row.get("NombreBacs", 0) or 0)),
                         _format_fc(float(row.get("MontantAPercevoir", 0) or 0)),
                         _format_fc(float(row.get("MontantRecu", 0) or 0)),
@@ -299,7 +300,7 @@ def create_daily_pdf_report(
                 _make_table(order_rows, [42 * mm, 34 * mm, 16 * mm, 30 * mm, 28 * mm, 24 * mm])
             )
         else:
-            elements.append(_paragraph("Aucune commande enregistree pour cette date.", styles["body"]))
+            elements.append(_paragraph("Aucune commande enregistrée pour cette date.", styles["body"]))
         elements.append(Spacer(1, 6 * mm))
 
     if "cash" in allowed_sections:
@@ -307,30 +308,30 @@ def create_daily_pdf_report(
         cash_rows = [
             ["Champ", "Valeur"],
             ["Montant attendu", _format_fc(total_expected)],
-            ["Montant recu", _format_fc(total_received)],
+            ["Montant reçu", _format_fc(total_received)],
             ["Dettes", _format_fc(total_debts)],
-            ["Depenses", _format_fc(total_expenses)],
+            ["Dépenses", _format_fc(total_expenses)],
             ["Solde du jour", _format_fc(balance)],
         ]
         elements.append(_make_table(cash_rows, [70 * mm, 90 * mm]))
         expense_details = _safe_text(cash.get("DepensesEffectuees")).strip()
         if expense_details:
             elements.append(Spacer(1, 3 * mm))
-            elements.append(_paragraph(f"Details des depenses : {expense_details}", styles["body"]))
+            elements.append(_paragraph(f"Détails des dépenses : {expense_details}", styles["body"]))
         else:
             elements.append(Spacer(1, 2 * mm))
-            elements.append(_paragraph("Aucun detail de depense enregistre pour cette date.", styles["note"]))
+            elements.append(_paragraph("Aucun détail de dépense enregistr? pour cette date.", styles["note"]))
         elements.append(Spacer(1, 6 * mm))
 
     if "commissions" in allowed_sections:
         elements.append(_paragraph("Commissions", styles["section"]))
         if commissions:
-            commission_rows: list[list[Any]] = [["Nom", "Statut", "Bacs", "Paye", "Commission", "Dette", "Net"]]
+            commission_rows: list[list[Any]] = [["Nom", "Statut", "Bacs", "Payé", "Commission", "Dette", "Net"]]
             for row in commissions:
                 commission_rows.append(
                     [
                         _safe_text(row.get("Nom")),
-                        _safe_text(row.get("Statut")),
+                        normalize_status_label(row.get("Statut")),
                         str(int(row.get("NombreBacs", 0) or 0)),
                         _format_fc(float(row.get("MontantPaye", 0) or 0)),
                         _format_fc(float(row.get("Commissions", 0) or 0)),
@@ -345,11 +346,11 @@ def create_daily_pdf_report(
                 )
             )
         else:
-            elements.append(_paragraph("Aucune commission enregistree pour cette date.", styles["body"]))
+            elements.append(_paragraph("Aucune commission enregistrée pour cette date.", styles["body"]))
 
     try:
         doc.build(elements)
     except Exception as exc:
-        raise ReportGenerationError("Impossible de generer le rapport PDF.") from exc
+        raise ReportGenerationError("Impossible de générer le rapport PDF.") from exc
 
     return report_path

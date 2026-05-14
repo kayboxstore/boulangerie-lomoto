@@ -114,13 +114,20 @@ function Build-ReleaseArtifacts {
     $python = Get-VenvPython
     $innoCompiler = Get-InnoCompiler
     $setupScript = Join-Path $root "installer\setup.iss"
+    $serviceWorkPath = Join-Path $root "build\service"
 
     Push-Location $root
     try {
-        Write-Host "Build PyInstaller en cours..." -ForegroundColor Cyan
+        Write-Host "Build PyInstaller de l'application en cours..." -ForegroundColor Cyan
         & $python -m PyInstaller --noconfirm --clean --windowed --onedir --name "Boulangerie Lomoto" main.py
         if ($LASTEXITCODE -ne 0) {
-            throw "PyInstaller a echoue."
+            throw "Le build PyInstaller de l'application a echoue."
+        }
+
+        Write-Host "Build PyInstaller du service Windows en cours..." -ForegroundColor Cyan
+        & $python -m PyInstaller --noconfirm --clean --console --onefile --name "Boulangerie Lomoto Service" --distpath ".\dist\Boulangerie Lomoto" --workpath $serviceWorkPath serveur_windows_service.py
+        if ($LASTEXITCODE -ne 0) {
+            throw "Le build PyInstaller du service Windows a echoue."
         }
 
         Write-Host "Compilation du setup Inno Setup..." -ForegroundColor Cyan

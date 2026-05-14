@@ -2,7 +2,7 @@
 
 Application desktop Python qui reprend la version VB.NET avec :
 
-- connexion et roles utilisateur
+- connexion et rôles utilisateur
 - tableau de bord
 - gestion des utilisateurs
 - stock
@@ -10,8 +10,9 @@ Application desktop Python qui reprend la version VB.NET avec :
 - caisse
 - commissions
 - rapports PDF journaliers
-- verification hebdomadaire des mises a jour
-- mode connecte avec serveur central
+- vérification hebdomadaire des mises à jour
+- mode connecté avec serveur central
+- service Windows pour le serveur central
 
 ## Lancement
 
@@ -19,34 +20,34 @@ Application desktop Python qui reprend la version VB.NET avec :
 python main.py
 ```
 
-## Compte par defaut
+## Compte par défaut
 
 - identifiant : `admin`
 - mot de passe : `010203`
 
-## Base de donnees
+## Base de données
 
-La base SQLite est maintenant stockee dans le profil Windows de l'utilisateur :
+La base SQLite est maintenant stockée dans le profil Windows de l'utilisateur :
 
 ```text
 %LOCALAPPDATA%\BoulangerieLomoto\boulangerie.db
 ```
 
-Cela permet de creer un vrai setup Windows sans probleme d'ecriture dans `Program Files`.
+Cela permet de créer un vrai setup Windows sans problème d'écriture dans `Program Files`.
 
-## Formats de date acceptes
+## Formats de date acceptés
 
 - `AAAA-MM-JJ`
 - `JJ/MM/AAAA`
 
 ## Setup Windows
 
-Le guide pas a pas est disponible dans [GUIDE_SETUP.md](/A:/Mon application python/GUIDE_SETUP.md).
+Le guide pas à pas est disponible dans [GUIDE_SETUP.md](/A:/Mon application python/GUIDE_SETUP.md).
 
-## Mises a jour
+## Mises à jour
 
-Le guide de configuration des mises a jour est disponible dans [GUIDE_MISE_A_JOUR.md](/A:/Mon application python/GUIDE_MISE_A_JOUR.md).
+Le guide de configuration des mises à jour est disponible dans [GUIDE_MISE_A_JOUR.md](/A:/Mon application python/GUIDE_MISE_A_JOUR.md).
 
-## Mode connecte
+## Mode connecté
 
-Le guide de mise en reseau est disponible dans [GUIDE_MODE_CONNECTE.md](/A:/Mon application python/GUIDE_MODE_CONNECTE.md).
+Le guide de mise en réseau est disponible dans [GUIDE_MODE_CONNECTE.md](/A:/Mon application python/GUIDE_MODE_CONNECTE.md).

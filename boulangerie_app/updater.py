@@ -245,15 +245,15 @@ class UpdateChecker:
             with urlopen(request, timeout=10) as response:
                 payload = json.loads(response.read().decode("utf-8-sig"))
         except HTTPError as exc:
-            raise RuntimeError(f"Echec HTTP pendant la verification des mises a jour : {exc.code}") from exc
+            raise RuntimeError(f"Échec HTTP pendant la vérification des mises à jour : {exc.code}") from exc
         except URLError as exc:
-            raise RuntimeError("Impossible de contacter le serveur de mise a jour.") from exc
+            raise RuntimeError("Impossible de contacter le serveur de mise à jour.") from exc
         except json.JSONDecodeError as exc:
-            raise RuntimeError("Le manifeste de mise a jour n'est pas un JSON valide.") from exc
+            raise RuntimeError("Le manifeste de mise à jour n'est pas un JSON valide.") from exc
 
         version = str(payload.get("version", "")).strip()
         if not version:
-            raise RuntimeError("Le manifeste de mise a jour ne contient pas de numero de version.")
+            raise RuntimeError("Le manifeste de mise à jour ne contient pas de numéro de version.")
 
         download_url = str(payload.get("download_url") or manifest_url).strip()
         notes = str(payload.get("notes", "")).strip()

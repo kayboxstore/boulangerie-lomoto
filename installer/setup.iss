@@ -1,5 +1,5 @@
 #define MyAppName "Boulangerie Lomoto"
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.2.1"
 #define MyAppPublisher "Kay Box Store"
 #define MyAppExeName "Boulangerie Lomoto.exe"
 #define MyAppIdEscaped "{{D8D3424B-4C91-4C10-A7F5-84AB2F483F11}"
@@ -24,7 +24,7 @@ WizardStyle=modern
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Creer un raccourci sur le Bureau"; GroupDescription: "Raccourcis :"
+Name: "desktopicon"; Description: "Créer un raccourci sur le Bureau"; GroupDescription: "Raccourcis :"
 
 [Files]
 Source: "..\dist\Boulangerie Lomoto\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -114,27 +114,27 @@ begin
   if VersionComparison < 0 then
   begin
     PromptText :=
-      'La version ' + InstalledVersion + ' est deja installee.' + #13#10#13#10 +
-      'Voulez-vous la mettre a jour vers la version {#MyAppVersion} ?' + #13#10#13#10 +
-      'Oui : lancer la mise a jour.' + #13#10 +
-      'Non : conserver la version deja installee.';
+      'La version ' + InstalledVersion + ' est déjà installée.' + #13#10#13#10 +
+      'Voulez-vous la mettre ? jour vers la version {#MyAppVersion} ?' + #13#10#13#10 +
+      'Oui : lancer la mise à jour.' + #13#10 +
+      'Non : conserver la version déjà installée.';
   end
   else
   if VersionComparison = 0 then
   begin
     PromptText :=
-      'La version {#MyAppVersion} est deja installee.' + #13#10#13#10 +
-      'Voulez-vous la reinstaller avec ce setup ?' + #13#10#13#10 +
+      'La version {#MyAppVersion} est déjà installée.' + #13#10#13#10 +
+      'Voulez-vous la réinstaller avec ce setup ?' + #13#10#13#10 +
       'Oui : remplacer la version actuelle.' + #13#10 +
-      'Non : continuer a utiliser la version deja installee.';
+      'Non : continuer a utiliser la version déjà installée.';
   end
   else
   begin
     PromptText :=
-      'Une version plus recente (' + InstalledVersion + ') est deja installee.' + #13#10#13#10 +
+      'Une version plus récente (' + InstalledVersion + ') est déjà installée.' + #13#10#13#10 +
       'Voulez-vous la remplacer par cette version {#MyAppVersion} ?' + #13#10#13#10 +
-      'Oui : installer cette version a la place.' + #13#10 +
-      'Non : continuer a utiliser la version deja installee.';
+      'Oui : installer cette version ? la place.' + #13#10 +
+      'Non : continuer a utiliser la version déjà installée.';
   end;
 
   if MsgBox(PromptText, mbConfirmation, MB_YESNO) = IDNO then

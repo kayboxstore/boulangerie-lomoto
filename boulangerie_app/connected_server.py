@@ -93,7 +93,7 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
 
         method_name = str(payload.get("method", "")).strip()
         if method_name not in REMOTE_DATABASE_METHODS:
-            self._send_json(400, {"ok": False, "error": {"message": "Methode distante non autorisee."}})
+            self._send_json(400, {"ok": False, "error": {"message": "Méthode distante non autorisée."}})
             return
 
         try:

@@ -27,11 +27,35 @@ from .connected_server import (
     stop_embedded_server,
 )
 from .database import AuthenticatedUser, DatabaseHelper
+from .excel_reports import create_daily_excel_report
 from .reports import (
     ReportGenerationError,
     create_daily_pdf_report,
     get_report_scope_description,
     get_report_scope_label,
+)
+from .server_host import (
+    CentralServerSettings,
+    build_local_server_addresses,
+    get_windows_service_status,
+    install_or_update_windows_service,
+    is_running_as_administrator,
+    load_central_server_settings,
+    prepare_central_server_data,
+    remove_windows_service,
+    save_central_server_settings,
+    start_windows_service,
+    stop_windows_service,
+)
+from .status_labels import (
+    COMMISSION_FILTERS,
+    DEPOSITARY_STATUS,
+    ORDER_STATUS_RATES,
+    ORDER_STATUSES,
+    is_depositary_status,
+    is_legacy_depositary_6000_status,
+    normalize_status_form_label,
+    normalize_status_label,
 )
 from .updater import SessionNotice, UpdateCheckResult, UpdateChecker, UpdateInfo
 from .version import APP_NAME, APP_VERSION
@@ -46,22 +70,6 @@ ROLES = [
     "Caissier",
     "Gestionnaire de stock",
     "Gestionnaire des commandes",
-]
-
-ORDER_STATUSES = [
-    "Maman",
-    "Vente cash",
-    "Depositaire 6.000Fc",
-    "Depositaire 4.100Fc",
-]
-
-COMMISSION_FILTERS = [
-    "Tous",
-    "Maman",
-    "Depositaire",
-    "Vente cash",
-    "Depositaire 6.000Fc",
-    "Depositaire 4.100Fc",
 ]
 
 
@@ -144,6 +152,18 @@ def format_number(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+def format_file_size(value: int | float) -> str:
+    size = float(value)
+    units = ["o", "Ko", "Mo", "Go"]
+    unit_index = 0
+    while size >= 1024 and unit_index < len(units) - 1:
+        size /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(size)} {units[unit_index]}"
+    return f"{size:.1f} {units[unit_index]}"
+
+
 def _measure_window_size(window: tk.Misc) -> tuple[int, int]:
     width = window.winfo_width()
     height = window.winfo_height()
@@ -178,14 +198,14 @@ def center_window(window: tk.Misc) -> None:
     requested_width, requested_height = _measure_requested_content_size(window)
     required_width = requested_width + 24
     required_height = requested_height + 36
-    max_width = max(int(window.winfo_screenwidth() * 0.96), 320)
-    max_height = max(int(window.winfo_screenheight() * 0.92), 240)
+    max_width = max(int(window.winfo_scréenwidth() * 0.96), 320)
+    max_height = max(int(window.winfo_scréenheight() * 0.92), 240)
 
     width = min(max(width, required_width), max_width)
     height = min(max(height, required_height), max_height)
 
-    x = max((window.winfo_screenwidth() - width) // 2, 0)
-    y = max((window.winfo_screenheight() - height) // 2, 0)
+    x = max((window.winfo_scréenwidth() - width) // 2, 0)
+    y = max((window.winfo_scréenheight() - height) // 2, 0)
     window.geometry(f"{width}x{height}+{x}+{y}")
     if hasattr(window, "minsize"):
         window.minsize(width, height)
@@ -454,10 +474,10 @@ class LoginWindow(ttk.Frame):
             row=0, column=0, padx=6
         )
         ttk.Button(button_row, text="Quitter", command=self.on_quit).grid(row=0, column=1, padx=6)
-        ttk.Button(button_row, text="Parametres reseau", command=self.open_connection_settings).grid(
+        ttk.Button(button_row, text="Paramètres réseau", command=self.open_connection_settings).grid(
             row=0, column=2, padx=6
         )
-        ttk.Button(button_row, text="Detecter le serveur", command=self.detect_server_now).grid(
+        ttk.Button(button_row, text="Détecter le serveur", command=self.detect_server_now).grid(
             row=0, column=3, padx=6
         )
         row_index += 1
@@ -495,7 +515,7 @@ class LoginWindow(ttk.Frame):
             return
 
         self.discovery_in_progress = True
-        self.connection_status_var.set("Recherche automatique du serveur central sur le reseau local...")
+        self.connection_status_var.set("Recherche automatique du serveur central sur le réseau local...")
 
         def worker() -> None:
             try:
@@ -534,7 +554,7 @@ class LoginWindow(ttk.Frame):
             if not auto_apply:
                 messagebox.showinfo(
                     "Recherche automatique",
-                    "Aucun serveur central n'a ete detecte automatiquement sur le reseau local.",
+                    "Aucun serveur central n'a été détecté automatiquement sur le réseau local.",
                 )
             return
 
@@ -550,18 +570,18 @@ class LoginWindow(ttk.Frame):
 
         if auto_apply:
             self.connection_status_var.set(
-                f"Serveur detecte automatiquement : {selected_server.server_name} - {selected_server.server_url}"
+                f"Serveur détecté automatiquement : {selected_server.server_name} - {selected_server.server_url}"
             )
             return
 
         extra = ""
         if len(servers) > 1:
-            extra = f"\n\n{len(servers)} serveurs ont ete detectes. Le premier a ete preselectionne."
+            extra = f"\n\n{len(servers)} serveurs ont été détectés. Le premier a été présélectionné."
         token_line = "\nJeton requis." if selected_server.token_required else "\nAucun jeton requis."
         messagebox.showinfo(
             "Recherche automatique",
             (
-                "Serveur central detecte automatiquement :\n"
+                "Serveur central détecté automatiquement :\n"
                 f"{selected_server.server_name}\n"
                 f"{selected_server.server_url}"
                 f"{token_line}"
@@ -615,24 +635,28 @@ class ConnectionSettingsDialog(tk.Toplevel):
     def __init__(self, parent: LoginWindow) -> None:
         super().__init__(parent)
         self.parent = parent
-        self.title("Parametres reseau")
-        self.geometry("700x520")
-        self.minsize(680, 500)
+        self.title("Paramètres réseau")
+        self.geometry("760x700")
+        self.minsize(740, 660)
         self.configure(bg="#eef3f8")
         self.transient(parent)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
 
         settings = DatabaseHelper.get_connection_settings()
+        host_settings = load_central_server_settings()
         self.mode_var = tk.StringVar(value=settings.mode)
         self.server_url_var = tk.StringVar(value=settings.server_url)
-        self.api_token_var = tk.StringVar(value=settings.api_token)
+        preferred_token = settings.api_token or host_settings.normalized_token()
+        self.api_token_var = tk.StringVar(value=preferred_token)
         self.message_var = tk.StringVar(value="")
         self.server_status_var = tk.StringVar(value="")
-        self.server_button_var = tk.StringVar(value="Demarrer le serveur sur ce poste")
+        self.windows_service_status_var = tk.StringVar(value="")
+        self.server_button_var = tk.StringVar(value="Démarrer le serveur sur ce poste")
 
         self.build_ui()
         self.refresh_server_status()
+        self.refresh_windows_service_status()
         self.update_mode_fields()
         self.after(250, self.auto_discover_if_needed)
         self.after(0, lambda: center_window(self))
@@ -641,12 +665,12 @@ class ConnectionSettingsDialog(tk.Toplevel):
         frame = ttk.Frame(self, padding=18)
         frame.pack(fill="both", expand=True)
 
-        ttk.Label(frame, text="Mode connecte", style="Header.TLabel").pack(pady=(0, 12))
+        ttk.Label(frame, text="Mode connecté", style="Header.TLabel").pack(pady=(0, 12))
         ttk.Label(
             frame,
             text=(
                 "Choisissez si ce poste travaille en local, ou s'il doit utiliser un serveur central. "
-                "Le serveur central permet a plusieurs postes de partager les memes donnees en temps reel."
+                "Le serveur central permet à plusieurs postes de partager les mêmes données en temps réel."
             ),
             wraplength=620,
             justify="center",
@@ -663,7 +687,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
         ).grid(row=0, column=0, sticky="w", pady=4)
         ttk.Radiobutton(
             mode_frame,
-            text="Mode connecte au serveur central",
+            text="Mode connecté au serveur central",
             value="remote",
             variable=self.mode_var,
             command=self.update_mode_fields,
@@ -693,13 +717,13 @@ class ConnectionSettingsDialog(tk.Toplevel):
         )
         remote_frame.columnconfigure(1, weight=1)
 
-        server_frame = ttk.LabelFrame(frame, text="Serveur sur ce poste", style="Card.TLabelframe")
+        server_frame = ttk.LabelFrame(frame, text="Serveur temporaire sur ce poste", style="Card.TLabelframe")
         server_frame.pack(fill="x", pady=(0, 12))
         ttk.Label(
             server_frame,
             text=(
-                "Vous pouvez demarrer un serveur central directement sur ce poste. "
-                "Les autres postes devront alors se connecter a l'adresse affichee ci-dessous."
+                "Vous pouvez démarrer un serveur central temporaire directement sur ce poste. "
+                "Ce mode reste pratique pour un test rapide, mais il faut laisser l'application ouverte."
             ),
             wraplength=620,
             justify="center",
@@ -715,6 +739,39 @@ class ConnectionSettingsDialog(tk.Toplevel):
         server_buttons.pack()
         ttk.Button(server_buttons, textvariable=self.server_button_var, command=self.toggle_local_server).grid(
             row=0, column=0, padx=6
+        )
+
+        service_frame = ttk.LabelFrame(frame, text="Service Windows du serveur central", style="Card.TLabelframe")
+        service_frame.pack(fill="x", pady=(0, 12))
+        ttk.Label(
+            service_frame,
+            text=(
+                "Mode recommande pour le poste serveur : le service Windows demarre avec Windows "
+                "et reste actif meme si l'application est fermee."
+            ),
+            wraplength=620,
+            justify="center",
+        ).pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            service_frame,
+            textvariable=self.windows_service_status_var,
+            foreground="#2f5d3a",
+            wraplength=620,
+            justify="center",
+        ).pack(fill="x", pady=(0, 10))
+        service_buttons = ttk.Frame(service_frame)
+        service_buttons.pack()
+        ttk.Button(service_buttons, text="Installer / mettre à jour le service", command=self.install_windows_service).grid(
+            row=0, column=0, padx=6, pady=4
+        )
+        ttk.Button(service_buttons, text="Démarrer le service", command=self.start_windows_service_from_ui).grid(
+            row=0, column=1, padx=6, pady=4
+        )
+        ttk.Button(service_buttons, text="Arreter le service", command=self.stop_windows_service_from_ui).grid(
+            row=0, column=2, padx=6, pady=4
+        )
+        ttk.Button(service_buttons, text="Désinstaller le service", command=self.remove_windows_service_from_ui).grid(
+            row=0, column=3, padx=6, pady=4
         )
 
         footer = ttk.Frame(frame)
@@ -740,6 +797,25 @@ class ConnectionSettingsDialog(tk.Toplevel):
             api_token=self.api_token_var.get(),
         )
 
+    def current_server_host_settings(self) -> CentralServerSettings:
+        existing_settings = load_central_server_settings()
+        return CentralServerSettings(
+            port=existing_settings.normalized_port(),
+            api_token=self.api_token_var.get(),
+            data_dir=str(existing_settings.normalized_data_dir()),
+        )
+
+    def ensure_admin_for_service_action(self) -> bool:
+        if is_running_as_administrator():
+            return True
+        message = (
+            "Cette action demande les droits administrateur Windows. "
+            "Relancez l'application en tant qu'administrateur sur le poste serveur."
+        )
+        self.message_var.set(message)
+        messagebox.showwarning("Service Windows", message)
+        return False
+
     def update_mode_fields(self) -> None:
         remote_enabled = self.mode_var.get().strip().lower() == "remote"
         target_state = "!disabled" if remote_enabled else "disabled"
@@ -756,7 +832,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
             self.server_status_var.set(
                 f"Aucun serveur local n'est actif. Port recommande : {REMOTE_DEFAULT_PORT}."
             )
-            self.server_button_var.set("Demarrer le serveur sur ce poste")
+            self.server_button_var.set("Démarrer le serveur sur ce poste")
             return
 
         addresses = "\n".join(handle.urls)
@@ -769,22 +845,136 @@ class ConnectionSettingsDialog(tk.Toplevel):
         )
         self.server_button_var.set("Arreter le serveur sur ce poste")
 
-    def use_local_server_url(self) -> None:
-        handle = get_embedded_server_status()
-        if handle is None:
-            self.message_var.set(
-                "Demarrez d'abord le serveur sur ce poste, ou saisissez l'adresse du serveur central."
+    def refresh_windows_service_status(self) -> None:
+        service_status = get_windows_service_status()
+        host_settings = load_central_server_settings()
+        addresses = "\n".join(build_local_server_addresses(host_settings.normalized_port()))
+        token_line = "Jeton : defini" if host_settings.normalized_token() else "Jeton : aucun"
+        data_line = f"Dossier central : {host_settings.normalized_data_dir()}"
+
+        if not service_status.installed:
+            self.windows_service_status_var.set(
+                f"{service_status.message}\n{data_line}\nPort : {host_settings.normalized_port()}\n{token_line}"
             )
             return
-        self.server_url_var.set(handle.preferred_url)
-        if handle.api_token and not self.api_token_var.get().strip():
-            self.api_token_var.set(handle.api_token)
-        self.message_var.set("L'adresse locale du serveur a ete reportee dans le champ ci-dessus.")
+
+        details = [service_status.message]
+        if addresses:
+            details.append(addresses)
+        details.append(data_line)
+        details.append(token_line)
+        self.windows_service_status_var.set("\n".join(details))
+
+    def use_local_server_url(self) -> None:
+        handle = get_embedded_server_status()
+        if handle is not None:
+            self.server_url_var.set(handle.preferred_url)
+            if handle.api_token and not self.api_token_var.get().strip():
+                self.api_token_var.set(handle.api_token)
+            self.message_var.set("L'adresse locale du serveur temporaire a été reportée dans le champ ci-dessus.")
+            return
+
+        service_status = get_windows_service_status()
+        host_settings = load_central_server_settings()
+        addresses = build_local_server_addresses(host_settings.normalized_port())
+        if service_status.installed and addresses:
+            self.server_url_var.set(addresses[0])
+            if host_settings.normalized_token() and not self.api_token_var.get().strip():
+                self.api_token_var.set(host_settings.normalized_token())
+            if service_status.is_running:
+                self.message_var.set("L'adresse locale du service Windows a été reportée dans le champ ci-dessus.")
+            else:
+                self.message_var.set(
+                    "L'adresse du service Windows a été reportée. Pensez à démarrer le service avant de connecter les autres postes."
+                )
+            return
+
+        self.message_var.set(
+            "Demarrez d'abord le serveur temporaire ou le service Windows, ou saisissez l'adresse du serveur central."
+        )
+
+    def install_windows_service(self) -> None:
+        if not self.ensure_admin_for_service_action():
+            return
+        if is_embedded_server_running():
+            self.message_var.set(
+                "Arrêtez d'abord le serveur temporaire avant d'installer ou mettre à jour le service Windows."
+            )
+            return
+        try:
+            message = install_or_update_windows_service(
+                self.current_server_host_settings(),
+                source_data_dir=DatabaseHelper.app_data_dir,
+            )
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+
+        host_settings = load_central_server_settings()
+        addresses = build_local_server_addresses(host_settings.normalized_port())
+        if addresses and not self.server_url_var.get().strip():
+            self.server_url_var.set(addresses[0])
+        self.refresh_windows_service_status()
+        self.message_var.set(message)
+
+    def start_windows_service_from_ui(self) -> None:
+        if not self.ensure_admin_for_service_action():
+            return
+        if is_embedded_server_running():
+            self.message_var.set(
+                "Arrêtez d'abord le serveur temporaire avant de démarrer le service Windows."
+            )
+            return
+        try:
+            install_or_update_windows_service(
+                self.current_server_host_settings(),
+                source_data_dir=DatabaseHelper.app_data_dir,
+            )
+            message = start_windows_service()
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+
+        self.refresh_windows_service_status()
+        self.message_var.set(message)
+
+    def stop_windows_service_from_ui(self) -> None:
+        if not self.ensure_admin_for_service_action():
+            return
+        try:
+            message = stop_windows_service()
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+
+        self.refresh_windows_service_status()
+        self.message_var.set(message)
+
+    def remove_windows_service_from_ui(self) -> None:
+        if not self.ensure_admin_for_service_action():
+            return
+        if not messagebox.askyesno(
+            "Service Windows",
+            "Voulez-vous vraiment désinstaller le service Windows du serveur central ?",
+        ):
+            return
+
+        try:
+            service_status = get_windows_service_status()
+            if service_status.is_running:
+                stop_windows_service()
+            message = remove_windows_service()
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+
+        self.refresh_windows_service_status()
+        self.message_var.set(message)
 
     def test_connection(self) -> None:
         settings = self.current_settings()
         if not settings.is_remote():
-            self.message_var.set("Activez d'abord le mode connecte puis saisissez une adresse serveur.")
+            self.message_var.set("Activez d'abord le mode connecté puis saisissez une adresse serveur.")
             return
 
         try:
@@ -805,7 +995,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.message_var.set("Recherche automatique des serveurs centraux en cours...")
         servers = discover_remote_servers(timeout_seconds=REMOTE_DISCOVERY_TIMEOUT_SECONDS)
         if not servers:
-            self.message_var.set("Aucun serveur central n'a ete detecte automatiquement sur le reseau local.")
+            self.message_var.set("Aucun serveur central n'a été détecté automatiquement sur le réseau local.")
             return
 
         selected_server = servers[0]
@@ -815,7 +1005,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
 
         extra = ""
         if len(servers) > 1:
-            extra = f" {len(servers)} serveurs ont ete trouves. Le premier a ete preselectionne."
+            extra = f" {len(servers)} serveurs ont été trouvés. Le premier a été présélectionné."
 
         token_hint = (
             " Ce serveur demande un jeton d'acces."
@@ -834,14 +1024,25 @@ class ConnectionSettingsDialog(tk.Toplevel):
         if is_embedded_server_running():
             stop_embedded_server()
             self.refresh_server_status()
-            self.message_var.set("Le serveur local a ete arrete.")
+            self.refresh_windows_service_status()
+            self.message_var.set("Le serveur local a été arrêté.")
             return
 
+        service_status = get_windows_service_status()
+        if service_status.is_running:
+            self.message_var.set(
+                "Arrêtez d'abord le service Windows avant de démarrer un serveur temporaire sur ce poste."
+            )
+            return
+
+        host_settings = self.current_server_host_settings()
         try:
+            save_central_server_settings(host_settings)
+            prepare_central_server_data(DatabaseHelper.app_data_dir)
             handle = start_embedded_server(
-                port=REMOTE_DEFAULT_PORT,
-                api_token=self.api_token_var.get().strip(),
-                data_dir=DatabaseHelper.app_data_dir,
+                port=host_settings.normalized_port(),
+                api_token=host_settings.normalized_token(),
+                data_dir=host_settings.normalized_data_dir(),
             )
         except Exception as exc:
             self.message_var.set(str(exc))
@@ -850,14 +1051,15 @@ class ConnectionSettingsDialog(tk.Toplevel):
         if not self.server_url_var.get().strip():
             self.server_url_var.set(handle.preferred_url)
         self.refresh_server_status()
+        self.refresh_windows_service_status()
         self.message_var.set(
-            "Le serveur local est demarre. Utilisez l'adresse affichee pour connecter les autres postes."
+            "Le serveur local est démarré. Utilisez l'adresse affichée pour connecter les autres postes."
         )
 
     def save_settings(self) -> None:
         settings = self.current_settings()
         if settings.normalized_mode() == "remote" and not settings.normalized_url():
-            self.message_var.set("Saisissez l'adresse du serveur central avant d'enregistrer le mode connecte.")
+            self.message_var.set("Saisissez l'adresse du serveur central avant d'enregistrer le mode connecté.")
             return
         if settings.is_remote():
             try:
@@ -878,13 +1080,13 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.parent.refresh_connection_status()
         if settings.is_remote():
             messagebox.showinfo(
-                "Mode connecte",
-                "Les parametres reseau ont ete enregistres. Les prochaines connexions utiliseront le serveur central.",
+                "Mode connecté",
+                "Les paramêtres réseau ont été enregistrés. Les prochaines connexions utiliseront le serveur central.",
             )
         else:
             messagebox.showinfo(
                 "Mode local",
-                "Les parametres reseau ont ete enregistres. Ce poste utilise maintenant sa base locale.",
+                "Les paramêtres réseau ont été enregistrés. Ce poste utilise maintenant sa base locale.",
             )
         self.close_window()
 
@@ -987,7 +1189,7 @@ class DashboardWindow(tk.Toplevel):
         ttk.Label(summary_frame, textvariable=self.summary_var, justify="center").pack(fill="x")
 
         self.security_message_var = tk.StringVar(value="")
-        security_frame = ttk.LabelFrame(container, text="Securite du compte", style="Card.TLabelframe")
+        security_frame = ttk.LabelFrame(container, text="Sécurité du compte", style="Card.TLabelframe")
         security_frame.pack(fill="x", pady=(0, 18))
         self.security_label = ttk.Label(
             security_frame,
@@ -1003,24 +1205,27 @@ class DashboardWindow(tk.Toplevel):
         ).pack(anchor="center")
         self.refresh_security_notice()
 
-        reports_frame = ttk.LabelFrame(container, text="Rapports PDF", style="Card.TLabelframe")
+        reports_frame = ttk.LabelFrame(container, text="Rapports PDF et Excel", style="Card.TLabelframe")
         reports_frame.pack(fill="x", pady=(0, 18))
         ttk.Label(
             reports_frame,
             text=(
-                "Generez un rapport journalier pret a imprimer. Le contenu sera automatiquement "
-                "limite aux modules autorises pour le profil connecte."
+                "Générez un rapport journalier au format PDF ou Excel. Le contenu sera automatiquement "
+                "limité aux modules autorisés pour le profil connecté."
             ),
             wraplength=640,
             justify="center",
         ).pack(fill="x", pady=(0, 12))
         report_buttons = ttk.Frame(reports_frame)
         report_buttons.pack(anchor="center")
-        ttk.Button(report_buttons, text="Generer un rapport PDF", command=self.open_pdf_report).grid(
+        ttk.Button(report_buttons, text="Générer un rapport PDF", command=self.open_pdf_report).grid(
             row=0, column=0, padx=6, pady=4
         )
-        ttk.Button(report_buttons, text="Ouvrir le dossier des rapports", command=self.open_reports_folder).grid(
+        ttk.Button(report_buttons, text="Générer un rapport Excel", command=self.open_excel_report).grid(
             row=0, column=1, padx=6, pady=4
+        )
+        ttk.Button(report_buttons, text="Ouvrir le dossier des rapports", command=self.open_reports_folder).grid(
+            row=0, column=2, padx=6, pady=4
         )
 
         maintenance_frame = ttk.LabelFrame(container, text="Sauvegarde et restauration", style="Card.TLabelframe")
@@ -1080,8 +1285,8 @@ class DashboardWindow(tk.Toplevel):
     def get_maintenance_text(self) -> str:
         if DatabaseHelper.is_remote_mode():
             return (
-                "En mode connecte, les sauvegardes et restaurations doivent etre faites sur le poste "
-                "serveur central afin de proteger la base partagee."
+                "En mode connecté, les sauvegardes et restaurations de l'admin sont executees "
+                "directement sur le serveur central pour protéger la base partagée."
             )
         return "Sauvegardez la base dans le dossier local de l'application, puis restaurez une sauvegarde si besoin."
 
@@ -1092,10 +1297,13 @@ class DashboardWindow(tk.Toplevel):
         self.notice_label = None
 
     def apply_permissions(self) -> None:
+        self.backup_button.state(["!disabled"])
+        self.restore_button.state(["!disabled"])
+        self.backup_folder_button.state(["!disabled"])
         if DatabaseHelper.is_remote_mode():
-            self.backup_button.state(["disabled"])
-            self.restore_button.state(["disabled"])
-            self.backup_folder_button.state(["disabled"])
+            self.backup_folder_button.configure(text="Voir les sauvegardes du serveur")
+        else:
+            self.backup_folder_button.configure(text="Ouvrir le dossier des sauvegardes")
 
         if self.user.role == "Admin":
             return
@@ -1142,7 +1350,7 @@ class DashboardWindow(tk.Toplevel):
             stock_line = (
                 "Stock du jour | "
                 f"Ouverture farine : {format_number(float(stock_journal.get('FarineOuverture', 0) or 0))} | "
-                f"Cloture farine : {format_number(float(stock_journal.get('FarineCloture', 0) or 0))}"
+                f"Clôture farine : {format_number(float(stock_journal.get('FarineCloture', 0) or 0))}"
             )
         return (
             f"Utilisateurs : {DatabaseHelper.count_users()} | Sorties stock : {DatabaseHelper.count_stock_exits()} | "
@@ -1171,7 +1379,7 @@ class DashboardWindow(tk.Toplevel):
             f"Levure : {format_number(float(stock_journal.get('LevureOuverture', 0) or 0))} | "
             f"Sel : {format_number(float(stock_journal.get('SelOuverture', 0) or 0))} | "
             f"Huile : {format_number(float(stock_journal.get('HuileOuverture', 0) or 0))}\n"
-            f"Cloture | Farine : {format_number(float(stock_journal.get('FarineCloture', 0) or 0))} | "
+            f"Clôture | Farine : {format_number(float(stock_journal.get('FarineCloture', 0) or 0))} | "
             f"Levure : {format_number(float(stock_journal.get('LevureCloture', 0) or 0))} | "
             f"Sel : {format_number(float(stock_journal.get('SelCloture', 0) or 0))} | "
             f"Huile : {format_number(float(stock_journal.get('HuileCloture', 0) or 0))}"
@@ -1190,7 +1398,7 @@ class DashboardWindow(tk.Toplevel):
                 f"Montant attendu : {format_fc(float(orders_summary.get('MontantAttendu', 0) or 0))}"
             ),
             (
-                f"Montant recu : {format_fc(float(orders_summary.get('MontantRecu', 0) or 0))} | "
+                f"Montant reçu : {format_fc(float(orders_summary.get('MontantRecu', 0) or 0))} | "
                 f"Dettes : {format_fc(float(orders_summary.get('TotalDettes', 0) or 0))}"
             ),
             f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())}",
@@ -1199,21 +1407,21 @@ class DashboardWindow(tk.Toplevel):
             cash_today = DatabaseHelper.get_cash_for_date(date.today())
             expenses_today = float(cash_today.get("MontantTotalDepenses", 0) or 0)
             lines.append(
-                f"Depenses du jour : {format_fc(expenses_today)} | Solde global : {format_fc(DatabaseHelper.get_total_cash())}"
+                f"Dépenses du jour : {format_fc(expenses_today)} | Solde global : {format_fc(DatabaseHelper.get_total_cash())}"
             )
         return "\n".join(lines)
 
     def refresh_security_notice(self) -> None:
         if DatabaseHelper.is_using_default_password(self.user.identifiant):
             self.security_message_var.set(
-                "Attention : ce compte utilise encore le mot de passe par defaut. "
-                "Changez-le maintenant pour mieux proteger l'application."
+                "Attention : ce compte utilise encore le mot de passe par défaut. "
+                "Changez-le maintenant pour mieux protéger l'application."
             )
             self.security_label.configure(foreground="#8b0000")
             return
 
         self.security_message_var.set(
-            "Vous pouvez changer votre mot de passe a tout moment depuis ce tableau de bord."
+            "Vous pouvez changer votre mot de passe à tout moment depuis ce tableau de bord."
         )
         self.security_label.configure(foreground="#2f5d3a")
 
@@ -1239,54 +1447,62 @@ class DashboardWindow(tk.Toplevel):
             self.show_update_dialog(result.update_info)
 
     def backup_database(self) -> None:
-        if DatabaseHelper.is_remote_mode():
-            messagebox.showwarning(
-                "Sauvegarde",
-                "Les sauvegardes sont disponibles uniquement sur le poste serveur central en mode connecte.",
-            )
-            return
         try:
             backup_path = DatabaseHelper.backup_database()
         except Exception as exc:
             messagebox.showerror("Sauvegarde", str(exc))
             return
 
-        open_folder = messagebox.askyesno(
-            "Sauvegarde terminée",
-            (
-                "La sauvegarde a ete creee avec succes.\n\n"
+        if DatabaseHelper.is_remote_mode():
+            prompt = (
+                "Une sauvegarde a été créée sur le serveur central.\n\n"
+                f"Fichier : {backup_path}\n\n"
+                "Voulez-vous voir les sauvegardes du serveur ?"
+            )
+        else:
+            prompt = (
+                "La sauvegarde a été créée avec succès.\n\n"
                 f"Fichier : {backup_path}\n\n"
                 "Voulez-vous ouvrir le dossier des sauvegardes ?"
-            ),
-        )
+            )
+
+        open_folder = messagebox.askyesno("Sauvegarde terminée", prompt)
         if open_folder:
             self.open_backups_folder()
 
     def restore_database(self) -> None:
         if DatabaseHelper.is_remote_mode():
-            messagebox.showwarning(
-                "Restauration",
-                "La restauration est disponible uniquement sur le poste serveur central en mode connecte.",
+            selected_backup = self.choose_remote_backup_for_restore()
+            if selected_backup is None:
+                return
+            file_path = str(selected_backup)
+        else:
+            file_path = filedialog.askopenfilename(
+                title="Choisir une sauvegarde",
+                initialdir=str(DatabaseHelper.backups_dir),
+                filetypes=[
+                    ("Bases SQLite", "*.db *.sqlite *.sqlite3 *.bak"),
+                    ("Tous les fichiers", "*.*"),
+                ],
             )
-            return
-        file_path = filedialog.askopenfilename(
-            title="Choisir une sauvegarde",
-            initialdir=str(DatabaseHelper.backups_dir),
-            filetypes=[
-                ("Bases SQLite", "*.db *.sqlite *.sqlite3 *.bak"),
-                ("Tous les fichiers", "*.*"),
-            ],
-        )
         if not file_path:
             return
 
+        warning_text = (
+            "La restauration va remplacer les données actuelles.\n"
+            "Une sauvegarde de sécurité sera créée automatiquement avant la restauration.\n\n"
+            "Voulez-vous continuer ?"
+        )
+        if DatabaseHelper.is_remote_mode():
+            warning_text = (
+                "La restauration va remplacer les données du serveur central.\n"
+                "Une sauvegarde de sécurité sera créée automatiquement avant la restauration.\n\n"
+                "Tous les postes devront ensuite se reconnecter.\n\n"
+                "Voulez-vous continuer ?"
+            )
         if not messagebox.askyesno(
             "Restaurer une sauvegarde",
-            (
-                "La restauration va remplacer les donnees actuelles.\n"
-                "Une sauvegarde de securite sera creee automatiquement avant la restauration.\n\n"
-                "Voulez-vous continuer ?"
-            ),
+            warning_text,
         ):
             return
 
@@ -1296,30 +1512,41 @@ class DashboardWindow(tk.Toplevel):
             messagebox.showerror("Restauration", str(exc))
             return
 
-        details = f"Sauvegarde restauree depuis : {file_path}"
+        details = f"Sauvegarde restaurée depuis : {file_path}"
         if safety_backup is not None:
-            details += f"\nSauvegarde de securite creee ici : {safety_backup}"
+            details += f"\nSauvegarde de sécurité créée ici : {safety_backup}"
 
-        messagebox.showinfo(
-            "Restauration terminée",
-            details + "\n\nL'application va se fermer pour recharger les nouvelles donnees.",
-        )
+        if DatabaseHelper.is_remote_mode():
+            details += "\n\nL'application va se fermer pour forcer une nouvelle connexion au serveur central."
+        else:
+            details += "\n\nL'application va se fermer pour recharger les nouvelles données."
+        messagebox.showinfo("Restauration terminée", details)
         self.root.destroy()
 
     def open_backups_folder(self) -> None:
         if DatabaseHelper.is_remote_mode():
-            messagebox.showwarning(
-                "Sauvegardes",
-                "Le dossier des sauvegardes est gere sur le poste serveur central en mode connecte.",
-            )
+            self.show_server_backups_browser()
             return
         open_folder(DatabaseHelper.backups_dir)
+
+    def show_server_backups_browser(self) -> None:
+        browser = ServerBackupsWindow(self, selection_mode=False)
+        self.wait_window(browser)
+
+    def choose_remote_backup_for_restore(self) -> Path | None:
+        browser = ServerBackupsWindow(self, selection_mode=True)
+        self.wait_window(browser)
+        return browser.selected_backup_path
 
     def open_reports_folder(self) -> None:
         open_folder(DatabaseHelper.get_reports_dir_for_user(self.user.identifiant))
 
     def open_pdf_report(self) -> None:
         window = PdfReportWindow(self)
+        self.wait_window(window)
+
+    def open_excel_report(self) -> None:
+        window = ExcelReportWindow(self)
         self.wait_window(window)
 
     def show_update_dialog(self, update_info: UpdateInfo) -> None:
@@ -1335,9 +1562,9 @@ class DashboardWindow(tk.Toplevel):
         if update_info.notes:
             message += f"\n\nNotes :\n{update_info.notes}"
 
-        message += "\n\nVoulez-vous ouvrir le lien de telechargement ?"
+        message += "\n\nVoulez-vous ouvrir le lien de téléchargement ?"
 
-        if messagebox.askyesno("Mise a jour disponible", message):
+        if messagebox.askyesno("Mise à jour disponible", message):
             webbrowser.open(update_info.download_url)
 
     def can_access(self, module_name: str) -> bool:
@@ -1471,6 +1698,151 @@ class BaseModuleWindow(tk.Toplevel):
         return
 
 
+class ServerBackupsWindow(BaseModuleWindow):
+    def __init__(self, parent: DashboardWindow, selection_mode: bool) -> None:
+        title = "Choisir une sauvegarde du serveur" if selection_mode else "Sauvegardes du serveur central"
+        super().__init__(parent, title, "920x460")
+        self.selection_mode = selection_mode
+        self.selected_backup_path: Path | None = None
+        self.server_directory_var = tk.StringVar(value="Chargement...")
+        self.message_var = tk.StringVar(value="")
+        self.table: DataTable | None = None
+        self.build_ui()
+        self.refresh_backups()
+
+    def build_ui(self) -> None:
+        container = self.body
+        container.columnconfigure(0, weight=1)
+        ttk.Label(
+            container,
+            text=(
+                "Les sauvegardes ci-dessous sont stockées sur le serveur central. "
+                "Vous pouvez en consulter la liste ou en choisir une pour la restauration."
+            ),
+            wraplength=780,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+        location_frame = ttk.LabelFrame(container, text="Emplacement serveur", style="Card.TLabelframe")
+        location_frame.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        location_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            location_frame,
+            textvariable=self.server_directory_var,
+            wraplength=760,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(location_frame, text="Copier le chemin", command=self.copy_server_directory_path).grid(
+            row=0, column=1, sticky="e"
+        )
+
+        self.table = DataTable(container, height=10)
+        self.table.grid(row=2, column=0, sticky="nsew")
+        container.rowconfigure(2, weight=1)
+        self.table.tree.bind("<Double-1>", self.handle_double_click)
+
+        ttk.Label(
+            container,
+            textvariable=self.message_var,
+            foreground="#4b5563",
+            justify="left",
+            wraplength=780,
+        ).grid(row=3, column=0, sticky="ew", pady=(12, 8))
+
+        actions = ttk.Frame(container)
+        actions.grid(row=4, column=0, sticky="e")
+        ttk.Button(actions, text="Actualiser", command=self.refresh_backups).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(actions, text="Copier le chemin selectionne", command=self.copy_selected_path).grid(
+            row=0, column=1, padx=(0, 8)
+        )
+        if self.selection_mode:
+            ttk.Button(actions, text="Utiliser cette sauvegarde", command=self.confirm_selection).grid(
+                row=0, column=2, padx=(0, 8)
+            )
+        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=3)
+
+    def refresh_backups(self) -> None:
+        if self.table is None:
+            return
+        try:
+            backup_dir = DatabaseHelper.get_backups_directory()
+            rows = DatabaseHelper.list_backup_files()
+        except Exception as exc:
+            self.server_directory_var.set("Emplacement indisponible.")
+            self.message_var.set(f"Impossible de lire les sauvegardes du serveur : {exc}")
+            self.table.set_data([], ["NomFichier", "DateModification", "TailleOctets", "CheminComplet"])
+            return
+
+        self.server_directory_var.set(str(backup_dir))
+        if rows:
+            self.message_var.set(
+                f"{len(rows)} sauvegarde(s) disponible(s) sur le serveur central."
+            )
+        else:
+            self.message_var.set("Aucune sauvegarde n'est disponible pour le moment sur le serveur central.")
+        self.table.set_data(
+            rows,
+            ["NomFichier", "DateModification", "TailleOctets", "CheminComplet"],
+            headings={
+                "NomFichier": "Fichier",
+                "DateModification": "Derniere modification",
+                "TailleOctets": "Taille",
+                "CheminComplet": "Chemin complet",
+            },
+            hidden_columns=["CheminComplet"],
+            formatters={
+                "DateModification": lambda value: value.strftime("%d/%m/%Y %H:%M")
+                if isinstance(value, datetime)
+                else str(value),
+                "TailleOctets": lambda value: format_file_size(int(value or 0)),
+            },
+        )
+
+    def handle_double_click(self, _event: tk.Event[tk.Misc]) -> None:
+        if self.selection_mode:
+            self.confirm_selection()
+        else:
+            self.copy_selected_path()
+
+    def copy_server_directory_path(self) -> None:
+        path_text = self.server_directory_var.get().strip()
+        if not path_text or path_text == "Chargement..." or path_text == "Emplacement indisponible.":
+            messagebox.showinfo("Sauvegardes", "Le chemin du serveur n'est pas encore disponible.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(path_text)
+        self.message_var.set("Le chemin du dossier de sauvegarde du serveur a été copié.")
+
+    def copy_selected_path(self) -> None:
+        if self.table is None:
+            return
+        row = self.table.selected_row()
+        if not row:
+            messagebox.showinfo("Sauvegardes", "Selectionnez d'abord une sauvegarde dans la liste.")
+            return
+        path_value = row.get("CheminComplet")
+        if not path_value:
+            messagebox.showinfo("Sauvegardes", "Le chemin de cette sauvegarde est indisponible.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(str(path_value))
+        self.message_var.set("Le chemin de la sauvegarde sélectionnée a été copié.")
+
+    def confirm_selection(self) -> None:
+        if self.table is None:
+            return
+        row = self.table.selected_row()
+        if not row:
+            messagebox.showinfo("Restauration", "Selectionnez d'abord une sauvegarde du serveur.")
+            return
+        path_value = row.get("CheminComplet")
+        if not path_value:
+            messagebox.showerror("Restauration", "Le chemin de la sauvegarde sélectionnée est indisponible.")
+            return
+        self.selected_backup_path = Path(path_value)
+        self.close_window()
+
+
 class PdfReportWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
         super().__init__(parent, "Rapport PDF journalier", "620x360")
@@ -1491,7 +1863,7 @@ class PdfReportWindow(BaseModuleWindow):
         ttk.Label(
             intro,
             text=(
-                "Choisissez une date puis generez un document PDF pret a imprimer. "
+                "Choisissez une date puis générez un document PDF prêt à imprimer. "
                 f"{get_report_scope_description(self.role)}"
             ),
             wraplength=500,
@@ -1504,7 +1876,7 @@ class PdfReportWindow(BaseModuleWindow):
             justify="center",
         ).pack(fill="x", pady=(8, 0))
 
-        form = ttk.LabelFrame(container, text="Parametres du rapport", style="Card.TLabelframe")
+        form = ttk.LabelFrame(container, text="Paramètres du rapport", style="Card.TLabelframe")
         form.pack(fill="x")
 
         ttk.Label(form, text="Date du rapport").grid(row=0, column=0, sticky="w", pady=6)
@@ -1519,7 +1891,7 @@ class PdfReportWindow(BaseModuleWindow):
 
         actions = ttk.Frame(form)
         actions.grid(row=2, column=0, columnspan=2, pady=(14, 0))
-        ttk.Button(actions, text="Generer le PDF", style="Primary.TButton", command=self.generate_report).grid(
+        ttk.Button(actions, text="Générer le PDF", style="Primary.TButton", command=self.generate_report).grid(
             row=0, column=0, padx=6
         )
         ttk.Button(actions, text="Ouvrir le dossier des rapports", command=self.open_reports_folder).grid(
@@ -1565,8 +1937,8 @@ class PdfReportWindow(BaseModuleWindow):
             self.message_var.set(f"Generation impossible : {exc}")
             return
 
-        self.message_var.set(f"Rapport cree : {report_path}")
-        message = f"Le rapport PDF a ete cree avec succes.\n\nFichier : {report_path}"
+        self.message_var.set(f"Rapport créé : {report_path}")
+        message = f"Le rapport PDF a été créé avec succès.\n\nFichier : {report_path}"
         if self.open_after_generation_var.get():
             message += "\n\nVoulez-vous l'ouvrir maintenant ?"
             if messagebox.askyesno("Rapport PDF", message):
@@ -1581,6 +1953,119 @@ class PdfReportWindow(BaseModuleWindow):
         open_folder(self.reports_dir)
 
 
+class ExcelReportWindow(BaseModuleWindow):
+    def __init__(self, parent: DashboardWindow) -> None:
+        super().__init__(parent, "Rapport Excel journalier", "620x360")
+        self.identifiant = parent.user.identifiant
+        self.role = parent.user.role
+        self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
+        self.open_after_generation_var = tk.BooleanVar(value=True)
+        self.message_var = tk.StringVar(value="")
+        self.build_ui()
+
+    def build_ui(self) -> None:
+        container = self.body
+
+        ttk.Label(container, text="Rapport Excel journalier", style="Header.TLabel").pack(pady=(0, 14))
+
+        intro = ttk.LabelFrame(container, text="Export Excel", style="Card.TLabelframe")
+        intro.pack(fill="x", pady=(0, 14))
+        ttk.Label(
+            intro,
+            text=(
+                "Choisissez une date puis générez un classeur Excel prêt à partager ou à retravailler. "
+                f"{get_report_scope_description(self.role)}"
+            ),
+            wraplength=500,
+            justify="center",
+        ).pack(fill="x")
+        ttk.Label(
+            intro,
+            text=f"Profil du rapport : {get_report_scope_label(self.role)}",
+            foreground="#2f5d3a",
+            justify="center",
+        ).pack(fill="x", pady=(8, 0))
+
+        form = ttk.LabelFrame(container, text="Paramètres du rapport", style="Card.TLabelframe")
+        form.pack(fill="x")
+
+        ttk.Label(form, text="Date du rapport").grid(row=0, column=0, sticky="w", pady=6)
+        self.date_field = DateField(form)
+        self.date_field.grid(row=0, column=1, sticky="ew", pady=6)
+
+        ttk.Checkbutton(
+            form,
+            text="Proposer l'ouverture du fichier Excel après génération",
+            variable=self.open_after_generation_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        actions = ttk.Frame(form)
+        actions.grid(row=2, column=0, columnspan=2, pady=(14, 0))
+        ttk.Button(
+            actions,
+            text="Générer le fichier Excel",
+            style="Primary.TButton",
+            command=self.generate_report,
+        ).grid(row=0, column=0, padx=6)
+        ttk.Button(actions, text="Ouvrir le dossier des rapports", command=self.open_reports_folder).grid(
+            row=0, column=1, padx=6
+        )
+        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=2, padx=6)
+
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            container,
+            textvariable=self.message_var,
+            foreground="#8b0000",
+            wraplength=520,
+            justify="center",
+        ).pack(fill="x", pady=(12, 0))
+
+    def generate_report(self) -> None:
+        try:
+            target_date = self.date_field.get_date()
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        suggested_path = self.reports_dir / f"rapport-excel-journalier-{target_date.strftime('%Y%m%d')}.xlsx"
+        destination = filedialog.asksaveasfilename(
+            title="Enregistrer le rapport Excel",
+            initialdir=str(self.reports_dir),
+            initialfile=suggested_path.name,
+            defaultextension=".xlsx",
+            filetypes=[("Classeur Excel", "*.xlsx")],
+        )
+        if not destination:
+            return
+
+        try:
+            report_path = create_daily_excel_report(target_date, destination, role=self.role)
+        except ReportGenerationError as exc:
+            self.message_var.set(str(exc))
+            return
+        except Exception as exc:
+            self.message_var.set(f"Génération impossible : {exc}")
+            return
+
+        self.message_var.set(f"Rapport créé : {report_path}")
+        message = f"Le rapport Excel a été créé avec succès.\n\nFichier : {report_path}"
+        if self.open_after_generation_var.get():
+            message += "\n\nVoulez-vous l'ouvrir maintenant ?"
+            if messagebox.askyesno("Rapport Excel", message):
+                open_file(report_path)
+            return
+
+        message += "\n\nVoulez-vous ouvrir le dossier qui contient ce rapport ?"
+        if messagebox.askyesno("Rapport Excel", message):
+            self.open_reports_folder()
+
+    def open_reports_folder(self) -> None:
+        open_folder(self.reports_dir)
+
+
 class ChangePasswordWindow(BaseModuleWindow):
     def __init__(
         self,
@@ -1588,7 +2073,7 @@ class ChangePasswordWindow(BaseModuleWindow):
         identifiant: str,
         on_password_changed: Callable[[], None] | None = None,
     ) -> None:
-        super().__init__(parent, "Securite du compte", "560x420")
+        super().__init__(parent, "Sécurité du compte", "560x420")
         self.identifiant = identifiant
         self.on_password_changed = on_password_changed
         self.current_password_var = tk.StringVar()
@@ -1607,7 +2092,7 @@ class ChangePasswordWindow(BaseModuleWindow):
 
         if DatabaseHelper.is_using_default_password(self.identifiant):
             description_text = (
-                "Ce compte utilise encore le mot de passe par defaut. "
+                "Ce compte utilise encore le mot de passe par défaut. "
                 "Choisissez-en un nouveau des maintenant."
             )
             description_color = "#8b0000"
@@ -1687,7 +2172,7 @@ class ChangePasswordWindow(BaseModuleWindow):
             return
 
         self.message_var.set("")
-        messagebox.showinfo("Securite", "Le mot de passe a ete modifie avec succes.")
+        messagebox.showinfo("Sécurité", "Le mot de passe a été modifié avec succès.")
         if self.on_password_changed is not None:
             self.on_password_changed()
         self.destroy()
@@ -2180,6 +2665,7 @@ class OrdersWindow(BaseModuleWindow):
         self.edit_mode = False
         self.selected_order_id = 0
         self.show_all_dates = False
+        self.loaded_amount_due_rate: float | None = None
         self.build_ui()
         self.reset_form()
         self.refresh_orders()
@@ -2253,7 +2739,7 @@ class OrdersWindow(BaseModuleWindow):
         self.table = DataTable(table_frame, height=20)
         self.table.pack(fill="both", expand=True)
 
-        self.status_combo.bind("<<ComboboxSelected>>", lambda _event: self.recalculate_amounts())
+        self.status_combo.bind("<<ComboboxSelected>>", self._on_status_change)
         self.amount_received_var.trace_add("write", lambda *_args: self.recalculate_amounts())
         self.trays_var.trace_add("write", lambda *_args: self.recalculate_amounts())
         form.columnconfigure(1, weight=1)
@@ -2262,14 +2748,16 @@ class OrdersWindow(BaseModuleWindow):
         self.show_all_dates = False
         self.refresh_orders()
 
+    def _on_status_change(self, _event: object | None = None) -> None:
+        if normalize_status_form_label(self.status_var.get()) != DEPOSITARY_STATUS:
+            self.loaded_amount_due_rate = None
+        self.recalculate_amounts()
+
     def get_status_rate(self, status: str) -> float:
-        rates = {
-            "Maman": 6000,
-            "Vente cash": 4350,
-            "Depositaire 6.000Fc": 6000,
-            "Depositaire 4.100Fc": 4100,
-        }
-        return float(rates.get(status, 0))
+        normalized_status = normalize_status_form_label(status)
+        if normalized_status == DEPOSITARY_STATUS and self.loaded_amount_due_rate is not None:
+            return float(self.loaded_amount_due_rate)
+        return float(ORDER_STATUS_RATES.get(normalized_status, 0))
 
     def recalculate_amounts(self) -> None:
         try:
@@ -2297,7 +2785,7 @@ class OrdersWindow(BaseModuleWindow):
         if not client:
             messagebox.showwarning("Commandes", "Veuillez saisir le nom du client.")
             return None
-        status = self.status_var.get().strip()
+        status = normalize_status_form_label(self.status_var.get().strip())
         if not status:
             messagebox.showwarning("Commandes", "Veuillez choisir un statut.")
             return None
@@ -2449,6 +2937,7 @@ class OrdersWindow(BaseModuleWindow):
             },
             hidden_columns=["Id"],
             formatters={
+                "Statut": normalize_status_label,
                 "NombreBacs": lambda value: f"{int(value)}",
                 "MontantAPercevoir": lambda value: format_fc(float(value)),
                 "MontantRecu": lambda value: format_fc(float(value)),
@@ -2497,9 +2986,15 @@ class OrdersWindow(BaseModuleWindow):
         self.edit_mode = True
         self.date_field.set_date(str(row["DateCommande"]))
         self.client_var.set(str(row["Client"]))
-        self.status_var.set(str(row["Statut"]))
+        self.status_var.set(normalize_status_form_label(row["Statut"]))
         self.trays_var.set(str(int(row["NombreBacs"])))
         self.amount_received_var.set(format_number(float(row["MontantRecu"])))
+        if is_legacy_depositary_6000_status(row["Statut"]) and int(row["NombreBacs"]) > 0:
+            self.loaded_amount_due_rate = float(row["MontantAPercevoir"]) / int(row["NombreBacs"])
+        elif normalize_status_form_label(row["Statut"]) == DEPOSITARY_STATUS and int(row["NombreBacs"]) > 0:
+            self.loaded_amount_due_rate = float(row["MontantAPercevoir"]) / int(row["NombreBacs"])
+        else:
+            self.loaded_amount_due_rate = None
         self.recalculate_amounts()
         messagebox.showinfo("Commandes", "La commande a été chargée. Modifiez-la puis enregistrez.")
 
@@ -2529,6 +3024,7 @@ class OrdersWindow(BaseModuleWindow):
         self.amount_received_var.set("0")
         self.edit_mode = False
         self.selected_order_id = 0
+        self.loaded_amount_due_rate = None
         self.show_all_dates = False
         self.recalculate_amounts()
 
@@ -2854,7 +3350,7 @@ class CommissionsWindow(BaseModuleWindow):
         ttk.Label(form, text="Net à payer").grid(row=7, column=0, sticky="w", pady=6)
         self.net_label.grid(row=7, column=1, sticky="w", pady=6)
 
-        ttk.Label(form, text="Filtre statut").grid(row=8, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Filtre de statut").grid(row=8, column=0, sticky="w", pady=6)
         self.filter_var = tk.StringVar(value=COMMISSION_FILTERS[0])
         self.filter_combo = ttk.Combobox(
             form,
@@ -2958,7 +3454,7 @@ class CommissionsWindow(BaseModuleWindow):
         if not summary:
             return
 
-        self.current_status = str(summary.get("Statut", ""))
+        self.current_status = normalize_status_form_label(summary.get("Statut", ""))
         self.current_trays = int(summary.get("NombreBacs", 0) or 0)
         self.current_paid = float(summary.get("MontantPaye", 0) or 0)
         self.current_commission = float(summary.get("Commissions", 0) or 0)
@@ -2992,23 +3488,11 @@ class CommissionsWindow(BaseModuleWindow):
         filter_value = self.filter_var.get()
         rows = self.all_rows
         if filter_value == "Maman":
-            rows = [row for row in rows if str(row["Statut"]) == "Maman"]
-        elif filter_value == "Depositaire":
-            rows = [row for row in rows if "Depositaire" in str(row["Statut"]) or "Dépositaire" in str(row["Statut"])]
+            rows = [row for row in rows if normalize_status_label(row["Statut"]) == "Maman"]
+        elif filter_value == DEPOSITARY_STATUS:
+            rows = [row for row in rows if is_depositary_status(row["Statut"])]
         elif filter_value == "Vente cash":
-            rows = [row for row in rows if str(row["Statut"]) in {"Vente cash", "VC"}]
-        elif filter_value == "Depositaire 6.000Fc":
-            rows = [
-                row
-                for row in rows
-                if str(row["Statut"]) in {"Depositaire 6.000Fc", "Dépositaire 6.000Fc"}
-            ]
-        elif filter_value == "Depositaire 4.100Fc":
-            rows = [
-                row
-                for row in rows
-                if str(row["Statut"]) in {"Depositaire 4.100Fc", "Dépositaire 4.100Fc"}
-            ]
+            rows = [row for row in rows if normalize_status_label(row["Statut"]) == "Vente cash"]
 
         self.table.set_data(
             rows,
@@ -3033,6 +3517,7 @@ class CommissionsWindow(BaseModuleWindow):
             },
             hidden_columns=["Id"],
             formatters={
+                "Statut": normalize_status_label,
                 "NombreBacs": lambda value: f"{int(value)}",
                 "MontantPaye": lambda value: format_fc(float(value)),
                 "Commissions": lambda value: format_fc(float(value)),
@@ -3188,7 +3673,7 @@ class CommissionsWindow(BaseModuleWindow):
             current_names.append(name)
             self.name_combo["values"] = current_names
         self.name_var.set(name)
-        self.current_status = str(row["Statut"])
+        self.current_status = normalize_status_form_label(row["Statut"])
         self.current_trays = int(row["NombreBacs"])
         self.current_paid = float(row["MontantPaye"])
         self.current_commission = float(row["Commissions"])

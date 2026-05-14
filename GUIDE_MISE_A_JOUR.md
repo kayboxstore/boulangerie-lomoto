@@ -1,6 +1,6 @@
-# Guide mises a jour
+# Guide des mises à jour
 
-L'application verifie maintenant les mises a jour au maximum une fois tous les 7 jours, au moment de l'ouverture du tableau de bord.
+L'application vérifie maintenant les mises à jour au maximum une fois tous les 7 jours, au moment de l'ouverture du tableau de bord.
 
 ## Comment ca marche
 
@@ -13,13 +13,13 @@ Exemple de manifeste :
   "version": "1.0.1",
   "download_url": "https://votre-site.com/BoulangerieLomotoSetup.exe",
   "published_at": "2026-05-13",
-  "notes": "Correction du module stock et amelioration de la caisse."
+  "notes": "Correction du module stock et amélioration de la caisse."
 }
 ```
 
-Si la version distante est plus recente que la version installee, l'application affiche une boite de dialogue et propose d'ouvrir le lien de telechargement.
+Si la version distante est plus récente que la version installée, l'application affiche une boîte de dialogue et propose d'ouvrir le lien de téléchargement.
 
-## Ou configurer l'URL du manifeste
+## Où configurer l'URL du manifeste
 
 Vous avez 2 options.
 
@@ -27,21 +27,21 @@ Vous avez 2 options.
 
 Comme votre nom d'utilisateur GitHub est `kayboxstore`, je vous recommande :
 
-1. Depot application : `boulangerie-lomoto`
-2. Depot manifeste : `boulangerie-lomoto-updates`
+1. Dépôt application : `boulangerie-lomoto`
+2. Dépôt manifeste : `boulangerie-lomoto-updates`
 
 Avec cette organisation :
 
-- manifeste de mise a jour :
+- manifeste de mise à jour :
   `https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/update.json`
 - setup a telecharger :
   `https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.0.2/BoulangerieLomotoSetup.exe`
 
-Cette URL de manifeste est deja configuree dans l'application.
+Cette URL de manifeste est déjà configurée dans l'application.
 
 Important :
 
-Pour eviter qu'un ancien setup soit repris par cache, le champ `download_url` du manifeste doit toujours viser une version precise, par exemple :
+Pour éviter qu'un ancien setup soit repris par le cache, le champ `download_url` du manifeste doit toujours viser une version précise, par exemple :
 
 ```text
 https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.0.2/BoulangerieLomotoSetup.exe
@@ -49,7 +49,7 @@ https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.0.2/Boula
 
 Il vaut mieux ne pas utiliser `releases/latest/download/...` dans le manifeste.
 
-### Option 1 : dans le code avant de regenerer l'application
+### Option 1 : dans le code avant de regénérer l'application
 
 Editez ce fichier :
 
@@ -61,11 +61,11 @@ Renseignez cette variable :
 DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/update.json"
 ```
 
-Puis regenerez l'exe et le setup.
+Puis régénérez l'exe et le setup.
 
-### Option 2 : sur une machine deja installee
+### Option 2 : sur une machine déjà installée
 
-L'application cree automatiquement ce fichier :
+L'application créé automatiquement ce fichier :
 
 ```text
 %LOCALAPPDATA%\BoulangerieLomoto\update_config.json
@@ -80,12 +80,12 @@ Exemple :
 }
 ```
 
-Cela permet de changer la source de mise a jour sans recompiler.
+Cela permet de changer la source de mise à jour sans recompiler.
 
 ## Fichiers utilises
 
 - configuration locale : `%LOCALAPPDATA%\BoulangerieLomoto\update_config.json`
-- etat des verifications : `%LOCALAPPDATA%\BoulangerieLomoto\update_state.json`
+- état des vérifications : `%LOCALAPPDATA%\BoulangerieLomoto\update_state.json`
 
 ## Ce qu'il vous faudra pour que cela marche vraiment
 
@@ -106,6 +106,6 @@ Quand vous publiez une nouvelle version :
 
 1. Vous augmentez `APP_VERSION` dans [version.py](/A:/Mon application python/boulangerie_app/version.py).
 2. Vous augmentez aussi `MyAppVersion` dans [setup.iss](/A:/Mon application python/installer/setup.iss).
-3. Vous regenerez l'exe.
-4. Vous regenerez le setup.
-5. Vous mettez a jour le manifeste JSON en ligne avec le lien exact de la release publiee, par exemple `.../releases/download/v1.0.2/...`.
+3. Vous régénérez l'exe.
+4. Vous régénérez le setup.
+5. Vous mettez à jour le manifeste JSON en ligne avec le lien exact de la release publiee, par exemple `.../releases/download/v1.0.2/...`.

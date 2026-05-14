@@ -24,6 +24,10 @@ REMOTE_DATABASE_METHODS = {
     "find_user_for_login",
     "is_using_default_password",
     "change_user_password",
+    "get_backups_directory",
+    "list_backup_files",
+    "backup_database",
+    "restore_database",
     "add_user",
     "update_user",
     "search_users_by_identifiant",
@@ -300,7 +304,7 @@ class RemoteDatabaseClient:
     def ping(self) -> dict[str, Any]:
         payload = self._request("GET", self.health_url)
         if not isinstance(payload, dict):
-            raise RemoteDatabaseError("Reponse invalide du serveur central.")
+            raise RemoteDatabaseError("Réponse invalide du serveur central.")
         return payload
 
     def call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -314,7 +318,7 @@ class RemoteDatabaseClient:
 
         response = self._request("POST", self.rpc_url, payload)
         if not isinstance(response, dict):
-            raise RemoteDatabaseError("Reponse invalide du serveur central.")
+            raise RemoteDatabaseError("Réponse invalide du serveur central.")
 
         if not response.get("ok", False):
             message = str(response.get("error", {}).get("message", "Erreur inconnue du serveur central."))
@@ -339,13 +343,13 @@ class RemoteDatabaseClient:
                 message = str(error_payload.get("error", {}).get("message", exc.reason))
             except Exception:
                 message = str(exc.reason)
-            raise RemoteDatabaseError(f"Echec HTTP vers le serveur central : {message}") from exc
+            raise RemoteDatabaseError(f"?chec HTTP vers le serveur central : {message}") from exc
         except URLError as exc:
             raise RemoteDatabaseError(
-                "Impossible de joindre le serveur central. Verifiez l'adresse, le reseau et le port."
+                "Impossible de joindre le serveur central. Vérifiez l'adresse, le réseau et le port."
             ) from exc
 
         try:
             return json.loads(body) if body else {}
         except ValueError as exc:
-            raise RemoteDatabaseError("Le serveur central a renvoye une reponse non lisible.") from exc
+            raise RemoteDatabaseError("Le serveur central a renvoyé une réponse non lisible.") from exc
