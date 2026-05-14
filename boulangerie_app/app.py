@@ -11,9 +11,18 @@ from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable
 
 from .database import AuthenticatedUser, DatabaseHelper
-from .reports import ReportGenerationError, create_daily_pdf_report
+from .reports import (
+    ReportGenerationError,
+    create_daily_pdf_report,
+    get_report_scope_description,
+    get_report_scope_label,
+)
 from .updater import SessionNotice, UpdateCheckResult, UpdateChecker, UpdateInfo
 from .version import APP_NAME, APP_VERSION
+
+UI_FONT_FAMILY = "Poppins"
+UI_FONT_SIZE = 11
+UI_FONT = (UI_FONT_FAMILY, UI_FONT_SIZE)
 
 
 ROLES = [
@@ -60,10 +69,24 @@ def configure_styles() -> None:
         style.theme_use("clam")
     except tk.TclError:
         pass
-    style.configure("TLabel", font=("Segoe UI", 10))
-    style.configure("Header.TLabel", font=("Segoe UI Semibold", 18))
+    default_root = tk._default_root
+    if default_root is not None:
+        default_root.option_add("*Font", UI_FONT)
+        default_root.option_add("*TCombobox*Listbox.font", UI_FONT)
+        default_root.option_add("*Text.font", UI_FONT)
+    style.configure(".", font=UI_FONT)
+    style.configure("TLabel", font=UI_FONT)
+    style.configure("TButton", font=UI_FONT)
+    style.configure("TEntry", font=UI_FONT)
+    style.configure("TCombobox", font=UI_FONT)
+    style.configure("TCheckbutton", font=UI_FONT)
+    style.configure("TRadiobutton", font=UI_FONT)
+    style.configure("TSpinbox", font=UI_FONT)
+    style.configure("Treeview", font=UI_FONT, rowheight=28)
+    style.configure("Treeview.Heading", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
+    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 18, "bold"))
     style.configure("Card.TLabelframe", padding=12)
-    style.configure("Card.TLabelframe.Label", font=("Segoe UI Semibold", 11))
+    style.configure("Card.TLabelframe.Label", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
     style.configure("Primary.TButton", padding=(12, 8))
 
 
@@ -237,8 +260,8 @@ class DataTable(ttk.Frame):
         self.rows_by_item.clear()
 
         for column in columns:
-            self.tree.heading(column, text=headings.get(column, column))
-            self.tree.column(column, anchor="center", width=110, stretch=True)
+            self.tree.heading(column, text=headings.get(column, column), anchor="w")
+            self.tree.column(column, anchor="w", width=110, stretch=True)
 
         for index, row in enumerate(rows):
             item_id = f"row-{index}"
@@ -560,8 +583,8 @@ class DashboardWindow(tk.Toplevel):
         ttk.Label(
             reports_frame,
             text=(
-                "Generez un rapport journalier pret a imprimer pour les donnees du stock, "
-                "des commandes, de la caisse et des commissions."
+                "Generez un rapport journalier pret a imprimer. Le contenu sera automatiquement "
+                "limite aux modules autorises pour le profil connecte."
             ),
             wraplength=640,
             justify="center",
@@ -571,7 +594,7 @@ class DashboardWindow(tk.Toplevel):
         ttk.Button(report_buttons, text="Generer un rapport PDF", command=self.open_pdf_report).grid(
             row=0, column=0, padx=6, pady=4
         )
-        ttk.Button(report_buttons, text="Ouvrir le dossier", command=self.open_reports_folder).grid(
+        ttk.Button(report_buttons, text="Ouvrir le dossier des rapports", command=self.open_reports_folder).grid(
             row=0, column=1, padx=6, pady=4
         )
 
@@ -602,7 +625,7 @@ class DashboardWindow(tk.Toplevel):
         self.restore_button.grid(row=0, column=1, padx=6, pady=4)
         self.backup_folder_button = ttk.Button(
             maintenance_buttons,
-            text="Ouvrir le dossier",
+            text="Ouvrir le dossier des sauvegardes",
             command=self.open_backups_folder,
         )
         self.backup_folder_button.grid(row=0, column=2, padx=6, pady=4)
@@ -641,16 +664,90 @@ class DashboardWindow(tk.Toplevel):
 
     def refresh_summary(self) -> None:
         try:
-            summary = (
-                f"Utilisateurs : {DatabaseHelper.count_users()} | "
-                f"Sorties stock : {DatabaseHelper.count_stock_exits()} | "
-                f"Commandes avec dette : {DatabaseHelper.count_orders_with_debt()}\n"
-                f"Total caisse : {format_fc(DatabaseHelper.get_total_cash())} | "
-                f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())}"
-            )
+            summary = self.build_dashboard_summary()
         except Exception:
             summary = "Statistiques indisponibles pour le moment."
         self.summary_var.set(summary)
+
+    def build_dashboard_summary(self) -> str:
+        role = self.user.role
+        if role == "Gestionnaire de stock":
+            return self.build_stock_summary()
+        if role == "Gestionnaire des commandes":
+            return self.build_orders_and_commissions_summary(include_cash=False)
+        if role == "Caissier":
+            return self.build_orders_and_commissions_summary(include_cash=True)
+        return self.build_admin_summary()
+
+    def build_admin_summary(self) -> str:
+        orders_summary = DatabaseHelper.get_global_orders_summary()
+        today = date.today()
+        stock_journal = DatabaseHelper.get_stock_journal(today)
+        stock_line = "Journal stock du jour indisponible."
+        if stock_journal:
+            stock_line = (
+                "Stock du jour | "
+                f"Ouverture farine : {format_number(float(stock_journal.get('FarineOuverture', 0) or 0))} | "
+                f"Cloture farine : {format_number(float(stock_journal.get('FarineCloture', 0) or 0))}"
+            )
+        return (
+            f"Utilisateurs : {DatabaseHelper.count_users()} | Sorties stock : {DatabaseHelper.count_stock_exits()} | "
+            f"Commandes avec dette : {DatabaseHelper.count_orders_with_debt()}\n"
+            f"Commandes : {int(orders_summary.get('NombreCommandes', 0) or 0)} | "
+            f"Total bacs : {int(orders_summary.get('TotalBacs', 0) or 0)} | "
+            f"Montant attendu : {format_fc(float(orders_summary.get('MontantAttendu', 0) or 0))}\n"
+            f"Total caisse : {format_fc(DatabaseHelper.get_total_cash())} | "
+            f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())}\n"
+            f"{stock_line}"
+        )
+
+    def build_stock_summary(self) -> str:
+        today = date.today()
+        stock_journal = DatabaseHelper.get_stock_journal(today)
+        stock_exits = DatabaseHelper.list_stock_exits_by_date(today)
+        if not stock_journal:
+            return (
+                f"Stock du jour - {today.strftime('%d/%m/%Y')}\n"
+                "Aucun journal de stock n'est disponible pour aujourd'hui."
+            )
+        return (
+            f"Stock du jour - {today.strftime('%d/%m/%Y')}\n"
+            f"Sorties du jour : {len(stock_exits)}\n"
+            f"Ouverture | Farine : {format_number(float(stock_journal.get('FarineOuverture', 0) or 0))} | "
+            f"Levure : {format_number(float(stock_journal.get('LevureOuverture', 0) or 0))} | "
+            f"Sel : {format_number(float(stock_journal.get('SelOuverture', 0) or 0))} | "
+            f"Huile : {format_number(float(stock_journal.get('HuileOuverture', 0) or 0))}\n"
+            f"Cloture | Farine : {format_number(float(stock_journal.get('FarineCloture', 0) or 0))} | "
+            f"Levure : {format_number(float(stock_journal.get('LevureCloture', 0) or 0))} | "
+            f"Sel : {format_number(float(stock_journal.get('SelCloture', 0) or 0))} | "
+            f"Huile : {format_number(float(stock_journal.get('HuileCloture', 0) or 0))}"
+        )
+
+    def build_orders_and_commissions_summary(self, include_cash: bool) -> str:
+        orders_summary = DatabaseHelper.get_global_orders_summary()
+        lines = [
+            "Commandes et commissions",
+            (
+                f"Nombre de commandes : {int(orders_summary.get('NombreCommandes', 0) or 0)} | "
+                f"Commandes avec dette : {int(orders_summary.get('NombreAvecDette', 0) or 0)}"
+            ),
+            (
+                f"Total bacs : {int(orders_summary.get('TotalBacs', 0) or 0)} | "
+                f"Montant attendu : {format_fc(float(orders_summary.get('MontantAttendu', 0) or 0))}"
+            ),
+            (
+                f"Montant recu : {format_fc(float(orders_summary.get('MontantRecu', 0) or 0))} | "
+                f"Dettes : {format_fc(float(orders_summary.get('TotalDettes', 0) or 0))}"
+            ),
+            f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())}",
+        ]
+        if include_cash:
+            cash_today = DatabaseHelper.get_cash_for_date(date.today())
+            expenses_today = float(cash_today.get("MontantTotalDepenses", 0) or 0)
+            lines.append(
+                f"Depenses du jour : {format_fc(expenses_today)} | Solde global : {format_fc(DatabaseHelper.get_total_cash())}"
+            )
+        return "\n".join(lines)
 
     def refresh_security_notice(self) -> None:
         if DatabaseHelper.is_using_default_password(self.user.identifiant):
@@ -747,7 +844,7 @@ class DashboardWindow(tk.Toplevel):
         open_folder(DatabaseHelper.backups_dir)
 
     def open_reports_folder(self) -> None:
-        open_folder(DatabaseHelper.reports_dir)
+        open_folder(DatabaseHelper.get_reports_dir_for_user(self.user.identifiant))
 
     def open_pdf_report(self) -> None:
         window = PdfReportWindow(self)
@@ -859,6 +956,9 @@ class BaseModuleWindow(tk.Toplevel):
 class PdfReportWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
         super().__init__(parent, "Rapport PDF journalier", "620x360")
+        self.identifiant = parent.user.identifiant
+        self.role = parent.user.role
+        self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
         self.open_after_generation_var = tk.BooleanVar(value=True)
         self.message_var = tk.StringVar(value="")
         self.build_ui()
@@ -874,11 +974,17 @@ class PdfReportWindow(BaseModuleWindow):
             intro,
             text=(
                 "Choisissez une date puis generez un document PDF pret a imprimer. "
-                "Le rapport rassemble le stock, les commandes, la caisse et les commissions."
+                f"{get_report_scope_description(self.role)}"
             ),
             wraplength=500,
             justify="center",
         ).pack(fill="x")
+        ttk.Label(
+            intro,
+            text=f"Profil du rapport : {get_report_scope_label(self.role)}",
+            foreground="#2f5d3a",
+            justify="center",
+        ).pack(fill="x", pady=(8, 0))
 
         form = ttk.LabelFrame(container, text="Parametres du rapport", style="Card.TLabelframe")
         form.pack(fill="x")
@@ -898,7 +1004,9 @@ class PdfReportWindow(BaseModuleWindow):
         ttk.Button(actions, text="Generer le PDF", style="Primary.TButton", command=self.generate_report).grid(
             row=0, column=0, padx=6
         )
-        ttk.Button(actions, text="Ouvrir le dossier", command=self.open_reports_folder).grid(row=0, column=1, padx=6)
+        ttk.Button(actions, text="Ouvrir le dossier des rapports", command=self.open_reports_folder).grid(
+            row=0, column=1, padx=6
+        )
         ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=2, padx=6)
 
         form.columnconfigure(1, weight=1)
@@ -918,11 +1026,11 @@ class PdfReportWindow(BaseModuleWindow):
             self.message_var.set(str(exc))
             return
 
-        DatabaseHelper.reports_dir.mkdir(parents=True, exist_ok=True)
-        suggested_path = DatabaseHelper.reports_dir / f"rapport-journalier-{target_date.strftime('%Y%m%d')}.pdf"
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        suggested_path = self.reports_dir / f"rapport-journalier-{target_date.strftime('%Y%m%d')}.pdf"
         destination = filedialog.asksaveasfilename(
             title="Enregistrer le rapport PDF",
-            initialdir=str(DatabaseHelper.reports_dir),
+            initialdir=str(self.reports_dir),
             initialfile=suggested_path.name,
             defaultextension=".pdf",
             filetypes=[("Fichiers PDF", "*.pdf")],
@@ -931,7 +1039,7 @@ class PdfReportWindow(BaseModuleWindow):
             return
 
         try:
-            report_path = create_daily_pdf_report(target_date, destination)
+            report_path = create_daily_pdf_report(target_date, destination, role=self.role)
         except ReportGenerationError as exc:
             self.message_var.set(str(exc))
             return
@@ -952,7 +1060,7 @@ class PdfReportWindow(BaseModuleWindow):
             self.open_reports_folder()
 
     def open_reports_folder(self) -> None:
-        open_folder(DatabaseHelper.reports_dir)
+        open_folder(self.reports_dir)
 
 
 class ChangePasswordWindow(BaseModuleWindow):
@@ -1097,9 +1205,18 @@ class UsersWindow(BaseModuleWindow):
 
         ttk.Label(form, text="Mot de passe").grid(row=2, column=0, sticky="w", pady=6)
         self.password_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.password_var, show="*", width=34).grid(
-            row=2, column=1, sticky="ew", pady=6
-        )
+        self.show_password_var = tk.BooleanVar(value=False)
+        password_row = ttk.Frame(form)
+        password_row.grid(row=2, column=1, sticky="ew", pady=6)
+        self.password_entry = ttk.Entry(password_row, textvariable=self.password_var, show="*", width=26)
+        self.password_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Checkbutton(
+            password_row,
+            text="Afficher",
+            variable=self.show_password_var,
+            command=self.toggle_password_visibility,
+        ).grid(row=0, column=1, padx=(8, 0), sticky="w")
+        password_row.columnconfigure(0, weight=1)
 
         ttk.Label(form, text="Rôle").grid(row=3, column=0, sticky="w", pady=6)
         self.role_var = tk.StringVar(value=ROLES[0])
@@ -1141,6 +1258,9 @@ class UsersWindow(BaseModuleWindow):
             hidden_columns=["Id"],
         )
         self.message_var.set("Liste des utilisateurs affichée.")
+
+    def toggle_password_visibility(self) -> None:
+        self.password_entry.configure(show="" if self.show_password_var.get() else "*")
 
     def search_user(self) -> None:
         identifiant = self.identifiant_var.get().strip()
@@ -1195,11 +1315,16 @@ class UsersWindow(BaseModuleWindow):
         self.name_var.set(str(row["NomComplet"]))
         self.identifiant_var.set(str(row["Identifiant"]))
         self.password_var.set("")
+        self.show_password_var.set(False)
+        self.toggle_password_visibility()
         self.role_var.set(str(row["Role"]))
         self.original_identifiant = str(row["Identifiant"])
         self.edit_mode = True
         self.identifiant_entry.state(["disabled"])
-        self.message_var.set("Le mot de passe peut rester vide pour être conservé.")
+        self.message_var.set(
+            "Le mot de passe actuel ne peut pas etre affiche. "
+            "Laissez ce champ vide pour le conserver, ou saisissez-en un nouveau pour le reinitialiser."
+        )
 
     def delete_user(self) -> None:
         identifiant = self.identifiant_var.get().strip()
@@ -1228,6 +1353,8 @@ class UsersWindow(BaseModuleWindow):
         self.name_var.set("")
         self.identifiant_var.set("")
         self.password_var.set("")
+        self.show_password_var.set(False)
+        self.toggle_password_visibility()
         self.role_var.set(ROLES[0])
         self.edit_mode = False
         self.original_identifiant = ""
@@ -1924,6 +2051,7 @@ class CashWindow(BaseModuleWindow):
 
         ttk.Label(form, text="Dépenses effectuées").grid(row=6, column=0, sticky="nw", pady=6)
         self.expenses_text = ScrolledText(form, width=28, height=7)
+        self.expenses_text.configure(font=UI_FONT)
         self.expenses_text.grid(row=6, column=1, sticky="ew", pady=6)
 
         self._make_label_value(form, "Solde", self.balance_var, 7, "#1b2d5d")

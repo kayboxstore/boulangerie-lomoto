@@ -85,6 +85,20 @@ class DatabaseHelper:
         cls.reports_dir.mkdir(parents=True, exist_ok=True)
         return cls.reports_dir / f"{prefix}-{cls._timestamp_for_filename()}.pdf"
 
+    @staticmethod
+    def _safe_folder_name(value: str) -> str:
+        sanitized = "".join(
+            character if character.isalnum() or character in {"-", "_"} else "_"
+            for character in value.strip()
+        )
+        return sanitized or "utilisateur"
+
+    @classmethod
+    def get_reports_dir_for_user(cls, identifiant: str) -> Path:
+        target_dir = cls.reports_dir / cls._safe_folder_name(identifiant)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return target_dir
+
     @classmethod
     def _validate_sqlite_database(cls, database_path: Path) -> None:
         connection: sqlite3.Connection | None = None

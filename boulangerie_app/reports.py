@@ -14,6 +14,27 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from .database import DatabaseHelper
 from .version import APP_NAME
 
+REPORT_SECTIONS_BY_ROLE: dict[str, tuple[str, ...]] = {
+    "Admin": ("stock", "orders", "cash", "commissions"),
+    "Caissier": ("orders", "cash", "commissions"),
+    "Gestionnaire de stock": ("stock",),
+    "Gestionnaire des commandes": ("orders", "commissions"),
+}
+
+REPORT_SCOPE_LABELS = {
+    "Admin": "Rapport complet",
+    "Caissier": "Rapport commandes, commissions et caisse",
+    "Gestionnaire de stock": "Rapport stock",
+    "Gestionnaire des commandes": "Rapport commandes et commissions",
+}
+
+REPORT_SCOPE_DESCRIPTIONS = {
+    "Admin": "Toutes les sections sont incluses dans ce rapport.",
+    "Caissier": "Ce rapport contient uniquement les commandes, les commissions et la caisse.",
+    "Gestionnaire de stock": "Ce rapport contient uniquement les informations de stock.",
+    "Gestionnaire des commandes": "Ce rapport contient uniquement les commandes et les commissions.",
+}
+
 
 class ReportGenerationError(Exception):
     pass
@@ -31,6 +52,23 @@ def _format_number(value: float) -> str:
 
 def _format_date(target_date: date) -> str:
     return target_date.strftime("%d/%m/%Y")
+
+
+def normalize_role(role: str) -> str:
+    normalized = role.strip()
+    return normalized if normalized in REPORT_SECTIONS_BY_ROLE else "Admin"
+
+
+def get_report_sections_for_role(role: str) -> tuple[str, ...]:
+    return REPORT_SECTIONS_BY_ROLE[normalize_role(role)]
+
+
+def get_report_scope_label(role: str) -> str:
+    return REPORT_SCOPE_LABELS[normalize_role(role)]
+
+
+def get_report_scope_description(role: str) -> str:
+    return REPORT_SCOPE_DESCRIPTIONS[normalize_role(role)]
 
 
 def _build_styles() -> dict[str, ParagraphStyle]:
@@ -106,7 +144,11 @@ def _safe_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def create_daily_pdf_report(target_date: date, destination: str | Path | None = None) -> Path:
+def create_daily_pdf_report(
+    target_date: date,
+    destination: str | Path | None = None,
+    role: str = "Admin",
+) -> Path:
     DatabaseHelper.initialize_database()
     report_path = Path(destination) if destination is not None else DatabaseHelper.build_report_path(
         f"rapport-journalier-{target_date.strftime('%Y%m%d')}"
@@ -114,6 +156,11 @@ def create_daily_pdf_report(target_date: date, destination: str | Path | None = 
     if report_path.suffix.lower() != ".pdf":
         report_path = report_path.with_suffix(".pdf")
     report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    normalized_role = normalize_role(role)
+    allowed_sections = get_report_sections_for_role(normalized_role)
+    scope_label = get_report_scope_label(normalized_role)
+    scope_description = get_report_scope_description(normalized_role)
 
     stock_journal = DatabaseHelper.get_stock_journal(target_date)
     stock_exits = DatabaseHelper.list_stock_exits_by_date(target_date)
@@ -139,13 +186,15 @@ def create_daily_pdf_report(target_date: date, destination: str | Path | None = 
         rightMargin=16 * mm,
         topMargin=18 * mm,
         bottomMargin=18 * mm,
-        title=f"{APP_NAME} - Rapport journalier du {_format_date(target_date)}",
+        title=f"{APP_NAME} - {scope_label} du {_format_date(target_date)}",
         author="Kay Box Store",
     )
 
     elements: list[Any] = [
         _paragraph(APP_NAME, styles["title"]),
         _paragraph(f"Rapport PDF journalier - {_format_date(target_date)}", styles["section"]),
+        _paragraph(f"Profil du rapport : {scope_label}", styles["body"]),
+        _paragraph(scope_description, styles["note"]),
         _paragraph(
             f"Document genere le {datetime.now().strftime('%d/%m/%Y a %H:%M')}.",
             styles["note"],
@@ -153,126 +202,150 @@ def create_daily_pdf_report(target_date: date, destination: str | Path | None = 
         Spacer(1, 6 * mm),
     ]
 
-    overview_rows = [
-        ["Indicateur", "Valeur"],
-        ["Commandes du jour", str(len(orders))],
-        ["Total bacs", str(total_trays)],
-        ["Montant attendu", _format_fc(total_expected)],
-        ["Montant recu", _format_fc(total_received)],
-        ["Dettes", _format_fc(total_debts)],
-        ["Depenses", _format_fc(total_expenses)],
-        ["Solde du jour", _format_fc(balance)],
-        ["Commissions", _format_fc(total_commissions)],
-        ["Net commissions", _format_fc(total_net_commissions)],
-    ]
+    overview_rows = [["Indicateur", "Valeur"]]
+    if "stock" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Sorties de stock du jour", str(len(stock_exits))],
+                ["Journal de stock disponible", "Oui" if stock_journal else "Non"],
+            ]
+        )
+    if "orders" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Commandes du jour", str(len(orders))],
+                ["Total bacs", str(total_trays)],
+                ["Montant attendu", _format_fc(total_expected)],
+                ["Montant recu", _format_fc(total_received)],
+                ["Dettes", _format_fc(total_debts)],
+            ]
+        )
+    if "cash" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Depenses", _format_fc(total_expenses)],
+                ["Solde du jour", _format_fc(balance)],
+            ]
+        )
+    if "commissions" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Commissions", _format_fc(total_commissions)],
+                ["Net commissions", _format_fc(total_net_commissions)],
+            ]
+        )
     elements.append(_make_table(overview_rows, [70 * mm, 90 * mm]))
     elements.append(Spacer(1, 6 * mm))
 
-    elements.append(_paragraph("Stock du jour", styles["section"]))
-    if stock_journal:
-        stock_rows = [
-            ["Mouvement", "Farine", "Levure", "Sel", "Huile"],
-            [
-                "Ouverture",
-                _format_number(float(stock_journal.get("FarineOuverture", 0) or 0)),
-                _format_number(float(stock_journal.get("LevureOuverture", 0) or 0)),
-                _format_number(float(stock_journal.get("SelOuverture", 0) or 0)),
-                _format_number(float(stock_journal.get("HuileOuverture", 0) or 0)),
-            ],
-            [
-                "Cloture",
-                _format_number(float(stock_journal.get("FarineCloture", 0) or 0)),
-                _format_number(float(stock_journal.get("LevureCloture", 0) or 0)),
-                _format_number(float(stock_journal.get("SelCloture", 0) or 0)),
-                _format_number(float(stock_journal.get("HuileCloture", 0) or 0)),
-            ],
+    if "stock" in allowed_sections:
+        elements.append(_paragraph("Stock du jour", styles["section"]))
+        if stock_journal:
+            stock_rows = [
+                ["Mouvement", "Farine", "Levure", "Sel", "Huile"],
+                [
+                    "Ouverture",
+                    _format_number(float(stock_journal.get("FarineOuverture", 0) or 0)),
+                    _format_number(float(stock_journal.get("LevureOuverture", 0) or 0)),
+                    _format_number(float(stock_journal.get("SelOuverture", 0) or 0)),
+                    _format_number(float(stock_journal.get("HuileOuverture", 0) or 0)),
+                ],
+                [
+                    "Cloture",
+                    _format_number(float(stock_journal.get("FarineCloture", 0) or 0)),
+                    _format_number(float(stock_journal.get("LevureCloture", 0) or 0)),
+                    _format_number(float(stock_journal.get("SelCloture", 0) or 0)),
+                    _format_number(float(stock_journal.get("HuileCloture", 0) or 0)),
+                ],
+            ]
+            elements.append(_make_table(stock_rows, [36 * mm, 31 * mm, 31 * mm, 31 * mm, 31 * mm]))
+        else:
+            elements.append(_paragraph("Aucun journal de stock disponible pour cette date.", styles["body"]))
+
+        if stock_exits:
+            elements.append(Spacer(1, 4 * mm))
+            stock_exit_rows = [["Sorties", "Farine", "Levure", "Sel", "Huile"]]
+            for index, row in enumerate(stock_exits, start=1):
+                stock_exit_rows.append(
+                    [
+                        f"Sortie {index}",
+                        _format_number(float(row.get("SacsUtilises", 0) or 0)),
+                        _format_number(float(row.get("PaquetsUtilises", 0) or 0)),
+                        _format_number(float(row.get("KgSelUtilises", 0) or 0)),
+                        _format_number(float(row.get("LitresHuileUtilises", 0) or 0)),
+                    ]
+                )
+            elements.append(_make_table(stock_exit_rows, [36 * mm, 31 * mm, 31 * mm, 31 * mm, 31 * mm]))
+        else:
+            elements.append(Spacer(1, 2 * mm))
+            elements.append(_paragraph("Aucune sortie de stock enregistree pour cette date.", styles["note"]))
+        elements.append(Spacer(1, 6 * mm))
+
+    if "orders" in allowed_sections:
+        elements.append(_paragraph("Commandes", styles["section"]))
+        if orders:
+            order_rows: list[list[Any]] = [["Client", "Statut", "Bacs", "A percevoir", "Recu", "Dette"]]
+            for row in orders:
+                order_rows.append(
+                    [
+                        _safe_text(row.get("Client")),
+                        _safe_text(row.get("Statut")),
+                        str(int(row.get("NombreBacs", 0) or 0)),
+                        _format_fc(float(row.get("MontantAPercevoir", 0) or 0)),
+                        _format_fc(float(row.get("MontantRecu", 0) or 0)),
+                        _format_fc(float(row.get("Dette", 0) or 0)),
+                    ]
+                )
+            elements.append(
+                _make_table(order_rows, [42 * mm, 34 * mm, 16 * mm, 30 * mm, 28 * mm, 24 * mm])
+            )
+        else:
+            elements.append(_paragraph("Aucune commande enregistree pour cette date.", styles["body"]))
+        elements.append(Spacer(1, 6 * mm))
+
+    if "cash" in allowed_sections:
+        elements.append(_paragraph("Caisse", styles["section"]))
+        cash_rows = [
+            ["Champ", "Valeur"],
+            ["Montant attendu", _format_fc(total_expected)],
+            ["Montant recu", _format_fc(total_received)],
+            ["Dettes", _format_fc(total_debts)],
+            ["Depenses", _format_fc(total_expenses)],
+            ["Solde du jour", _format_fc(balance)],
         ]
-        elements.append(_make_table(stock_rows, [36 * mm, 31 * mm, 31 * mm, 31 * mm, 31 * mm]))
-    else:
-        elements.append(_paragraph("Aucun journal de stock disponible pour cette date.", styles["body"]))
+        elements.append(_make_table(cash_rows, [70 * mm, 90 * mm]))
+        expense_details = _safe_text(cash.get("DepensesEffectuees")).strip()
+        if expense_details:
+            elements.append(Spacer(1, 3 * mm))
+            elements.append(_paragraph(f"Details des depenses : {expense_details}", styles["body"]))
+        else:
+            elements.append(Spacer(1, 2 * mm))
+            elements.append(_paragraph("Aucun detail de depense enregistre pour cette date.", styles["note"]))
+        elements.append(Spacer(1, 6 * mm))
 
-    if stock_exits:
-        elements.append(Spacer(1, 4 * mm))
-        stock_exit_rows = [["Sorties", "Farine", "Levure", "Sel", "Huile"]]
-        for index, row in enumerate(stock_exits, start=1):
-            stock_exit_rows.append(
-                [
-                    f"Sortie {index}",
-                    _format_number(float(row.get("SacsUtilises", 0) or 0)),
-                    _format_number(float(row.get("PaquetsUtilises", 0) or 0)),
-                    _format_number(float(row.get("KgSelUtilises", 0) or 0)),
-                    _format_number(float(row.get("LitresHuileUtilises", 0) or 0)),
-                ]
+    if "commissions" in allowed_sections:
+        elements.append(_paragraph("Commissions", styles["section"]))
+        if commissions:
+            commission_rows: list[list[Any]] = [["Nom", "Statut", "Bacs", "Paye", "Commission", "Dette", "Net"]]
+            for row in commissions:
+                commission_rows.append(
+                    [
+                        _safe_text(row.get("Nom")),
+                        _safe_text(row.get("Statut")),
+                        str(int(row.get("NombreBacs", 0) or 0)),
+                        _format_fc(float(row.get("MontantPaye", 0) or 0)),
+                        _format_fc(float(row.get("Commissions", 0) or 0)),
+                        _format_fc(float(row.get("Dettes", 0) or 0)),
+                        _format_fc(float(row.get("NetAPayer", 0) or 0)),
+                    ]
+                )
+            elements.append(
+                _make_table(
+                    commission_rows,
+                    [34 * mm, 30 * mm, 14 * mm, 24 * mm, 26 * mm, 22 * mm, 20 * mm],
+                )
             )
-        elements.append(_make_table(stock_exit_rows, [36 * mm, 31 * mm, 31 * mm, 31 * mm, 31 * mm]))
-    else:
-        elements.append(Spacer(1, 2 * mm))
-        elements.append(_paragraph("Aucune sortie de stock enregistree pour cette date.", styles["note"]))
-
-    elements.append(Spacer(1, 6 * mm))
-    elements.append(_paragraph("Commandes", styles["section"]))
-    if orders:
-        order_rows: list[list[Any]] = [["Client", "Statut", "Bacs", "A percevoir", "Recu", "Dette"]]
-        for row in orders:
-            order_rows.append(
-                [
-                    _safe_text(row.get("Client")),
-                    _safe_text(row.get("Statut")),
-                    str(int(row.get("NombreBacs", 0) or 0)),
-                    _format_fc(float(row.get("MontantAPercevoir", 0) or 0)),
-                    _format_fc(float(row.get("MontantRecu", 0) or 0)),
-                    _format_fc(float(row.get("Dette", 0) or 0)),
-                ]
-            )
-        elements.append(
-            _make_table(order_rows, [42 * mm, 34 * mm, 16 * mm, 30 * mm, 28 * mm, 24 * mm])
-        )
-    else:
-        elements.append(_paragraph("Aucune commande enregistree pour cette date.", styles["body"]))
-
-    elements.append(Spacer(1, 6 * mm))
-    elements.append(_paragraph("Caisse", styles["section"]))
-    cash_rows = [
-        ["Champ", "Valeur"],
-        ["Montant attendu", _format_fc(total_expected)],
-        ["Montant recu", _format_fc(total_received)],
-        ["Dettes", _format_fc(total_debts)],
-        ["Depenses", _format_fc(total_expenses)],
-        ["Solde du jour", _format_fc(balance)],
-    ]
-    elements.append(_make_table(cash_rows, [70 * mm, 90 * mm]))
-    expense_details = _safe_text(cash.get("DepensesEffectuees")).strip()
-    if expense_details:
-        elements.append(Spacer(1, 3 * mm))
-        elements.append(_paragraph(f"Details des depenses : {expense_details}", styles["body"]))
-    else:
-        elements.append(Spacer(1, 2 * mm))
-        elements.append(_paragraph("Aucun detail de depense enregistre pour cette date.", styles["note"]))
-
-    elements.append(Spacer(1, 6 * mm))
-    elements.append(_paragraph("Commissions", styles["section"]))
-    if commissions:
-        commission_rows: list[list[Any]] = [["Nom", "Statut", "Bacs", "Paye", "Commission", "Dette", "Net"]]
-        for row in commissions:
-            commission_rows.append(
-                [
-                    _safe_text(row.get("Nom")),
-                    _safe_text(row.get("Statut")),
-                    str(int(row.get("NombreBacs", 0) or 0)),
-                    _format_fc(float(row.get("MontantPaye", 0) or 0)),
-                    _format_fc(float(row.get("Commissions", 0) or 0)),
-                    _format_fc(float(row.get("Dettes", 0) or 0)),
-                    _format_fc(float(row.get("NetAPayer", 0) or 0)),
-                ]
-            )
-        elements.append(
-            _make_table(
-                commission_rows,
-                [34 * mm, 30 * mm, 14 * mm, 24 * mm, 26 * mm, 22 * mm, 20 * mm],
-            )
-        )
-    else:
-        elements.append(_paragraph("Aucune commission enregistree pour cette date.", styles["body"]))
+        else:
+            elements.append(_paragraph("Aucune commission enregistree pour cette date.", styles["body"]))
 
     try:
         doc.build(elements)
