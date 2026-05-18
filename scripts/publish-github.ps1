@@ -347,7 +347,7 @@ function Publish-Release {
     param([string]$Version)
 
     $root = Get-ProjectRoot
-    $setupPath = Join-Path $root "installer\output\BoulangerieLomotoSetup.exe"
+    $setupPath = Join-Path $root ("installer\output\" + $Version + "\BoulangerieLomotoSetup.exe")
     $repository = "$GitHubUsername/$AppRepoName"
 
     if (-not (Test-Path $setupPath)) {

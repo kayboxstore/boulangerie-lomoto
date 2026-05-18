@@ -64,7 +64,11 @@ Ouvrez ce fichier avec Inno Setup, puis cliquez sur **Compile**.
 
 Le setup sera généré dans :
 
-- `installer\output`
+- `installer\output\<version>`
+
+Exemple :
+
+- `installer\output\1.2.5\BoulangerieLomotoSetup.exe`
 
 Important :
 
