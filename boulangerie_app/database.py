@@ -35,6 +35,12 @@ DEFAULT_ADMIN_PASSWORD = "010203"
 class AuthenticatedUser:
     identifiant: str
     role: str
+    full_name: str = ""
+
+    @property
+    def display_name(self) -> str:
+        value = self.full_name.strip()
+        return value if value else self.identifiant
 
 
 class DatabaseHelper:
@@ -157,6 +163,7 @@ class DatabaseHelper:
             return AuthenticatedUser(
                 identifiant=str(result.get("identifiant", "")),
                 role=str(result.get("role", "")),
+                full_name=str(result.get("full_name", "")),
             )
         return result
 
@@ -736,7 +743,7 @@ class DatabaseHelper:
         with cls.connect() as connection:
             row = connection.execute(
                 """
-                SELECT Identifiant, MotDePasse, Role
+                SELECT NomComplet, Identifiant, MotDePasse, Role
                 FROM Utilisateurs
                 WHERE Identifiant = ?
                 """,
@@ -755,7 +762,11 @@ class DatabaseHelper:
                     (cls.hash_password(password), row["Identifiant"]),
                 )
 
-            return AuthenticatedUser(identifiant=row["Identifiant"], role=row["Role"])
+            return AuthenticatedUser(
+                identifiant=row["Identifiant"],
+                role=row["Role"],
+                full_name=row["NomComplet"] or "",
+            )
 
     @classmethod
     def is_using_default_password(cls, identifiant: str) -> bool:

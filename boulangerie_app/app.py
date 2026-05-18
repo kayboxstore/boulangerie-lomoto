@@ -213,7 +213,7 @@ def configure_styles() -> None:
     style.configure("TSpinbox", font=UI_FONT)
     style.configure("Treeview", font=UI_FONT, rowheight=28)
     style.configure("Treeview.Heading", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
-    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 46, "bold"), foreground="#C61C1C")
+    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 52, "bold"), foreground="#B30000")
     style.configure("Card.TLabelframe", padding=12)
     style.configure("Card.TLabelframe.Label", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
     style.configure("Primary.TButton", padding=(12, 8))
@@ -1501,7 +1501,7 @@ class DashboardWindow(tk.Toplevel):
 
         ttk.Label(
             container,
-            text=f"Bienvenue, {self.user.identifiant} ({self.user.role})",
+            text=f"Bienvenue, {self.user.display_name} ({self.user.role})",
             style="Header.TLabel",
         ).pack(anchor="center", pady=(0, 18))
 
