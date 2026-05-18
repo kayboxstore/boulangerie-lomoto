@@ -69,6 +69,10 @@ UI_FONT_SIZE = 11
 UI_FONT = (UI_FONT_FAMILY, UI_FONT_SIZE)
 APP_BACKGROUND = "#dfeaf4"
 MODULE_BACKGROUND = "#eef3f8"
+FORM_LOGO_SIZE = 84
+DASHBOARD_LOGO_SIZE = 96
+SETTINGS_LOGO_SIZE = 86
+STOCK_DIALOG_LOGO_SIZE = 76
 
 _BRAND_IMAGE_CACHE: dict[tuple[str, int, int], ImageTk.PhotoImage] = {}
 
@@ -1026,7 +1030,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
     def build_ui(self) -> None:
         frame = ttk.Frame(self, padding=18)
         frame.pack(fill="both", expand=True)
-        logo_label = create_logo_widget(frame, 54)
+        logo_label = create_logo_widget(frame, SETTINGS_LOGO_SIZE)
         if logo_label is not None:
             logo_label.pack(anchor="w", pady=(0, 8))
 
@@ -1495,7 +1499,7 @@ class DashboardWindow(tk.Toplevel):
 
     def build_ui(self) -> None:
         container = self.body
-        logo_label = create_logo_widget(container, 60)
+        logo_label = create_logo_widget(container, DASHBOARD_LOGO_SIZE)
         if logo_label is not None:
             logo_label.pack(anchor="w", pady=(0, 8))
 
@@ -2020,7 +2024,7 @@ class BaseModuleWindow(tk.Toplevel):
         self.scrollable_content = ScrollableContent(self, padding=16, background=MODULE_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         shell = self.scrollable_content.content
-        logo_label = create_logo_widget(shell, 52)
+        logo_label = create_logo_widget(shell, FORM_LOGO_SIZE)
         if logo_label is not None:
             logo_label.pack(anchor="w", pady=(0, 8))
         self.body = ttk.Frame(shell)
@@ -2975,7 +2979,7 @@ class StockWindow(BaseModuleWindow):
         apply_window_icon(dialog)
         frame = ttk.Frame(dialog, padding=16)
         frame.pack(fill="both", expand=True)
-        logo_label = create_logo_widget(frame, 48)
+        logo_label = create_logo_widget(frame, STOCK_DIALOG_LOGO_SIZE)
         if logo_label is not None:
             logo_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
