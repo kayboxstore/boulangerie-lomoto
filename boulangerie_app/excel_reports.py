@@ -128,8 +128,8 @@ def _add_brand_image(sheet: Worksheet, image_path: Path, anchor: str, width: int
 
 
 def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, scope_description: str) -> int:
-    sheet.merge_cells("A1:I2")
-    title_cell = sheet["A1"]
+    sheet.merge_cells("B1:G2")
+    title_cell = sheet["B1"]
     title_cell.value = "BOULANGERIE LOMOTO"
     _apply_cell_style(
         title_cell,
@@ -137,8 +137,8 @@ def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, s
         font=BRAND_NAME_FONT,
     )
 
-    sheet.merge_cells("A3:I4")
-    subtitle_cell = sheet["A3"]
+    sheet.merge_cells("B3:G4")
+    subtitle_cell = sheet["B3"]
     subtitle_cell.value = f"RAPPORT JOURNALIER - {_format_date(target_date)}"
     _apply_cell_style(
         subtitle_cell,
@@ -147,38 +147,43 @@ def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, s
     )
 
     for row_index, row_height in {
-        1: 34,
-        2: 34,
-        3: 28,
-        4: 28,
-        5: 28,
-        6: 28,
+        1: 26,
+        2: 26,
+        3: 22,
+        4: 22,
+        5: 16,
+        6: 22,
+        7: 22,
+        8: 22,
+        9: 22,
     }.items():
         sheet.row_dimensions[row_index].height = row_height
 
-    _add_brand_image(sheet, get_logo_path(), "A5", 70, 70)
-    _add_brand_image(sheet, get_baguette_path(), "H5", 110, 42)
+    _add_brand_image(sheet, get_logo_path(), "A1", 56, 56)
+    _add_brand_image(sheet, get_baguette_path(), "H1", 84, 32)
 
-    sheet["A7"] = "Date du rapport"
-    sheet["B7"] = _format_date(target_date)
-    sheet["A8"] = "Profil"
-    sheet["B8"] = scope_label
-    sheet["A9"] = "Description"
-    sheet["B9"] = scope_description
-    sheet["A10"] = "Généré le"
-    sheet["B10"] = datetime.now().strftime("%d/%m/%Y à %H:%M")
+    sheet["A6"] = "Date du rapport"
+    sheet["B6"] = _format_date(target_date)
+    sheet["A7"] = "Profil"
+    sheet["B7"] = scope_label
+    sheet["A8"] = "Description"
+    sheet["B8"] = scope_description
+    sheet["A9"] = "Généré le"
+    sheet["B9"] = datetime.now().strftime("%d/%m/%Y à %H:%M")
 
-    for cell_ref in ("A7", "A8", "A9", "A10"):
+    for cell_ref in ("A6", "A7", "A8", "A9"):
         _apply_cell_style(sheet[cell_ref], bold=True, fill=SECTION_FILL, alignment=Alignment(horizontal="left"))
-    for cell_ref in ("B7", "B8", "B9", "B10"):
+    for cell_ref in ("B6", "B7", "B8", "B9"):
         _apply_cell_style(sheet[cell_ref], alignment=Alignment(horizontal="left", wrap_text=True))
 
-    sheet.column_dimensions["A"].width = 20
+    sheet.column_dimensions["A"].width = 16
     sheet.column_dimensions["B"].width = 24
-    for column_letter in ("C", "D", "E", "F", "G", "H", "I"):
-        sheet.column_dimensions[column_letter].width = 16
+    for column_letter in ("C", "D", "E", "F", "G"):
+        sheet.column_dimensions[column_letter].width = 14
+    sheet.column_dimensions["H"].width = 18
+    sheet.column_dimensions["I"].width = 10
 
-    return 12
+    return 11
 
 
 def _build_report_context(target_date: date, role: str) -> dict[str, Any]:

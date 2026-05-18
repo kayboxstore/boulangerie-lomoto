@@ -134,26 +134,36 @@ class ReportHeader(Flowable):
         super().__init__()
         self.target_date = target_date
         self.header_width = 0.0
-        self.header_height = 132.0
+        self.header_height = 120.0
 
     def wrap(self, availWidth: float, _availHeight: float) -> tuple[float, float]:
         self.header_width = availWidth
         return availWidth, self.header_height
 
-    def _draw_centered_line(self, text: str, y: float, font_size: float, color_value: str) -> None:
+    def _draw_centered_line(
+        self,
+        text: str,
+        y: float,
+        font_size: float,
+        color_value: str,
+        left_bound: float,
+        right_bound: float,
+    ) -> None:
         canvas = self.canv
         canvas.saveState()
         canvas.setFillColor(colors.HexColor(color_value))
         text_width = pdfmetrics.stringWidth(text, PDF_FONT_BOLD, font_size)
-        max_width = max(self.header_width - 12, 1)
+        safe_left = max(left_bound, 0)
+        safe_right = min(right_bound, self.header_width)
+        max_width = max(safe_right - safe_left, 1)
 
         if text_width <= max_width:
             canvas.setFont(PDF_FONT_BOLD, font_size)
-            canvas.drawString((self.header_width - text_width) / 2, y, text)
+            canvas.drawString(safe_left + ((max_width - text_width) / 2), y, text)
         else:
             scale = max_width / text_width
             text_object = canvas.beginText()
-            text_object.setTextOrigin((self.header_width - (text_width * scale)) / 2, y)
+            text_object.setTextOrigin(safe_left + ((max_width - (text_width * scale)) / 2), y)
             text_object.setFont(PDF_FONT_BOLD, font_size)
             text_object.setHorizScale(scale * 100)
             text_object.setFillColor(colors.HexColor(color_value))
@@ -165,6 +175,8 @@ class ReportHeader(Flowable):
     def draw(self) -> None:
         canvas = self.canv
         canvas.saveState()
+        text_left_bound = 92.0
+        text_right_bound = self.header_width - 122.0
 
         logo_path = get_logo_path()
         baguette_path = get_baguette_path()
@@ -172,9 +184,9 @@ class ReportHeader(Flowable):
             canvas.drawImage(
                 str(logo_path),
                 8,
-                24,
-                width=68,
-                height=68,
+                26,
+                width=62,
+                height=62,
                 mask="auto",
                 preserveAspectRatio=True,
                 anchor="sw",
@@ -182,21 +194,30 @@ class ReportHeader(Flowable):
         if baguette_path.exists():
             canvas.drawImage(
                 str(baguette_path),
-                self.header_width - 114,
-                30,
-                width=104,
-                height=40,
+                self.header_width - 104,
+                40,
+                width=92,
+                height=34,
                 mask="auto",
                 preserveAspectRatio=True,
                 anchor="sw",
             )
 
-        self._draw_centered_line("BOULANGERIE LOMOTO", 84, REPORT_BRAND_NAME_SIZE, REPORT_RED)
+        self._draw_centered_line(
+            "BOULANGERIE LOMOTO",
+            72,
+            REPORT_BRAND_NAME_SIZE,
+            REPORT_RED,
+            text_left_bound,
+            text_right_bound,
+        )
         self._draw_centered_line(
             f"RAPPORT JOURNALIER - {_format_date(self.target_date)}",
-            44,
+            48,
             REPORT_SUBTITLE_SIZE,
             REPORT_BLUE,
+            text_left_bound,
+            text_right_bound,
         )
 
         canvas.setStrokeColor(colors.HexColor(REPORT_NAVY))
