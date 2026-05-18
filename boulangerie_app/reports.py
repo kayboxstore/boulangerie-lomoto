@@ -6,12 +6,24 @@ from pathlib import Path
 from typing import Any
 
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.platypus import Flowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .database import DatabaseHelper
+from .report_branding import (
+    PDF_FONT_BOLD,
+    PDF_FONT_REGULAR,
+    REPORT_BLUE,
+    REPORT_NAVY,
+    REPORT_RED,
+    get_baguette_path,
+    get_logo_path,
+    register_pdf_fonts,
+)
 from .status_labels import normalize_status_label
 from .version import APP_NAME
 
@@ -74,44 +86,118 @@ def get_report_scope_description(role: str) -> str:
 
 def _build_styles() -> dict[str, ParagraphStyle]:
     sample = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "ReportTitle",
-        parent=sample["Title"],
-        fontName="Helvetica-Bold",
-        fontSize=20,
-        leading=24,
-        textColor=colors.HexColor("#203040"),
-        spaceAfter=8,
-    )
     section_style = ParagraphStyle(
         "ReportSection",
         parent=sample["Heading2"],
-        fontName="Helvetica-Bold",
-        fontSize=13,
-        leading=16,
-        textColor=colors.HexColor("#1f3d5b"),
+        fontName=PDF_FONT_BOLD,
+        fontSize=16,
+        leading=20,
+        textColor=colors.HexColor(REPORT_BLUE),
         spaceBefore=8,
         spaceAfter=6,
     )
     body_style = ParagraphStyle(
         "ReportBody",
         parent=sample["BodyText"],
-        fontName="Helvetica",
-        fontSize=9.5,
-        leading=12.5,
+        fontName=PDF_FONT_REGULAR,
+        fontSize=10.5,
+        leading=13,
         textColor=colors.HexColor("#202020"),
     )
     note_style = ParagraphStyle(
         "ReportNote",
         parent=body_style,
-        textColor=colors.HexColor("#505050"),
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#4A4A4A"),
+    )
+    meta_style = ParagraphStyle(
+        "ReportMeta",
+        parent=body_style,
+        alignment=TA_CENTER,
+        fontName=PDF_FONT_BOLD,
+        fontSize=12,
+        leading=15,
+        textColor=colors.HexColor(REPORT_NAVY),
     )
     return {
-        "title": title_style,
         "section": section_style,
         "body": body_style,
         "note": note_style,
+        "meta": meta_style,
     }
+
+
+class ReportHeader(Flowable):
+    def __init__(self, target_date: date) -> None:
+        super().__init__()
+        self.target_date = target_date
+        self.header_width = 0.0
+        self.header_height = 220.0
+
+    def wrap(self, availWidth: float, _availHeight: float) -> tuple[float, float]:
+        self.header_width = availWidth
+        return availWidth, self.header_height
+
+    def _draw_centered_line(self, text: str, y: float, font_size: float, color_value: str) -> None:
+        canvas = self.canv
+        canvas.saveState()
+        canvas.setFillColor(colors.HexColor(color_value))
+        text_width = pdfmetrics.stringWidth(text, PDF_FONT_BOLD, font_size)
+        max_width = max(self.header_width - 12, 1)
+
+        if text_width <= max_width:
+            canvas.setFont(PDF_FONT_BOLD, font_size)
+            canvas.drawString((self.header_width - text_width) / 2, y, text)
+        else:
+            scale = max_width / text_width
+            text_object = canvas.beginText()
+            text_object.setTextOrigin((self.header_width - (text_width * scale)) / 2, y)
+            text_object.setFont(PDF_FONT_BOLD, font_size)
+            text_object.setHorizScale(scale * 100)
+            text_object.setFillColor(colors.HexColor(color_value))
+            text_object.textLine(text)
+            canvas.drawText(text_object)
+
+        canvas.restoreState()
+
+    def draw(self) -> None:
+        canvas = self.canv
+        canvas.saveState()
+
+        logo_path = get_logo_path()
+        baguette_path = get_baguette_path()
+        if logo_path.exists():
+            canvas.drawImage(
+                str(logo_path),
+                8,
+                20,
+                width=84,
+                height=84,
+                mask="auto",
+                preserveAspectRatio=True,
+                anchor="sw",
+            )
+        if baguette_path.exists():
+            canvas.drawImage(
+                str(baguette_path),
+                self.header_width - 130,
+                30,
+                width=122,
+                height=48,
+                mask="auto",
+                preserveAspectRatio=True,
+                anchor="sw",
+            )
+
+        self._draw_centered_line("BOULANGERIE", 172, 66, REPORT_RED)
+        self._draw_centered_line("LOMOTO", 116, 66, REPORT_RED)
+        self._draw_centered_line("Rapport journalier", 66, 46, REPORT_BLUE)
+        self._draw_centered_line(_format_date(self.target_date), 30, 46, REPORT_BLUE)
+
+        canvas.setStrokeColor(colors.HexColor(REPORT_NAVY))
+        canvas.setLineWidth(1.2)
+        canvas.line(0, 8, self.header_width, 8)
+        canvas.restoreState()
 
 
 def _make_table(rows: list[list[Any]], column_widths: list[float] | None = None) -> Table:
@@ -119,14 +205,16 @@ def _make_table(rows: list[list[Any]], column_widths: list[float] | None = None)
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dce8f4")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#102840")),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ("LEADING", (0, 0), (-1, -1), 11),
-                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#aebfd0")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE8F4")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(REPORT_NAVY)),
+                ("FONTNAME", (0, 0), (-1, 0), PDF_FONT_BOLD),
+                ("FONTNAME", (0, 1), (-1, -1), PDF_FONT_REGULAR),
+                ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+                ("LEADING", (0, 0), (-1, -1), 11.5),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#AEBFD0")),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7fafc")]),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7FAFC")]),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
                 ("TOPPADDING", (0, 0), (-1, -1), 5),
@@ -151,6 +239,8 @@ def create_daily_pdf_report(
     role: str = "Admin",
 ) -> Path:
     DatabaseHelper.initialize_database()
+    register_pdf_fonts()
+
     report_path = Path(destination) if destination is not None else DatabaseHelper.build_report_path(
         f"rapport-journalier-{target_date.strftime('%Y%m%d')}"
     )
@@ -185,16 +275,16 @@ def create_daily_pdf_report(
         pagesize=A4,
         leftMargin=16 * mm,
         rightMargin=16 * mm,
-        topMargin=18 * mm,
+        topMargin=14 * mm,
         bottomMargin=18 * mm,
         title=f"{APP_NAME} - {scope_label} du {_format_date(target_date)}",
         author="Kay Box Store",
     )
 
     elements: list[Any] = [
-        _paragraph(APP_NAME, styles["title"]),
-        _paragraph(f"Rapport PDF journalier - {_format_date(target_date)}", styles["section"]),
-        _paragraph(f"Profil du rapport : {scope_label}", styles["body"]),
+        ReportHeader(target_date),
+        Spacer(1, 3 * mm),
+        _paragraph(f"Profil du rapport : {scope_label}", styles["meta"]),
         _paragraph(scope_description, styles["note"]),
         _paragraph(
             f"Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}.",
@@ -235,7 +325,7 @@ def create_daily_pdf_report(
                 ["Net commissions", _format_fc(total_net_commissions)],
             ]
         )
-    elements.append(_make_table(overview_rows, [70 * mm, 90 * mm]))
+    elements.append(_make_table(overview_rows, [72 * mm, 88 * mm]))
     elements.append(Spacer(1, 6 * mm))
 
     if "stock" in allowed_sections:
@@ -313,14 +403,14 @@ def create_daily_pdf_report(
             ["Dépenses", _format_fc(total_expenses)],
             ["Solde du jour", _format_fc(balance)],
         ]
-        elements.append(_make_table(cash_rows, [70 * mm, 90 * mm]))
+        elements.append(_make_table(cash_rows, [72 * mm, 88 * mm]))
         expense_details = _safe_text(cash.get("DepensesEffectuees")).strip()
         if expense_details:
             elements.append(Spacer(1, 3 * mm))
             elements.append(_paragraph(f"Détails des dépenses : {expense_details}", styles["body"]))
         else:
             elements.append(Spacer(1, 2 * mm))
-            elements.append(_paragraph("Aucun détail de dépense enregistr? pour cette date.", styles["note"]))
+            elements.append(_paragraph("Aucun détail de dépense enregistré pour cette date.", styles["note"]))
         elements.append(Spacer(1, 6 * mm))
 
     if "commissions" in allowed_sections:

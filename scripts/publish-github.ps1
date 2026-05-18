@@ -119,7 +119,15 @@ function Build-ReleaseArtifacts {
     Push-Location $root
     try {
         Write-Host "Build PyInstaller de l'application en cours..." -ForegroundColor Cyan
-        & $python -m PyInstaller --noconfirm --clean --windowed --onedir --name "Boulangerie Lomoto" main.py
+        & $python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --windowed `
+            --onedir `
+            --name "Boulangerie Lomoto" `
+            --add-data ".\boulangerie_app\assets;boulangerie_app\assets" `
+            --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" `
+            main.py
         if ($LASTEXITCODE -ne 0) {
             throw "Le build PyInstaller de l'application a echoue."
         }

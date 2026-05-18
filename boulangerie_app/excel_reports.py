@@ -6,12 +6,14 @@ from typing import Any
 
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .database import DatabaseHelper
+from .report_branding import REPORT_BLUE, REPORT_RED, get_baguette_path, get_logo_path
 from .reports import (
     ReportGenerationError,
     get_report_scope_description,
@@ -31,11 +33,13 @@ THIN_BORDER = Border(
     top=Side(style="thin", color="AEBFD0"),
     bottom=Side(style="thin", color="AEBFD0"),
 )
-TITLE_FONT = Font(name="Calibri", size=16, bold=True, color="FFFFFF")
-SECTION_FONT = Font(name="Calibri", size=12, bold=True, color="1F3D5B")
-HEADER_FONT = Font(name="Calibri", size=11, bold=True, color="102840")
-BODY_FONT = Font(name="Calibri", size=11)
-NOTE_FONT = Font(name="Calibri", size=10, italic=True, color="505050")
+TITLE_FONT = Font(name="Poppins", size=16, bold=True, color="FFFFFF")
+SECTION_FONT = Font(name="Poppins", size=12, bold=True, color="1F3D5B")
+HEADER_FONT = Font(name="Poppins", size=11, bold=True, color="102840")
+BODY_FONT = Font(name="Poppins", size=11)
+NOTE_FONT = Font(name="Poppins", size=10, italic=True, color="505050")
+BRAND_NAME_FONT = Font(name="Poppins", size=66, bold=True, color=REPORT_RED.replace("#", ""))
+BRAND_SUBTITLE_FONT = Font(name="Poppins", size=46, bold=True, color=REPORT_BLUE.replace("#", ""))
 MONEY_FORMAT = '#,##0 "FC"'
 
 
@@ -97,6 +101,69 @@ def _add_table(sheet: Worksheet, start_row: int, end_row: int, end_col: int, nam
     sheet.add_table(table)
 
 
+def _add_brand_image(sheet: Worksheet, image_path: Path, anchor: str, width: int, height: int) -> None:
+    if not image_path.exists():
+        return
+    image = XLImage(str(image_path))
+    image.width = width
+    image.height = height
+    sheet.add_image(image, anchor)
+
+
+def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, scope_description: str) -> int:
+    sheet.merge_cells("A1:I2")
+    title_cell = sheet["A1"]
+    title_cell.value = "BOULANGERIE\nLOMOTO"
+    _apply_cell_style(
+        title_cell,
+        alignment=Alignment(horizontal="center", vertical="center", wrap_text=True),
+        font=BRAND_NAME_FONT,
+    )
+
+    sheet.merge_cells("A3:I4")
+    subtitle_cell = sheet["A3"]
+    subtitle_cell.value = f"Rapport journalier\n{_format_date(target_date)}"
+    _apply_cell_style(
+        subtitle_cell,
+        alignment=Alignment(horizontal="center", vertical="center", wrap_text=True),
+        font=BRAND_SUBTITLE_FONT,
+    )
+
+    for row_index, row_height in {
+        1: 54,
+        2: 54,
+        3: 44,
+        4: 44,
+        5: 42,
+        6: 42,
+    }.items():
+        sheet.row_dimensions[row_index].height = row_height
+
+    _add_brand_image(sheet, get_logo_path(), "A5", 96, 96)
+    _add_brand_image(sheet, get_baguette_path(), "H5", 150, 58)
+
+    sheet["A7"] = "Date du rapport"
+    sheet["B7"] = _format_date(target_date)
+    sheet["A8"] = "Profil"
+    sheet["B8"] = scope_label
+    sheet["A9"] = "Description"
+    sheet["B9"] = scope_description
+    sheet["A10"] = "Généré le"
+    sheet["B10"] = datetime.now().strftime("%d/%m/%Y à %H:%M")
+
+    for cell_ref in ("A7", "A8", "A9", "A10"):
+        _apply_cell_style(sheet[cell_ref], bold=True, fill=SECTION_FILL, alignment=Alignment(horizontal="left"))
+    for cell_ref in ("B7", "B8", "B9", "B10"):
+        _apply_cell_style(sheet[cell_ref], alignment=Alignment(horizontal="left", wrap_text=True))
+
+    sheet.column_dimensions["A"].width = 20
+    sheet.column_dimensions["B"].width = 24
+    for column_letter in ("C", "D", "E", "F", "G", "H", "I"):
+        sheet.column_dimensions[column_letter].width = 16
+
+    return 12
+
+
 def _build_report_context(target_date: date, role: str) -> dict[str, Any]:
     DatabaseHelper.initialize_database()
 
@@ -139,32 +206,13 @@ def _build_report_context(target_date: date, role: str) -> dict[str, Any]:
 def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     sheet = workbook.active
     sheet.title = "Résumé"
-    sheet.freeze_panes = "A7"
-
-    sheet.merge_cells("A1:D1")
-    title_cell = sheet["A1"]
-    title_cell.value = f"{APP_NAME} - Rapport Excel journalier"
-    _apply_cell_style(
-        title_cell,
-        fill=TITLE_FILL,
-        alignment=Alignment(horizontal="left", vertical="center"),
-        font=TITLE_FONT,
+    sheet.freeze_panes = "A13"
+    start_row = _apply_brand_header(
+        sheet,
+        context["target_date"],
+        context["scope_label"],
+        context["scope_description"],
     )
-    sheet["A2"] = "Date du rapport"
-    sheet["B2"] = _format_date(context["target_date"])
-    sheet["A3"] = "Profil"
-    sheet["B3"] = context["scope_label"]
-    sheet["A4"] = "Description"
-    sheet["B4"] = context["scope_description"]
-    sheet["A5"] = "Généré le"
-    sheet["B5"] = datetime.now().strftime("%d/%m/%Y à %H:%M")
-
-    for cell_ref in ("A2", "A3", "A4", "A5"):
-        _apply_cell_style(sheet[cell_ref], bold=True, fill=SECTION_FILL, alignment=Alignment(horizontal="left"))
-    for cell_ref in ("B2", "B3", "B4", "B5"):
-        _apply_cell_style(sheet[cell_ref], alignment=Alignment(horizontal="left", wrap_text=True))
-
-    start_row = 7
     sheet.cell(start_row, 1, "Indicateur")
     sheet.cell(start_row, 2, "Valeur")
     sheet.cell(start_row, 3, "Type")
@@ -240,7 +288,7 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         chart.set_categories(categories)
         chart.height = 7
         chart.width = 12
-        sheet.add_chart(chart, "E2")
+        sheet.add_chart(chart, "E7")
 
     _autofit_columns(sheet, min_width=14, max_width=34)
 
