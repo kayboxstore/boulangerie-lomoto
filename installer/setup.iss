@@ -1,5 +1,5 @@
 #define MyAppName "Boulangerie Lomoto"
-#define MyAppVersion "1.2.9"
+#define MyAppVersion "1.2.10"
 #define MyAppPublisher "Kay Box Store"
 #define MyAppExeName "Boulangerie Lomoto.exe"
 #define MyAppIdEscaped "{{D8D3424B-4C91-4C10-A7F5-84AB2F483F11}"
@@ -20,6 +20,8 @@ Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=..\boulangerie_app\assets\logo-boulangerie-lomoto.ico
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
@@ -40,6 +42,47 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Lancer {#MyAppName}"; Flags: no
 [Code]
 const
   UninstallRegKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppIdValue}_is1';
+  WindowsServiceName = 'BoulangerieLomotoCentralServer';
+  MainExeImageName = 'Boulangerie Lomoto.exe';
+  ServiceExeImageName = 'Boulangerie Lomoto Service.exe';
+
+var
+  RestartWindowsServiceAfterInstall: Boolean;
+
+function RunHiddenCommand(const Parameters: String): Integer;
+var
+  ResultCode: Integer;
+begin
+  if Exec(ExpandConstant('{cmd}'), '/C ' + Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := ResultCode
+  else
+    Result := -1;
+end;
+
+function IsWindowsServiceInstalled(): Boolean;
+begin
+  Result := RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\' + WindowsServiceName);
+end;
+
+procedure StopInstalledProcesses();
+begin
+  RestartWindowsServiceAfterInstall := IsWindowsServiceInstalled();
+
+  RunHiddenCommand('sc.exe stop "' + WindowsServiceName + '"');
+  Sleep(3000);
+  RunHiddenCommand('taskkill /F /T /IM "' + ServiceExeImageName + '"');
+  RunHiddenCommand('taskkill /F /T /IM "' + MainExeImageName + '"');
+  Sleep(1500);
+end;
+
+procedure RestartWindowsServiceIfNeeded();
+begin
+  if RestartWindowsServiceAfterInstall then
+  begin
+    RunHiddenCommand('sc.exe start "' + WindowsServiceName + '"');
+    Sleep(2000);
+  end;
+end;
 
 function GetInstalledVersion(var Version: String): Boolean;
 begin
@@ -140,4 +183,12 @@ begin
 
   if MsgBox(PromptText, mbConfirmation, MB_YESNO) = IDNO then
     Result := False;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+    StopInstalledProcesses()
+  else if CurStep = ssPostInstall then
+    RestartWindowsServiceIfNeeded();
 end;
