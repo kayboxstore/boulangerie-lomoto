@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from pathlib import Path
 from queue import Empty, Queue
@@ -10,6 +11,8 @@ from datetime import date, datetime
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable
+
+from PIL import Image, ImageTk
 
 from .connected_mode import (
     ConnectionSettings,
@@ -64,6 +67,10 @@ from .version import APP_NAME, APP_VERSION
 UI_FONT_FAMILY = "Poppins"
 UI_FONT_SIZE = 11
 UI_FONT = (UI_FONT_FAMILY, UI_FONT_SIZE)
+APP_BACKGROUND = "#dfeaf4"
+MODULE_BACKGROUND = "#eef3f8"
+
+_BRAND_IMAGE_CACHE: dict[tuple[str, int, int], ImageTk.PhotoImage] = {}
 
 
 ROLES = [
@@ -72,6 +79,97 @@ ROLES = [
     "Gestionnaire de stock",
     "Gestionnaire des commandes",
 ]
+
+
+def _package_root() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "boulangerie_app"
+    return Path(__file__).resolve().parent
+
+
+def assets_dir() -> Path:
+    return _package_root() / "assets"
+
+
+def get_logo_png_path() -> Path:
+    return assets_dir() / "logo-boulangerie-lomoto.png"
+
+
+def get_logo_ico_path() -> Path:
+    return assets_dir() / "logo-boulangerie-lomoto.ico"
+
+
+def _load_logo_photo(size: int, opacity: int = 255) -> ImageTk.PhotoImage | None:
+    logo_path = get_logo_png_path()
+    if not logo_path.exists():
+        return None
+
+    normalized_size = max(size, 16)
+    normalized_opacity = max(16, min(opacity, 255))
+    cache_key = (str(logo_path), normalized_size, normalized_opacity)
+    cached = _BRAND_IMAGE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    image = Image.open(logo_path).convert("RGBA")
+    image.thumbnail((normalized_size, normalized_size), Image.LANCZOS)
+    if normalized_opacity < 255:
+        alpha_channel = image.getchannel("A").point(
+            lambda alpha: int(alpha * normalized_opacity / 255)
+        )
+        image.putalpha(alpha_channel)
+
+    photo = ImageTk.PhotoImage(image)
+    _BRAND_IMAGE_CACHE[cache_key] = photo
+    return photo
+
+
+def apply_window_icon(window: tk.Tk | tk.Toplevel) -> None:
+    logo_icon = _load_logo_photo(48)
+    if logo_icon is not None:
+        try:
+            window.iconphoto(True, logo_icon)
+            setattr(window, "_brand_icon_image", logo_icon)
+        except tk.TclError:
+            pass
+
+    if os.name != "nt":
+        return
+
+    logo_ico_path = get_logo_ico_path()
+    if not logo_ico_path.exists():
+        return
+
+    try:
+        window.iconbitmap(default=str(logo_ico_path))
+    except tk.TclError:
+        pass
+
+
+def create_logo_widget(
+    parent: tk.Misc,
+    size: int,
+    *,
+    opacity: int = 255,
+    background: str | None = None,
+    use_ttk: bool = True,
+) -> tk.Label | ttk.Label | None:
+    logo_image = _load_logo_photo(size, opacity)
+    if logo_image is None:
+        return None
+
+    if use_ttk:
+        widget: tk.Label | ttk.Label = ttk.Label(parent, image=logo_image)
+    else:
+        widget = tk.Label(
+            parent,
+            image=logo_image,
+            bg=background or APP_BACKGROUND,
+            bd=0,
+            highlightthickness=0,
+        )
+    setattr(widget, "_brand_image", logo_image)
+    return widget
 
 
 def run_app() -> None:
@@ -86,7 +184,8 @@ def run_app() -> None:
     root.title(f"{APP_NAME} - Connexion - v{APP_VERSION}")
     root.geometry("580x380")
     root.minsize(580, 380)
-    root.configure(bg="#dfeaf4")
+    root.configure(bg=APP_BACKGROUND)
+    apply_window_icon(root)
     configure_styles()
     LoginWindow(root, post_update_notice)
     center_window(root)
@@ -421,6 +520,8 @@ class LoginWindow(ttk.Frame):
         self.root = root
         self.post_update_notice = post_update_notice
         self.notice_label: ttk.Label | None = None
+        self.watermark_label: ttk.Label | None = None
+        self.corner_logo_label: ttk.Label | None = None
         self.discovery_queue: Queue[tuple[str, Any, bool]] = Queue()
         self.discovery_in_progress = False
         self.discovered_servers: list[DiscoveredServerInfo] = []
@@ -432,13 +533,21 @@ class LoginWindow(ttk.Frame):
     def build_ui(self) -> None:
         card = ttk.LabelFrame(self, text="Connexion", style="Card.TLabelframe", padding=18)
         card.pack(expand=True)
+        self.watermark_label = create_logo_widget(card, 210, opacity=40)
+        if self.watermark_label is not None:
+            self.watermark_label.place(relx=0.5, rely=0.53, anchor="center")
+            self.watermark_label.lower()
+
+        self.corner_logo_label = create_logo_widget(card, 68)
+        if self.corner_logo_label is not None:
+            self.corner_logo_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
         ttk.Label(card, text=APP_NAME, style="Header.TLabel").grid(
-            row=0, column=0, columnspan=2, pady=(0, 18)
+            row=1, column=0, columnspan=2, pady=(0, 18)
         )
 
         ttk.Label(card, text=f"Version {APP_VERSION}", foreground="#5a6570").grid(
-            row=1, column=0, columnspan=2, pady=(0, 12)
+            row=2, column=0, columnspan=2, pady=(0, 12)
         )
 
         self.connection_status_var = tk.StringVar(value=DatabaseHelper.get_connection_status_text())
@@ -448,9 +557,9 @@ class LoginWindow(ttk.Frame):
             foreground="#2f5d3a",
             wraplength=360,
             justify="center",
-        ).grid(row=2, column=0, columnspan=2, pady=(0, 12))
+        ).grid(row=3, column=0, columnspan=2, pady=(0, 12))
 
-        row_index = 3
+        row_index = 4
         if self.post_update_notice is not None and self.post_update_notice.remaining_ms() > 0:
             self.notice_label = ttk.Label(
                 card,
@@ -812,7 +921,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.title("Paramètres réseau")
         self.geometry("760x700")
         self.minsize(740, 660)
-        self.configure(bg="#eef3f8")
+        self.configure(bg=MODULE_BACKGROUND)
+        apply_window_icon(self)
         self.transient(parent)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
@@ -838,6 +948,9 @@ class ConnectionSettingsDialog(tk.Toplevel):
     def build_ui(self) -> None:
         frame = ttk.Frame(self, padding=18)
         frame.pack(fill="both", expand=True)
+        logo_label = create_logo_widget(frame, 54)
+        if logo_label is not None:
+            logo_label.pack(anchor="w", pady=(0, 8))
 
         ttk.Label(frame, text="Mode connecté", style="Header.TLabel").pack(pady=(0, 12))
         ttk.Label(
@@ -1288,9 +1401,10 @@ class DashboardWindow(tk.Toplevel):
         self.title(f"{APP_NAME} - Tableau de bord - v{APP_VERSION}")
         self.geometry("900x560")
         self.minsize(860, 520)
-        self.configure(bg="#dfeaf4")
+        self.configure(bg=APP_BACKGROUND)
+        apply_window_icon(self)
         self.protocol("WM_DELETE_WINDOW", self.on_close_app)
-        self.scrollable_content = ScrollableContent(self, padding=20, background="#dfeaf4")
+        self.scrollable_content = ScrollableContent(self, padding=20, background=APP_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         self.body = self.scrollable_content.content
         self.build_ui()
@@ -1303,6 +1417,9 @@ class DashboardWindow(tk.Toplevel):
 
     def build_ui(self) -> None:
         container = self.body
+        logo_label = create_logo_widget(container, 60)
+        if logo_label is not None:
+            logo_label.pack(anchor="w", pady=(0, 8))
 
         ttk.Label(
             container,
@@ -1817,13 +1934,19 @@ class BaseModuleWindow(tk.Toplevel):
         self.live_refresh_after_id: str | None = None
         self.title(title)
         self.geometry(geometry)
-        self.configure(bg="#eef3f8")
+        self.configure(bg=MODULE_BACKGROUND)
+        apply_window_icon(self)
         self.transient(parent)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
-        self.scrollable_content = ScrollableContent(self, padding=16, background="#eef3f8")
+        self.scrollable_content = ScrollableContent(self, padding=16, background=MODULE_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
-        self.body = self.scrollable_content.content
+        shell = self.scrollable_content.content
+        logo_label = create_logo_widget(shell, 52)
+        if logo_label is not None:
+            logo_label.pack(anchor="w", pady=(0, 8))
+        self.body = ttk.Frame(shell)
+        self.body.pack(fill="both", expand=True)
         self.after(0, lambda: center_window(self))
         if self.parent.is_live_sync_enabled():
             self.schedule_live_refresh()
@@ -2770,9 +2893,13 @@ class StockWindow(BaseModuleWindow):
         dialog.title("Paramètres du stock")
         dialog.transient(self)
         dialog.grab_set()
-        dialog.configure(bg="#eef3f8")
+        dialog.configure(bg=MODULE_BACKGROUND)
+        apply_window_icon(dialog)
         frame = ttk.Frame(dialog, padding=16)
         frame.pack(fill="both", expand=True)
+        logo_label = create_logo_widget(frame, 48)
+        if logo_label is not None:
+            logo_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
         variables = {
             "Farine": tk.StringVar(value=format_number(float(current["FarineInitial"]))),
@@ -2782,8 +2909,9 @@ class StockWindow(BaseModuleWindow):
         }
 
         for index, (label, variable) in enumerate(variables.items()):
-            ttk.Label(frame, text=f"{label} initial").grid(row=index, column=0, sticky="w", pady=6)
-            ttk.Entry(frame, textvariable=variable, width=20).grid(row=index, column=1, sticky="ew", pady=6)
+            row_index = index + 1
+            ttk.Label(frame, text=f"{label} initial").grid(row=row_index, column=0, sticky="w", pady=6)
+            ttk.Entry(frame, textvariable=variable, width=20).grid(row=row_index, column=1, sticky="ew", pady=6)
 
         def save() -> None:
             try:
@@ -2801,7 +2929,7 @@ class StockWindow(BaseModuleWindow):
                 messagebox.showwarning("Stock", str(exc))
 
         actions = ttk.Frame(frame)
-        actions.grid(row=4, column=0, columnspan=2, pady=(12, 0))
+        actions.grid(row=5, column=0, columnspan=2, pady=(12, 0))
         ttk.Button(actions, text="Enregistrer", command=save).grid(row=0, column=0, padx=6)
         ttk.Button(actions, text="Annuler", command=dialog.destroy).grid(row=0, column=1, padx=6)
         frame.columnconfigure(1, weight=1)

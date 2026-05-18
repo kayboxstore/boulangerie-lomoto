@@ -30,6 +30,12 @@ Depuis le dossier du projet, lancez :
 .\.venv\Scripts\pyinstaller.exe --noconfirm --clean --console --onefile --name "Boulangerie Lomoto Service" --distpath ".\dist\Boulangerie Lomoto" --workpath ".\build\service" serveur_windows_service.py
 ```
 
+Version avec icône de l'application :
+
+```powershell
+.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --uac-admin --onedir --name "Boulangerie Lomoto" --icon ".\boulangerie_app\assets\logo-boulangerie-lomoto.ico" --add-data ".\boulangerie_app\assets;boulangerie_app\assets" --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" main.py
+```
+
 Note importante :
 
 - l'application principale est construite avec `--uac-admin`

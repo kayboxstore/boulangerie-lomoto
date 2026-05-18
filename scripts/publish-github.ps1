@@ -126,6 +126,7 @@ function Build-ReleaseArtifacts {
             --uac-admin `
             --onedir `
             --name "Boulangerie Lomoto" `
+            --icon ".\boulangerie_app\assets\logo-boulangerie-lomoto.ico" `
             --add-data ".\boulangerie_app\assets;boulangerie_app\assets" `
             --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" `
             main.py
