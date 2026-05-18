@@ -18,8 +18,10 @@ from .report_branding import (
     PDF_FONT_BOLD,
     PDF_FONT_REGULAR,
     REPORT_BLUE,
+    REPORT_BRAND_NAME_SIZE,
     REPORT_NAVY,
     REPORT_RED,
+    REPORT_SUBTITLE_SIZE,
     get_baguette_path,
     get_logo_path,
     register_pdf_fonts,
@@ -132,7 +134,7 @@ class ReportHeader(Flowable):
         super().__init__()
         self.target_date = target_date
         self.header_width = 0.0
-        self.header_height = 220.0
+        self.header_height = 132.0
 
     def wrap(self, availWidth: float, _availHeight: float) -> tuple[float, float]:
         self.header_width = availWidth
@@ -170,9 +172,9 @@ class ReportHeader(Flowable):
             canvas.drawImage(
                 str(logo_path),
                 8,
-                20,
-                width=84,
-                height=84,
+                24,
+                width=68,
+                height=68,
                 mask="auto",
                 preserveAspectRatio=True,
                 anchor="sw",
@@ -180,19 +182,22 @@ class ReportHeader(Flowable):
         if baguette_path.exists():
             canvas.drawImage(
                 str(baguette_path),
-                self.header_width - 130,
+                self.header_width - 114,
                 30,
-                width=122,
-                height=48,
+                width=104,
+                height=40,
                 mask="auto",
                 preserveAspectRatio=True,
                 anchor="sw",
             )
 
-        self._draw_centered_line("BOULANGERIE", 172, 66, REPORT_RED)
-        self._draw_centered_line("LOMOTO", 116, 66, REPORT_RED)
-        self._draw_centered_line("Rapport journalier", 66, 46, REPORT_BLUE)
-        self._draw_centered_line(_format_date(self.target_date), 30, 46, REPORT_BLUE)
+        self._draw_centered_line("BOULANGERIE LOMOTO", 84, REPORT_BRAND_NAME_SIZE, REPORT_RED)
+        self._draw_centered_line(
+            f"RAPPORT JOURNALIER - {_format_date(self.target_date)}",
+            44,
+            REPORT_SUBTITLE_SIZE,
+            REPORT_BLUE,
+        )
 
         canvas.setStrokeColor(colors.HexColor(REPORT_NAVY))
         canvas.setLineWidth(1.2)

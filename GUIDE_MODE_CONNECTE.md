@@ -40,11 +40,11 @@ C:\ProgramData\BoulangerieLomoto\central-server-data
 Sur chaque autre poste :
 
 1. Ouvrez l'application
-2. Cliquez sur `Paramètres réseau`
-3. Choisissez `Mode connecté au serveur central`
-4. Cliquez d'abord sur `Rechercher automatiquement`
-5. Si un seul serveur est trouve, son adresse sera remplie automatiquement
-6. Sinon, collez l'adresse du serveur, par exemple :
+2. Connectez-vous normalement avec le compte voulu
+3. Si c'est un compte simple comme `Caissier`, `Gestionnaire de stock` ou `Gestionnaire des commandes`, l'application cherche automatiquement le serveur principal
+4. Si un seul serveur est trouvé, l'adresse est utilisée automatiquement
+5. Sinon, vous pouvez toujours ouvrir `Paramètres réseau` pour choisir ou corriger manuellement l'adresse
+6. Exemple d'adresse détectée :
 
 ```text
 http://192.168.1.10:8765
@@ -53,11 +53,12 @@ http://192.168.1.10:8765
 7. Si vous utilisez un jeton, saisissez-le aussi
 8. Cliquez sur `Tester la connexion`
 9. Cliquez sur `Enregistrer`
-10. Connectez-vous normalement
 
-Alternative rapide :
+Comportement automatique :
 
-- depuis l'écran de connexion, le bouton `Détecter le serveur` permet aussi de retrouver automatiquement l'adresse du serveur central
+- si vous ouvrez l'application sur le poste principal avec un compte `Admin`, l'application se branche directement sur le serveur principal
+- si vous ouvrez l'application sur un poste client avec un compte simple, l'application se comporte comme client et récupère automatiquement l'adresse du serveur principal
+- depuis l'écran de connexion, le bouton `Détecter le serveur` permet toujours de relancer la recherche manuellement
 
 ## Variante temporaire
 

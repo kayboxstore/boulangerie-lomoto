@@ -26,9 +26,15 @@ Installez aussi Inno Setup sur Windows :
 Depuis le dossier du projet, lancez :
 
 ```powershell
-.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --onedir --name "Boulangerie Lomoto" --add-data ".\boulangerie_app\assets;boulangerie_app\assets" --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" main.py
+.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --uac-admin --onedir --name "Boulangerie Lomoto" --add-data ".\boulangerie_app\assets;boulangerie_app\assets" --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" main.py
 .\.venv\Scripts\pyinstaller.exe --noconfirm --clean --console --onefile --name "Boulangerie Lomoto Service" --distpath ".\dist\Boulangerie Lomoto" --workpath ".\build\service" serveur_windows_service.py
 ```
+
+Note importante :
+
+- l'application principale est construite avec `--uac-admin`
+- donc un double-clic suffit pour la lancer avec les droits administrateur
+- Windows peut quand même afficher la confirmation UAC
 
 Résultat attendu :
 

@@ -123,6 +123,7 @@ function Build-ReleaseArtifacts {
             --noconfirm `
             --clean `
             --windowed `
+            --uac-admin `
             --onedir `
             --name "Boulangerie Lomoto" `
             --add-data ".\boulangerie_app\assets;boulangerie_app\assets" `

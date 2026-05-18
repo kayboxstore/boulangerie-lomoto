@@ -190,6 +190,28 @@ def is_running_as_administrator() -> bool:
         return False
 
 
+def relaunch_current_process_as_administrator() -> bool:
+    executable = sys.executable
+    if getattr(sys, "frozen", False):
+        arguments = sys.argv[1:]
+    else:
+        arguments = [sys.argv[0], *sys.argv[1:]]
+
+    parameter_text = subprocess.list2cmdline(arguments)
+    try:
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            executable,
+            parameter_text,
+            None,
+            1,
+        )
+    except Exception:
+        return False
+    return result > 32
+
+
 def _run_text_command(command: Sequence[str], timeout_seconds: int = 90) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),

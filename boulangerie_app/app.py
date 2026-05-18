@@ -42,6 +42,7 @@ from .server_host import (
     is_running_as_administrator,
     load_central_server_settings,
     prepare_central_server_data,
+    relaunch_current_process_as_administrator,
     remove_windows_service,
     save_central_server_settings,
     start_windows_service,
@@ -74,6 +75,11 @@ ROLES = [
 
 
 def run_app() -> None:
+    if os.name == "nt" and not is_running_as_administrator():
+        if relaunch_current_process_as_administrator():
+            return
+        return
+
     DatabaseHelper.initialize_database()
     post_update_notice = UpdateChecker.consume_post_update_notice()
     root = tk.Tk()
@@ -417,10 +423,11 @@ class LoginWindow(ttk.Frame):
         self.notice_label: ttk.Label | None = None
         self.discovery_queue: Queue[tuple[str, Any, bool]] = Queue()
         self.discovery_in_progress = False
+        self.discovered_servers: list[DiscoveredServerInfo] = []
         self.pack(fill="both", expand=True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
         self.build_ui()
-        self.after(300, self.auto_discover_server_if_needed)
+        self.after(300, self.auto_configure_connection)
 
     def build_ui(self) -> None:
         card = ttk.LabelFrame(self, text="Connexion", style="Card.TLabelframe", padding=18)
@@ -502,10 +509,95 @@ class LoginWindow(ttk.Frame):
         self.wait_window(dialog)
         self.refresh_connection_status()
 
-    def auto_discover_server_if_needed(self) -> None:
+    def _apply_session_connection_settings(self, settings: ConnectionSettings) -> None:
+        DatabaseHelper.apply_connection_settings(settings, persist=False)
+        self.refresh_connection_status()
+
+    def _build_remote_settings(self, server_url: str, api_token: str = "") -> ConnectionSettings:
+        return ConnectionSettings(mode="remote", server_url=server_url, api_token=api_token)
+
+    def _is_reachable_remote_settings(self, settings: ConnectionSettings) -> bool:
+        if not settings.is_remote():
+            return False
+        try:
+            RemoteDatabaseClient(
+                settings.normalized_url(),
+                api_token=settings.api_token,
+                timeout_seconds=2,
+            ).ping()
+        except Exception:
+            return False
+        return True
+
+    def _get_saved_remote_settings(self) -> ConnectionSettings | None:
         settings = DatabaseHelper.get_connection_settings()
-        if settings.normalized_mode() == "remote" and not settings.normalized_url():
-            self.start_server_discovery(auto_apply=True)
+        if settings.is_remote():
+            return settings
+        return None
+
+    def _get_local_server_settings(self, start_service_if_needed: bool = False) -> ConnectionSettings | None:
+        handle = get_embedded_server_status()
+        if handle is not None:
+            return self._build_remote_settings(handle.preferred_url, handle.api_token)
+
+        host_settings = load_central_server_settings()
+        service_status = get_windows_service_status()
+        if (
+            service_status.installed
+            and not service_status.is_running
+            and start_service_if_needed
+            and is_running_as_administrator()
+        ):
+            try:
+                install_or_update_windows_service(
+                    host_settings,
+                    source_data_dir=DatabaseHelper.app_data_dir,
+                )
+                start_windows_service()
+                service_status = get_windows_service_status()
+            except Exception:
+                pass
+
+        if not service_status.installed or not service_status.is_running:
+            return None
+
+        token = host_settings.normalized_token()
+        for server_url in build_local_server_addresses(host_settings.normalized_port()):
+            settings = self._build_remote_settings(server_url, token)
+            if self._is_reachable_remote_settings(settings):
+                return settings
+        return None
+
+    def _discover_remote_settings(self, use_cached: bool = True) -> ConnectionSettings | None:
+        servers = self.discovered_servers if use_cached and self.discovered_servers else []
+        if not servers:
+            servers = discover_remote_servers(timeout_seconds=REMOTE_DISCOVERY_TIMEOUT_SECONDS)
+            self.discovered_servers = servers
+        if not servers:
+            return None
+
+        current_settings = DatabaseHelper.get_connection_settings()
+        selected_server = servers[0]
+        return self._build_remote_settings(
+            selected_server.server_url,
+            current_settings.api_token,
+        )
+
+    def auto_configure_connection(self) -> None:
+        local_server_settings = self._get_local_server_settings(start_service_if_needed=True)
+        if local_server_settings is not None:
+            self._apply_session_connection_settings(local_server_settings)
+            self.connection_status_var.set(
+                f"Serveur principal local prêt : {local_server_settings.normalized_url()}"
+            )
+            return
+
+        saved_remote_settings = self._get_saved_remote_settings()
+        if saved_remote_settings is not None and self._is_reachable_remote_settings(saved_remote_settings):
+            self._apply_session_connection_settings(saved_remote_settings)
+            return
+
+        self.start_server_discovery(auto_apply=True)
 
     def detect_server_now(self) -> None:
         self.start_server_discovery(auto_apply=False)
@@ -548,9 +640,10 @@ class LoginWindow(ttk.Frame):
         servers = item[1]
         if not isinstance(servers, list):
             servers = []
+        self.discovered_servers = servers
 
         if not servers:
-            self.refresh_connection_status()
+            self._apply_session_connection_settings(ConnectionSettings())
             if not auto_apply:
                 messagebox.showinfo(
                     "Recherche automatique",
@@ -565,8 +658,7 @@ class LoginWindow(ttk.Frame):
             server_url=selected_server.server_url,
             api_token=settings.api_token,
         )
-        DatabaseHelper.save_connection_settings(updated_settings)
-        self.refresh_connection_status()
+        self._apply_session_connection_settings(updated_settings)
 
         if auto_apply:
             self.connection_status_var.set(
@@ -589,6 +681,70 @@ class LoginWindow(ttk.Frame):
             ),
         )
 
+    def _build_login_connection_plan(self) -> list[ConnectionSettings]:
+        plan: list[ConnectionSettings] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        def add_setting(setting: ConnectionSettings | None) -> None:
+            if setting is None:
+                return
+            normalized = ConnectionSettings(
+                mode=setting.normalized_mode(),
+                server_url=setting.normalized_url(),
+                api_token=setting.api_token.strip(),
+            )
+            key = (
+                normalized.normalized_mode(),
+                normalized.normalized_url(),
+                normalized.api_token.strip(),
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            plan.append(normalized)
+
+        add_setting(self._get_local_server_settings(start_service_if_needed=True))
+        add_setting(self._discover_remote_settings(use_cached=True))
+        add_setting(self._get_saved_remote_settings())
+        add_setting(ConnectionSettings())
+        return plan
+
+    def _try_login_with_settings(
+        self,
+        settings: ConnectionSettings,
+        identifiant: str,
+        mot_de_passe: str,
+    ) -> tuple[AuthenticatedUser | None, str | None]:
+        self._apply_session_connection_settings(settings)
+        try:
+            user = DatabaseHelper.find_user_for_login(identifiant, mot_de_passe)
+        except Exception as exc:
+            return None, str(exc)
+        return user, None
+
+    def _promote_admin_session_to_principal_server(
+        self,
+        identifiant: str,
+        mot_de_passe: str,
+        current_user: AuthenticatedUser,
+    ) -> AuthenticatedUser:
+        if current_user.role != "Admin" or DatabaseHelper.is_remote_mode():
+            return current_user
+
+        local_server_settings = self._get_local_server_settings(start_service_if_needed=True)
+        if local_server_settings is None:
+            return current_user
+
+        remote_user, error_message = self._try_login_with_settings(
+            local_server_settings,
+            identifiant,
+            mot_de_passe,
+        )
+        if error_message is not None or remote_user is None:
+            self._apply_session_connection_settings(ConnectionSettings())
+            return current_user
+        return remote_user
+
     def login(self) -> None:
         identifiant = self.user_var.get().strip()
         mot_de_passe = self.password_var.get().strip()
@@ -599,13 +755,31 @@ class LoginWindow(ttk.Frame):
             messagebox.showwarning("Connexion", "Veuillez entrer un mot de passe.")
             return
 
-        try:
-            user = DatabaseHelper.find_user_for_login(identifiant, mot_de_passe)
-        except Exception as exc:
-            messagebox.showerror("Connexion", str(exc))
-            return
+        remote_errors: list[str] = []
+        user: AuthenticatedUser | None = None
+
+        for settings in self._build_login_connection_plan():
+            candidate_user, error_message = self._try_login_with_settings(settings, identifiant, mot_de_passe)
+            if error_message is not None:
+                if settings.is_remote():
+                    remote_errors.append(error_message)
+                    continue
+                messagebox.showerror("Connexion", error_message)
+                return
+            if candidate_user is None:
+                continue
+            user = self._promote_admin_session_to_principal_server(
+                identifiant,
+                mot_de_passe,
+                candidate_user,
+            )
+            break
+
         if user is None:
-            messagebox.showwarning("Connexion", "Identifiants incorrects.")
+            if remote_errors:
+                messagebox.showerror("Connexion", remote_errors[0])
+            else:
+                messagebox.showwarning("Connexion", "Identifiants incorrects.")
             self.password_var.set("")
             self.password_entry.focus()
             return

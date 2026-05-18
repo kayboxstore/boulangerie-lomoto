@@ -13,7 +13,14 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .database import DatabaseHelper
-from .report_branding import REPORT_BLUE, REPORT_RED, get_baguette_path, get_logo_path
+from .report_branding import (
+    REPORT_BLUE,
+    REPORT_BRAND_NAME_SIZE,
+    REPORT_RED,
+    REPORT_SUBTITLE_SIZE,
+    get_baguette_path,
+    get_logo_path,
+)
 from .reports import (
     ReportGenerationError,
     get_report_scope_description,
@@ -38,8 +45,18 @@ SECTION_FONT = Font(name="Poppins", size=12, bold=True, color="1F3D5B")
 HEADER_FONT = Font(name="Poppins", size=11, bold=True, color="102840")
 BODY_FONT = Font(name="Poppins", size=11)
 NOTE_FONT = Font(name="Poppins", size=10, italic=True, color="505050")
-BRAND_NAME_FONT = Font(name="Poppins", size=66, bold=True, color=REPORT_RED.replace("#", ""))
-BRAND_SUBTITLE_FONT = Font(name="Poppins", size=46, bold=True, color=REPORT_BLUE.replace("#", ""))
+BRAND_NAME_FONT = Font(
+    name="Poppins",
+    size=REPORT_BRAND_NAME_SIZE,
+    bold=True,
+    color=REPORT_RED.replace("#", ""),
+)
+BRAND_SUBTITLE_FONT = Font(
+    name="Poppins",
+    size=REPORT_SUBTITLE_SIZE,
+    bold=True,
+    color=REPORT_BLUE.replace("#", ""),
+)
 MONEY_FORMAT = '#,##0 "FC"'
 
 
@@ -113,34 +130,34 @@ def _add_brand_image(sheet: Worksheet, image_path: Path, anchor: str, width: int
 def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, scope_description: str) -> int:
     sheet.merge_cells("A1:I2")
     title_cell = sheet["A1"]
-    title_cell.value = "BOULANGERIE\nLOMOTO"
+    title_cell.value = "BOULANGERIE LOMOTO"
     _apply_cell_style(
         title_cell,
-        alignment=Alignment(horizontal="center", vertical="center", wrap_text=True),
+        alignment=Alignment(horizontal="center", vertical="center"),
         font=BRAND_NAME_FONT,
     )
 
     sheet.merge_cells("A3:I4")
     subtitle_cell = sheet["A3"]
-    subtitle_cell.value = f"Rapport journalier\n{_format_date(target_date)}"
+    subtitle_cell.value = f"RAPPORT JOURNALIER - {_format_date(target_date)}"
     _apply_cell_style(
         subtitle_cell,
-        alignment=Alignment(horizontal="center", vertical="center", wrap_text=True),
+        alignment=Alignment(horizontal="center", vertical="center"),
         font=BRAND_SUBTITLE_FONT,
     )
 
     for row_index, row_height in {
-        1: 54,
-        2: 54,
-        3: 44,
-        4: 44,
-        5: 42,
-        6: 42,
+        1: 34,
+        2: 34,
+        3: 28,
+        4: 28,
+        5: 28,
+        6: 28,
     }.items():
         sheet.row_dimensions[row_index].height = row_height
 
-    _add_brand_image(sheet, get_logo_path(), "A5", 96, 96)
-    _add_brand_image(sheet, get_baguette_path(), "H5", 150, 58)
+    _add_brand_image(sheet, get_logo_path(), "A5", 70, 70)
+    _add_brand_image(sheet, get_baguette_path(), "H5", 110, 42)
 
     sheet["A7"] = "Date du rapport"
     sheet["B7"] = _format_date(target_date)
