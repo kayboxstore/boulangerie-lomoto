@@ -24,6 +24,7 @@ from .report_branding import (
     REPORT_SUBTITLE_SIZE,
     get_baguette_path,
     get_logo_path,
+    get_logo_watermark_path,
     register_pdf_fonts,
 )
 from .status_labels import normalize_status_label
@@ -259,6 +260,30 @@ def _safe_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _draw_report_page_background(canvas: Any, doc: SimpleDocTemplate) -> None:
+    watermark_path = get_logo_watermark_path()
+    if not watermark_path.exists():
+        return
+
+    page_width, page_height = doc.pagesize
+    watermark_size = min(page_width, page_height) * 0.55
+    x = (page_width - watermark_size) / 2
+    y = (page_height - watermark_size) / 2
+
+    canvas.saveState()
+    canvas.drawImage(
+        str(watermark_path),
+        x,
+        y,
+        width=watermark_size,
+        height=watermark_size,
+        mask="auto",
+        preserveAspectRatio=True,
+        anchor="c",
+    )
+    canvas.restoreState()
+
+
 def create_daily_pdf_report(
     target_date: date,
     destination: str | Path | None = None,
@@ -465,7 +490,11 @@ def create_daily_pdf_report(
             elements.append(_paragraph("Aucune commission enregistrée pour cette date.", styles["body"]))
 
     try:
-        doc.build(elements)
+        doc.build(
+            elements,
+            onFirstPage=_draw_report_page_background,
+            onLaterPages=_draw_report_page_background,
+        )
     except Exception as exc:
         raise ReportGenerationError("Impossible de générer le rapport PDF.") from exc
 

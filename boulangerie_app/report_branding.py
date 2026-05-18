@@ -36,6 +36,10 @@ def get_logo_path() -> Path:
     return assets_dir() / "logo-boulangerie-lomoto.png"
 
 
+def get_logo_watermark_path() -> Path:
+    return assets_dir() / "logo-boulangerie-lomoto-watermark.png"
+
+
 def get_baguette_path() -> Path:
     return assets_dir() / "icon-baguette.png"
 

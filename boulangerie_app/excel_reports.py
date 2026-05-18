@@ -20,6 +20,7 @@ from .report_branding import (
     REPORT_SUBTITLE_SIZE,
     get_baguette_path,
     get_logo_path,
+    get_logo_watermark_path,
 )
 from .reports import (
     ReportGenerationError,
@@ -127,6 +128,16 @@ def _add_brand_image(sheet: Worksheet, image_path: Path, anchor: str, width: int
     sheet.add_image(image, anchor)
 
 
+def _add_sheet_watermark(sheet: Worksheet, anchor: str, width: int, height: int) -> None:
+    watermark_path = get_logo_watermark_path()
+    if not watermark_path.exists():
+        return
+    image = XLImage(str(watermark_path))
+    image.width = width
+    image.height = height
+    sheet.add_image(image, anchor)
+
+
 def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, scope_description: str) -> int:
     sheet.merge_cells("B1:G2")
     title_cell = sheet["B1"]
@@ -229,6 +240,7 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     sheet = workbook.active
     sheet.title = "Résumé"
     sheet.freeze_panes = "A13"
+    _add_sheet_watermark(sheet, "D7", 260, 260)
     start_row = _apply_brand_header(
         sheet,
         context["target_date"],
@@ -318,6 +330,7 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
 def _build_stock_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     sheet = workbook.create_sheet("Stock")
     sheet.freeze_panes = "A6"
+    _add_sheet_watermark(sheet, "G6", 220, 220)
 
     sheet["A1"] = "Stock du jour"
     _apply_cell_style(sheet["A1"], fill=TITLE_FILL, alignment=Alignment(horizontal="left"), font=TITLE_FONT)
@@ -386,6 +399,7 @@ def _build_stock_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
 def _build_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     sheet = workbook.create_sheet("Commandes")
     sheet.freeze_panes = "A4"
+    _add_sheet_watermark(sheet, "G5", 220, 220)
 
     sheet["A1"] = "Commandes du jour"
     _apply_cell_style(sheet["A1"], fill=TITLE_FILL, alignment=Alignment(horizontal="left"), font=TITLE_FONT)
@@ -442,6 +456,7 @@ def _build_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
 def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     sheet = workbook.create_sheet("Caisse")
     sheet.freeze_panes = "A4"
+    _add_sheet_watermark(sheet, "G5", 220, 220)
 
     sheet["A1"] = "Caisse du jour"
     _apply_cell_style(sheet["A1"], fill=TITLE_FILL, alignment=Alignment(horizontal="left"), font=TITLE_FONT)
@@ -485,6 +500,7 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
 def _build_commissions_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     sheet = workbook.create_sheet("Commissions")
     sheet.freeze_panes = "A4"
+    _add_sheet_watermark(sheet, "G5", 220, 220)
 
     sheet["A1"] = "Commissions du jour"
     _apply_cell_style(sheet["A1"], fill=TITLE_FILL, alignment=Alignment(horizontal="left"), font=TITLE_FONT)

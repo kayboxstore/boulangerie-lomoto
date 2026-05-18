@@ -213,7 +213,7 @@ def configure_styles() -> None:
     style.configure("TSpinbox", font=UI_FONT)
     style.configure("Treeview", font=UI_FONT, rowheight=28)
     style.configure("Treeview.Heading", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
-    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 18, "bold"))
+    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 46, "bold"), foreground="#C61C1C")
     style.configure("Card.TLabelframe", padding=12)
     style.configure("Card.TLabelframe.Label", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
     style.configure("Primary.TButton", padding=(12, 8))
@@ -383,6 +383,8 @@ class DataTable(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         self.rows_by_item: dict[str, dict[str, Any]] = {}
+        self.tree.bind("<MouseWheel>", self._on_mousewheel, add="+")
+        self.tree.bind("<Shift-MouseWheel>", self._on_shift_mousewheel, add="+")
 
     def set_data(
         self,
@@ -420,8 +422,33 @@ class DataTable(ttk.Frame):
             return None
         return self.rows_by_item.get(selection[0])
 
+    def _normalize_wheel_units(self, delta: int) -> int:
+        if delta == 0:
+            return 0
+        if delta % 120 == 0:
+            return -1 * int(delta / 120)
+        return -1 if delta > 0 else 1
+
+    def _on_mousewheel(self, event: tk.Event[tk.Misc]) -> str | None:
+        delta = int(getattr(event, "delta", 0) or 0)
+        units = self._normalize_wheel_units(delta)
+        if units == 0:
+            return None
+        self.tree.yview_scroll(units, "units")
+        return "break"
+
+    def _on_shift_mousewheel(self, event: tk.Event[tk.Misc]) -> str | None:
+        delta = int(getattr(event, "delta", 0) or 0)
+        units = self._normalize_wheel_units(delta)
+        if units == 0:
+            return None
+        self.tree.xview_scroll(units, "units")
+        return "break"
+
 
 class ScrollableContent(ttk.Frame):
+    _mousewheel_bindings_ready = False
+
     def __init__(
         self,
         parent: tk.Misc,
@@ -457,12 +484,22 @@ class ScrollableContent(ttk.Frame):
 
         self.content = ttk.Frame(self.canvas, padding=padding)
         self._content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+        setattr(self, "_scrollable_owner", self)
+        setattr(self.canvas, "_scrollable_owner", self)
+        setattr(self.content, "_scrollable_owner", self)
 
         self.content.bind("<Configure>", self._on_content_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel, add="+")
-        self.canvas.bind("<Shift-MouseWheel>", self._on_shift_mousewheel, add="+")
+        self._install_global_mousewheel_bindings()
         self.after_idle(self._refresh_scroll_region)
+
+    def _install_global_mousewheel_bindings(self) -> None:
+        if ScrollableContent._mousewheel_bindings_ready:
+            return
+        root = self.winfo_toplevel()
+        root.bind_all("<MouseWheel>", ScrollableContent._dispatch_mousewheel, add="+")
+        root.bind_all("<Shift-MouseWheel>", ScrollableContent._dispatch_shift_mousewheel, add="+")
+        ScrollableContent._mousewheel_bindings_ready = True
 
     def _on_content_configure(self, _event: tk.Event[tk.Misc]) -> None:
         self._refresh_scroll_region()
@@ -493,23 +530,69 @@ class ScrollableContent(ttk.Frame):
         else:
             self.horizontal_scrollbar.grid()
 
+    @staticmethod
+    def _dispatch_mousewheel(event: tk.Event[tk.Misc]) -> str | None:
+        owner = ScrollableContent._resolve_owner_from_event(event)
+        if owner is None:
+            return None
+        return owner._on_mousewheel(event)
+
+    @staticmethod
+    def _dispatch_shift_mousewheel(event: tk.Event[tk.Misc]) -> str | None:
+        owner = ScrollableContent._resolve_owner_from_event(event)
+        if owner is None:
+            return None
+        return owner._on_shift_mousewheel(event)
+
+    @staticmethod
+    def _resolve_owner_from_event(event: tk.Event[tk.Misc]) -> "ScrollableContent | None":
+        widget = getattr(event, "widget", None)
+        if widget is None:
+            return None
+        try:
+            current: tk.Misc | None = widget.winfo_containing(event.x_root, event.y_root)
+        except tk.TclError:
+            current = widget
+        while current is not None:
+            owner = getattr(current, "_scrollable_owner", None)
+            if isinstance(owner, ScrollableContent):
+                return owner
+            try:
+                parent_name = current.winfo_parent()
+            except tk.TclError:
+                return None
+            if not parent_name:
+                return None
+            try:
+                current = current.nametowidget(parent_name)
+            except KeyError:
+                return None
+        return None
+
+    def _normalize_wheel_units(self, delta: int) -> int:
+        if delta == 0:
+            return 0
+        if delta % 120 == 0:
+            return -1 * int(delta / 120)
+        return -1 if delta > 0 else 1
+
     def _on_mousewheel(self, event: tk.Event[tk.Misc]) -> str | None:
         if not self.vertical_scrollbar.winfo_ismapped():
             return None
-        delta = event.delta
-        if delta == 0:
+        delta = int(getattr(event, "delta", 0) or 0)
+        units = self._normalize_wheel_units(delta)
+        if units == 0:
             return None
-        units = -1 * int(delta / 120) if delta % 120 == 0 else (-1 if delta > 0 else 1)
         self.canvas.yview_scroll(units, "units")
         return "break"
 
     def _on_shift_mousewheel(self, event: tk.Event[tk.Misc]) -> str | None:
         if not self.horizontal_scrollbar.winfo_ismapped():
             return None
-        delta = event.delta
-        if delta == 0:
+        delta = int(getattr(event, "delta", 0) or 0)
+        units = self._normalize_wheel_units(delta)
+        if units == 0:
             return None
-        units = -1 * int(delta / 120) if delta % 120 == 0 else (-1 if delta > 0 else 1)
         self.canvas.xview_scroll(units, "units")
         return "break"
 
@@ -521,7 +604,6 @@ class LoginWindow(ttk.Frame):
         self.post_update_notice = post_update_notice
         self.notice_label: ttk.Label | None = None
         self.watermark_label: ttk.Label | None = None
-        self.corner_logo_label: ttk.Label | None = None
         self.discovery_queue: Queue[tuple[str, Any, bool]] = Queue()
         self.discovery_in_progress = False
         self.discovered_servers: list[DiscoveredServerInfo] = []
@@ -537,10 +619,6 @@ class LoginWindow(ttk.Frame):
         if self.watermark_label is not None:
             self.watermark_label.place(relx=0.5, rely=0.53, anchor="center")
             self.watermark_label.lower()
-
-        self.corner_logo_label = create_logo_widget(card, 68)
-        if self.corner_logo_label is not None:
-            self.corner_logo_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
         ttk.Label(card, text=APP_NAME, style="Header.TLabel").grid(
             row=1, column=0, columnspan=2, pady=(0, 18)
