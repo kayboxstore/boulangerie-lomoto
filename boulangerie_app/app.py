@@ -198,14 +198,14 @@ def center_window(window: tk.Misc) -> None:
     requested_width, requested_height = _measure_requested_content_size(window)
     required_width = requested_width + 24
     required_height = requested_height + 36
-    max_width = max(int(window.winfo_scréenwidth() * 0.96), 320)
-    max_height = max(int(window.winfo_scréenheight() * 0.92), 240)
+    max_width = max(int(window.winfo_screenwidth() * 0.96), 320)
+    max_height = max(int(window.winfo_screenheight() * 0.92), 240)
 
     width = min(max(width, required_width), max_width)
     height = min(max(height, required_height), max_height)
 
-    x = max((window.winfo_scréenwidth() - width) // 2, 0)
-    y = max((window.winfo_scréenheight() - height) // 2, 0)
+    x = max((window.winfo_screenwidth() - width) // 2, 0)
+    y = max((window.winfo_screenheight() - height) // 2, 0)
     window.geometry(f"{width}x{height}+{x}+{y}")
     if hasattr(window, "minsize"):
         window.minsize(width, height)
