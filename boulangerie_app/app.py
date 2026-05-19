@@ -70,10 +70,10 @@ UI_FONT_SIZE = 11
 UI_FONT = (UI_FONT_FAMILY, UI_FONT_SIZE)
 APP_BACKGROUND = "#dfeaf4"
 MODULE_BACKGROUND = "#eef3f8"
-FORM_LOGO_SIZE = 84
-DASHBOARD_LOGO_SIZE = 96
-SETTINGS_LOGO_SIZE = 86
-STOCK_DIALOG_LOGO_SIZE = 76
+FORM_LOGO_SIZE = 68
+DASHBOARD_LOGO_SIZE = 80
+SETTINGS_LOGO_SIZE = 70
+STOCK_DIALOG_LOGO_SIZE = 60
 
 _BRAND_IMAGE_CACHE: dict[tuple[str, int, int], ImageTk.PhotoImage] = {}
 
@@ -193,7 +193,7 @@ def run_app() -> None:
     apply_window_icon(root)
     configure_styles()
     LoginWindow(root, post_update_notice)
-    center_window(root)
+    maximize_window(root, 580, 380)
     root.mainloop()
 
 
@@ -218,8 +218,8 @@ def configure_styles() -> None:
     style.configure("TSpinbox", font=UI_FONT)
     style.configure("Treeview", font=UI_FONT, rowheight=28)
     style.configure("Treeview.Heading", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
-    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 52, "bold"), foreground="#B30000")
-    style.configure("Card.TLabelframe", padding=12)
+    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 44, "bold"), foreground="#B30000")
+    style.configure("Card.TLabelframe", padding=8)
     style.configure("Card.TLabelframe.Label", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
     style.configure("Primary.TButton", padding=(12, 8))
 
@@ -330,6 +330,26 @@ def center_window(window: tk.Misc) -> None:
     window.geometry(f"{width}x{height}+{x}+{y}")
     if hasattr(window, "minsize"):
         window.minsize(width, height)
+
+
+def maximize_window(window: tk.Misc, min_width: int = 760, min_height: int = 520) -> None:
+    window.update_idletasks()
+    requested_width, requested_height = _measure_requested_content_size(window)
+    safe_min_width = max(min_width, min(requested_width + 24, window.winfo_screenwidth()))
+    safe_min_height = max(min_height, min(requested_height + 36, window.winfo_screenheight()))
+    if hasattr(window, "minsize"):
+        window.minsize(safe_min_width, safe_min_height)
+
+    try:
+        if os.name == "nt":
+            window.state("zoomed")
+            return
+        window.attributes("-zoomed", True)
+        return
+    except tk.TclError:
+        pass
+
+    window.geometry(f"{window.winfo_screenwidth()}x{window.winfo_screenheight()}+0+0")
 
 
 def open_folder(target_path: str | Path) -> None:
@@ -630,7 +650,7 @@ class LoginWindow(ttk.Frame):
 
     def build_ui(self) -> None:
         card = ttk.LabelFrame(self, text="Connexion", style="Card.TLabelframe", padding=18)
-        card.pack(expand=True)
+        card.pack(anchor="n", pady=(24, 0))
         self.watermark_label = create_logo_widget(card, 210, opacity=40)
         if self.watermark_label is not None:
             self.watermark_label.place(relx=0.5, rely=0.53, anchor="center")
@@ -690,15 +710,6 @@ class LoginWindow(ttk.Frame):
         ttk.Button(button_row, text="Détecter le serveur", command=self.detect_server_now).grid(
             row=0, column=3, padx=6
         )
-        row_index += 1
-
-        hint = ttk.Label(
-            card,
-            text="Compte par défaut disponible : identifiant admin",
-            foreground="#444444",
-        )
-        hint.grid(row=row_index, column=0, columnspan=2, pady=(14, 0))
-
         card.columnconfigure(1, weight=1)
         user_entry.focus()
         user_entry.bind("<Return>", lambda _event: self.password_entry.focus())
@@ -1013,8 +1024,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.parent = parent
         self.title("Paramètres réseau")
-        self.geometry("820x760")
-        self.minsize(780, 700)
+        self.geometry("900x760")
+        self.minsize(820, 700)
         self.configure(bg=MODULE_BACKGROUND)
         apply_window_icon(self)
         self.transient(parent)
@@ -1040,20 +1051,20 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.refresh_windows_service_status()
         self.update_mode_fields()
         self.after(250, self.auto_discover_if_needed)
-        self.after(0, lambda: center_window(self))
+        maximize_window(self, 820, 700)
 
     def build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self.scrollable_content = ScrollableContent(self, padding=18, background=MODULE_BACKGROUND)
+        self.scrollable_content = ScrollableContent(self, padding=12, background=MODULE_BACKGROUND)
         self.scrollable_content.grid(row=0, column=0, sticky="nsew")
         frame = self.scrollable_content.content
         logo_label = create_logo_widget(frame, SETTINGS_LOGO_SIZE)
         if logo_label is not None:
-            logo_label.pack(anchor="w", pady=(0, 8))
+            logo_label.pack(anchor="w", pady=(0, 4))
 
-        ttk.Label(frame, text="Mode connecté", style="Header.TLabel").pack(pady=(0, 12))
+        ttk.Label(frame, text="Mode connecté", style="Header.TLabel").pack(pady=(0, 8))
         ttk.Label(
             frame,
             text=(
@@ -1062,7 +1073,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
             ),
             wraplength=620,
             justify="center",
-        ).pack(fill="x", pady=(0, 16))
+        ).pack(fill="x", pady=(0, 12))
 
         mode_frame = ttk.LabelFrame(frame, text="Mode de travail", style="Card.TLabelframe")
         mode_frame.pack(fill="x", pady=(0, 12))
@@ -1162,7 +1173,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
             row=0, column=3, padx=6, pady=4
         )
 
-        footer = ttk.Frame(self, padding=(18, 8, 18, 18))
+        footer = ttk.Frame(self, padding=(12, 8, 12, 12))
         footer.grid(row=1, column=0, sticky="ew")
         footer.columnconfigure(0, weight=1)
         self.fixed_footer = footer
@@ -1522,17 +1533,17 @@ class DashboardWindow(tk.Toplevel):
         self.update_check_running = False
         self.live_refresh_after_id: str | None = None
         self.title(f"{APP_NAME} - Tableau de bord - v{APP_VERSION}")
-        self.geometry("900x560")
-        self.minsize(860, 520)
+        self.geometry("1180x760")
+        self.minsize(980, 640)
         self.configure(bg=APP_BACKGROUND)
         apply_window_icon(self)
         self.protocol("WM_DELETE_WINDOW", self.on_close_app)
-        self.scrollable_content = ScrollableContent(self, padding=20, background=APP_BACKGROUND)
+        self.scrollable_content = ScrollableContent(self, padding=12, background=APP_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         self.body = self.scrollable_content.content
         self.build_ui()
         self.refresh_summary()
-        center_window(self)
+        maximize_window(self, 980, 640)
         self.bind("<FocusIn>", lambda _event: self.refresh_summary())
         self.after(1000, self.start_weekly_update_check)
         if self.is_live_sync_enabled():
@@ -1542,19 +1553,19 @@ class DashboardWindow(tk.Toplevel):
         container = self.body
         logo_label = create_logo_widget(container, DASHBOARD_LOGO_SIZE)
         if logo_label is not None:
-            logo_label.pack(anchor="w", pady=(0, 8))
+            logo_label.pack(anchor="w", pady=(0, 4))
 
         ttk.Label(
             container,
             text=f"Bienvenue, {self.user.display_name} ({self.user.role})",
             style="Header.TLabel",
-        ).pack(anchor="center", pady=(0, 18))
+        ).pack(anchor="center", pady=(0, 10))
 
         ttk.Label(
             container,
             text=f"Version installee : {APP_VERSION}",
             foreground="#5a6570",
-        ).pack(anchor="center", pady=(0, 12))
+        ).pack(anchor="center", pady=(0, 8))
 
         ttk.Label(
             container,
@@ -1562,7 +1573,7 @@ class DashboardWindow(tk.Toplevel):
             foreground="#2f5d3a",
             wraplength=680,
             justify="center",
-        ).pack(anchor="center", pady=(0, 12))
+        ).pack(anchor="center", pady=(0, 8))
 
         if self.post_update_notice is not None and self.post_update_notice.remaining_ms() > 0:
             self.notice_label = ttk.Label(
@@ -2062,15 +2073,15 @@ class BaseModuleWindow(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
-        self.scrollable_content = ScrollableContent(self, padding=16, background=MODULE_BACKGROUND)
+        self.scrollable_content = ScrollableContent(self, padding=10, background=MODULE_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         shell = self.scrollable_content.content
         logo_label = create_logo_widget(shell, FORM_LOGO_SIZE)
         if logo_label is not None:
-            logo_label.pack(anchor="w", pady=(0, 8))
+            logo_label.pack(anchor="w", pady=(0, 4))
         self.body = ttk.Frame(shell)
         self.body.pack(fill="both", expand=True)
-        self.after(0, lambda: center_window(self))
+        maximize_window(self)
         if self.parent.is_live_sync_enabled():
             self.schedule_live_refresh()
 
@@ -2276,7 +2287,7 @@ class PdfReportWindow(BaseModuleWindow):
     def build_ui(self) -> None:
         container = self.body
 
-        ttk.Label(container, text="Rapport PDF journalier", style="Header.TLabel").pack(pady=(0, 14))
+        ttk.Label(container, text="Rapport PDF journalier", style="Header.TLabel").pack(pady=(0, 8))
 
         intro = ttk.LabelFrame(container, text="Impression", style="Card.TLabelframe")
         intro.pack(fill="x", pady=(0, 14))
@@ -2386,7 +2397,7 @@ class ExcelReportWindow(BaseModuleWindow):
     def build_ui(self) -> None:
         container = self.body
 
-        ttk.Label(container, text="Rapport Excel journalier", style="Header.TLabel").pack(pady=(0, 14))
+        ttk.Label(container, text="Rapport Excel journalier", style="Header.TLabel").pack(pady=(0, 8))
 
         intro = ttk.LabelFrame(container, text="Export Excel", style="Card.TLabelframe")
         intro.pack(fill="x", pady=(0, 14))
@@ -2505,7 +2516,7 @@ class ChangePasswordWindow(BaseModuleWindow):
     def build_ui(self) -> None:
         container = self.body
 
-        ttk.Label(container, text="Changer mon mot de passe", style="Header.TLabel").pack(pady=(0, 14))
+        ttk.Label(container, text="Changer mon mot de passe", style="Header.TLabel").pack(pady=(0, 8))
 
         description = ttk.LabelFrame(container, text="Protection du compte", style="Card.TLabelframe")
         description.pack(fill="x", pady=(0, 14))
@@ -2609,7 +2620,7 @@ class UsersWindow(BaseModuleWindow):
     def build_ui(self) -> None:
         container = self.body
 
-        ttk.Label(container, text="Gestion des utilisateurs", style="Header.TLabel").pack(pady=(0, 14))
+        ttk.Label(container, text="Gestion des utilisateurs", style="Header.TLabel").pack(pady=(0, 8))
 
         top = ttk.Frame(container)
         top.pack(fill="x")
@@ -2802,7 +2813,7 @@ class StockWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-        ttk.Label(container, text="Gestion du stock", style="Header.TLabel").pack(pady=(0, 12))
+        ttk.Label(container, text="Gestion du stock", style="Header.TLabel").pack(pady=(0, 8))
 
         info_frame = ttk.LabelFrame(container, text="Stock du jour", style="Card.TLabelframe")
         info_frame.pack(fill="x", pady=(0, 12))
@@ -3056,7 +3067,7 @@ class StockWindow(BaseModuleWindow):
         ttk.Button(actions, text="Enregistrer", command=save).grid(row=0, column=0, padx=6)
         ttk.Button(actions, text="Annuler", command=dialog.destroy).grid(row=0, column=1, padx=6)
         frame.columnconfigure(1, weight=1)
-        center_window(dialog)
+        maximize_window(dialog, 460, 300)
 
     def reset_form(self) -> None:
         self.date_field.set_date(today_iso())
@@ -3097,7 +3108,7 @@ class OrdersWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-        ttk.Label(container, text="Gestion des commandes", style="Header.TLabel").pack(pady=(0, 12))
+        ttk.Label(container, text="Gestion des commandes", style="Header.TLabel").pack(pady=(0, 8))
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)
@@ -3463,13 +3474,14 @@ class CashWindow(BaseModuleWindow):
         self.expected_today = 0.0
         self.received_today = 0.0
         self.debts_today = 0.0
+        self.total_entries_today = 0.0
         self.build_ui()
         self.reset_form()
         self.refresh_data()
 
     def build_ui(self) -> None:
         container = self.body
-        ttk.Label(container, text="Gestion de la caisse", style="Header.TLabel").pack(pady=(0, 12))
+        ttk.Label(container, text="Gestion de la caisse", style="Header.TLabel").pack(pady=(0, 8))
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)
@@ -3486,6 +3498,8 @@ class CashWindow(BaseModuleWindow):
         self.expected_var = tk.StringVar()
         self.received_var = tk.StringVar()
         self.debts_var = tk.StringVar()
+        self.paid_debts_var = tk.StringVar(value="0")
+        self.total_entries_var = tk.StringVar()
         self.balance_var = tk.StringVar()
 
         self._make_label_value(form, "Nombre total de bacs", self.total_trays_var, 1)
@@ -3493,19 +3507,24 @@ class CashWindow(BaseModuleWindow):
         self._make_label_value(form, "Montant reçu", self.received_var, 3, "#006400")
         self._make_label_value(form, "Dettes", self.debts_var, 4, "#8b0000")
 
-        ttk.Label(form, text="Montant total des dépenses").grid(row=5, column=0, sticky="w", pady=6)
-        self.expenses_var = tk.StringVar(value="0")
-        ttk.Entry(form, textvariable=self.expenses_var, width=28).grid(row=5, column=1, sticky="ew", pady=6)
+        ttk.Label(form, text="Dettes payées aujourd'hui").grid(row=5, column=0, sticky="w", pady=6)
+        ttk.Entry(form, textvariable=self.paid_debts_var, width=28).grid(row=5, column=1, sticky="ew", pady=6)
 
-        ttk.Label(form, text="Dépenses effectuées").grid(row=6, column=0, sticky="nw", pady=6)
+        self._make_label_value(form, "Total des entrées", self.total_entries_var, 6, "#1f4e79")
+
+        ttk.Label(form, text="Montant total des dépenses").grid(row=7, column=0, sticky="w", pady=6)
+        self.expenses_var = tk.StringVar(value="0")
+        ttk.Entry(form, textvariable=self.expenses_var, width=28).grid(row=7, column=1, sticky="ew", pady=6)
+
+        ttk.Label(form, text="Dépenses effectuées").grid(row=8, column=0, sticky="nw", pady=6)
         self.expenses_text = ScrolledText(form, width=28, height=7)
         self.expenses_text.configure(font=UI_FONT)
-        self.expenses_text.grid(row=6, column=1, sticky="ew", pady=6)
+        self.expenses_text.grid(row=8, column=1, sticky="ew", pady=6)
 
-        self._make_label_value(form, "Solde", self.balance_var, 7, "#1b2d5d")
+        self._make_label_value(form, "Solde", self.balance_var, 9, "#1b2d5d")
 
         actions = ttk.Frame(form)
-        actions.grid(row=8, column=0, columnspan=2, pady=(14, 0))
+        actions.grid(row=10, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(actions, text="Enregistrer", command=self.save_cash).grid(row=0, column=0, padx=4, pady=4)
         ttk.Button(actions, text="Modifier", command=self.load_cash_for_edit).grid(row=0, column=1, padx=4, pady=4)
         ttk.Button(actions, text="Supprimer", command=self.delete_cash).grid(row=0, column=2, padx=4, pady=4)
@@ -3514,7 +3533,7 @@ class CashWindow(BaseModuleWindow):
 
         self.summary_var = tk.StringVar()
         ttk.Label(form, textvariable=self.summary_var, wraplength=420, justify="left").grid(
-            row=9, column=0, columnspan=2, sticky="ew", pady=(14, 0)
+            row=11, column=0, columnspan=2, sticky="ew", pady=(14, 0)
         )
 
         table_frame = ttk.LabelFrame(content, text="Historique de caisse", style="Card.TLabelframe")
@@ -3522,6 +3541,7 @@ class CashWindow(BaseModuleWindow):
         self.table = DataTable(table_frame, height=22)
         self.table.pack(fill="both", expand=True)
 
+        self.paid_debts_var.trace_add("write", lambda *_args: self.calculate_balance())
         self.expenses_var.trace_add("write", lambda *_args: self.calculate_balance())
         form.columnconfigure(1, weight=1)
 
@@ -3568,11 +3588,13 @@ class CashWindow(BaseModuleWindow):
         cash = DatabaseHelper.get_cash_for_date(target_date)
         if cash:
             self.selected_cash_id = int(cash["Id"])
+            self.paid_debts_var.set(format_number(float(cash.get("DettesPayeesAujourdHui", 0) or 0)))
             self.expenses_var.set(format_number(float(cash["MontantTotalDepenses"])))
             self.expenses_text.delete("1.0", "end")
             self.expenses_text.insert("1.0", str(cash["DepensesEffectuees"]))
         else:
             self.selected_cash_id = 0
+            self.paid_debts_var.set("0")
             self.expenses_var.set("0")
             self.expenses_text.delete("1.0", "end")
 
@@ -3580,10 +3602,16 @@ class CashWindow(BaseModuleWindow):
 
     def calculate_balance(self) -> None:
         try:
+            paid_debts = parse_optional_float(self.paid_debts_var.get())
+        except ValueError:
+            paid_debts = 0
+        try:
             expenses = parse_optional_float(self.expenses_var.get())
         except ValueError:
             expenses = 0
-        balance = self.expected_today - expenses
+        self.total_entries_today = self.received_today + paid_debts
+        balance = self.total_entries_today - expenses
+        self.total_entries_var.set(format_fc(self.total_entries_today))
         self.balance_var.set(format_fc(balance))
         self.update_summary()
 
@@ -3595,17 +3623,28 @@ class CashWindow(BaseModuleWindow):
             target_date = self.date_field.get_date()
         except ValueError:
             target_date = date.today()
-        expenses = parse_optional_float(self.expenses_var.get())
-        balance = self.expected_today - expenses
+        try:
+            paid_debts = parse_optional_float(self.paid_debts_var.get())
+        except ValueError:
+            paid_debts = 0
+        try:
+            expenses = parse_optional_float(self.expenses_var.get())
+        except ValueError:
+            expenses = 0
+        entries_today = self.received_today + paid_debts
+        balance = entries_today - expenses
 
         if self.show_all_dates:
             summary = DatabaseHelper.get_global_orders_summary()
+            paid_debts_total = sum(float(row.get("DettesPayeesAujourdHui", 0) or 0) for row in self.table.rows_by_item.values())
+            entries_total = sum(float(row.get("TotalEntrees", 0) or 0) for row in self.table.rows_by_item.values())
             text = (
                 "Affichage : toutes les dates\n"
                 f"Fiches caisse : {row_count}\n"
                 f"Total bacs : {int(summary.get('TotalBacs', 0))} | "
                 f"Attendu : {format_fc(float(summary.get('MontantAttendu', 0)))} | "
                 f"Reçu : {format_fc(float(summary.get('MontantRecu', 0)))}\n"
+                f"Dettes payées : {format_fc(paid_debts_total)} | Entrées : {format_fc(entries_total)}\n"
                 f"Dettes : {format_fc(float(summary.get('TotalDettes', 0)))} | "
                 f"Solde global : {format_fc(total_global)}"
             )
@@ -3613,6 +3652,8 @@ class CashWindow(BaseModuleWindow):
             text = (
                 f"Jour : {target_date.strftime('%d/%m/%Y')} | Bacs : {int(self.trays_today)}\n"
                 f"Fiches caisse : {row_count} | Reçu : {format_fc(self.received_today)} | "
+                f"Dettes payées : {format_fc(paid_debts)}\n"
+                f"Entrées : {format_fc(entries_today)} | "
                 f"Solde du jour : {format_fc(balance)}\n"
                 f"Dettes : {format_fc(self.debts_today)} | Total global : {format_fc(total_global)}"
             )
@@ -3634,6 +3675,8 @@ class CashWindow(BaseModuleWindow):
                 "MontantAttendu",
                 "MontantRecu",
                 "TotalDettes",
+                "DettesPayeesAujourdHui",
+                "TotalEntrees",
                 "MontantTotalDepenses",
                 "Solde",
                 "DepensesEffectuees",
@@ -3644,6 +3687,8 @@ class CashWindow(BaseModuleWindow):
                 "MontantAttendu": "Attendu",
                 "MontantRecu": "Reçu",
                 "TotalDettes": "Dettes",
+                "DettesPayeesAujourdHui": "Dettes payées",
+                "TotalEntrees": "Entrées",
                 "MontantTotalDepenses": "Dépenses",
                 "DepensesEffectuees": "Détails des dépenses",
             },
@@ -3653,6 +3698,8 @@ class CashWindow(BaseModuleWindow):
                 "MontantAttendu": lambda value: format_fc(float(value)),
                 "MontantRecu": lambda value: format_fc(float(value)),
                 "TotalDettes": lambda value: format_fc(float(value)),
+                "DettesPayeesAujourdHui": lambda value: format_fc(float(value)),
+                "TotalEntrees": lambda value: format_fc(float(value)),
                 "MontantTotalDepenses": lambda value: format_fc(float(value)),
                 "Solde": lambda value: format_fc(float(value)),
             },
@@ -3669,6 +3716,7 @@ class CashWindow(BaseModuleWindow):
     def save_cash(self) -> None:
         try:
             target_date = self.date_field.get_date()
+            paid_debts = parse_optional_float(self.paid_debts_var.get())
             expenses = parse_optional_float(self.expenses_var.get())
         except Exception as exc:
             messagebox.showwarning("Caisse", str(exc))
@@ -3683,7 +3731,7 @@ class CashWindow(BaseModuleWindow):
             return
 
         try:
-            DatabaseHelper.save_cash_day(target_date, expenses, details)
+            DatabaseHelper.save_cash_day(target_date, expenses, details, paid_debts)
             messagebox.showinfo("Caisse", "La fiche de caisse a été enregistrée avec succès.")
             self.refresh_data()
         except Exception as exc:
@@ -3740,7 +3788,7 @@ class CommissionsWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-        ttk.Label(container, text="Gestion des commissions", style="Header.TLabel").pack(pady=(0, 12))
+        ttk.Label(container, text="Gestion des commissions", style="Header.TLabel").pack(pady=(0, 8))
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)

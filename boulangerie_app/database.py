@@ -206,6 +206,7 @@ class DatabaseHelper:
             shutil.copy2(cls.legacy_db_path, cls.db_path)
         with cls.connect() as connection:
             cls._create_tables(connection)
+            cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
             cls._migrate_commissions_table(connection)
             cls._normalize_status_values(connection)
@@ -357,6 +358,7 @@ class DatabaseHelper:
 
         with cls.connect() as connection:
             cls._create_tables(connection)
+            cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
             cls._migrate_commissions_table(connection)
             cls._normalize_status_values(connection)
@@ -420,7 +422,8 @@ class DatabaseHelper:
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 DateCaisse TEXT NOT NULL UNIQUE,
                 MontantTotalDepenses REAL NOT NULL,
-                DepensesEffectuees TEXT NOT NULL
+                DepensesEffectuees TEXT NOT NULL,
+                DettesPayeesAujourdHui REAL NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS Commandes (
@@ -471,6 +474,19 @@ class DatabaseHelper:
                 )
                 """,
                 (DEPOSITARY_STATUS, LEGACY_DEPOSITARY_6000_STATUS),
+            )
+
+    @classmethod
+    def _migrate_cash_table(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "CaisseJournaliere")
+        if not columns:
+            return
+        if "DettesPayeesAujourdHui" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE CaisseJournaliere
+                ADD COLUMN DettesPayeesAujourdHui REAL NOT NULL DEFAULT 0
+                """
             )
 
     @classmethod
@@ -1129,7 +1145,12 @@ class DatabaseHelper:
     def get_cash_for_date(cls, target_date: date) -> dict[str, Any]:
         row = cls._fetch_one(
             """
-            SELECT Id, DateCaisse, MontantTotalDepenses, DepensesEffectuees
+            SELECT
+                Id,
+                DateCaisse,
+                MontantTotalDepenses,
+                DepensesEffectuees,
+                IFNULL(DettesPayeesAujourdHui, 0) AS DettesPayeesAujourdHui
             FROM CaisseJournaliere
             WHERE DateCaisse = ?
             """,
@@ -1143,6 +1164,7 @@ class DatabaseHelper:
         target_date: date,
         total_expenses: float,
         expense_details: str,
+        paid_debts_today: float = 0.0,
     ) -> None:
         date_text = target_date.strftime(DB_DATE_FORMAT)
         exists = int(
@@ -1155,18 +1177,19 @@ class DatabaseHelper:
             cls._execute(
                 """
                 UPDATE CaisseJournaliere
-                SET MontantTotalDepenses = ?, DepensesEffectuees = ?
+                SET MontantTotalDepenses = ?, DepensesEffectuees = ?, DettesPayeesAujourdHui = ?
                 WHERE DateCaisse = ?
                 """,
-                (total_expenses, expense_details, date_text),
+                (total_expenses, expense_details, paid_debts_today, date_text),
             )
         else:
             cls._execute(
                 """
-                INSERT INTO CaisseJournaliere (DateCaisse, MontantTotalDepenses, DepensesEffectuees)
-                VALUES (?, ?, ?)
+                INSERT INTO CaisseJournaliere
+                    (DateCaisse, MontantTotalDepenses, DepensesEffectuees, DettesPayeesAujourdHui)
+                VALUES (?, ?, ?, ?)
                 """,
-                (date_text, total_expenses, expense_details),
+                (date_text, total_expenses, expense_details, paid_debts_today),
             )
 
     @classmethod
@@ -1180,8 +1203,10 @@ class DatabaseHelper:
                 IFNULL(cmd.MontantAttendu, 0) AS MontantAttendu,
                 IFNULL(cmd.MontantRecu, 0) AS MontantRecu,
                 IFNULL(cmd.TotalDettes, 0) AS TotalDettes,
+                IFNULL(c.DettesPayeesAujourdHui, 0) AS DettesPayeesAujourdHui,
+                (IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) AS TotalEntrees,
                 c.MontantTotalDepenses,
-                (IFNULL(cmd.MontantAttendu, 0) - c.MontantTotalDepenses) AS Solde,
+                ((IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) - c.MontantTotalDepenses) AS Solde,
                 c.DepensesEffectuees
             FROM CaisseJournaliere c
             LEFT JOIN (
@@ -1209,8 +1234,10 @@ class DatabaseHelper:
                 IFNULL(cmd.MontantAttendu, 0) AS MontantAttendu,
                 IFNULL(cmd.MontantRecu, 0) AS MontantRecu,
                 IFNULL(cmd.TotalDettes, 0) AS TotalDettes,
+                IFNULL(c.DettesPayeesAujourdHui, 0) AS DettesPayeesAujourdHui,
+                (IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) AS TotalEntrees,
                 c.MontantTotalDepenses,
-                (IFNULL(cmd.MontantAttendu, 0) - c.MontantTotalDepenses) AS Solde,
+                ((IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) - c.MontantTotalDepenses) AS Solde,
                 c.DepensesEffectuees
             FROM CaisseJournaliere c
             LEFT JOIN (
@@ -1237,13 +1264,18 @@ class DatabaseHelper:
     def get_total_cash(cls) -> float:
         value = cls._fetch_value(
             """
-            SELECT IFNULL(SUM(cmd.MontantAttendu - IFNULL(c.MontantTotalDepenses, 0)), 0)
-            FROM (
-                SELECT DateCommande, SUM(MontantAPercevoir) AS MontantAttendu
+            SELECT IFNULL(SUM(
+                IFNULL(cmd.MontantRecu, 0)
+                + IFNULL(c.DettesPayeesAujourdHui, 0)
+                - IFNULL(c.MontantTotalDepenses, 0)
+            ), 0)
+            FROM CaisseJournaliere c
+            LEFT JOIN (
+                SELECT DateCommande, SUM(MontantRecu) AS MontantRecu
                 FROM Commandes
                 GROUP BY DateCommande
             ) cmd
-            LEFT JOIN CaisseJournaliere c ON c.DateCaisse = cmd.DateCommande
+            ON c.DateCaisse = cmd.DateCommande
             """
         )
         return float(value or 0)

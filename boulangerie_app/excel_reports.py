@@ -229,10 +229,16 @@ def _build_report_context(target_date: date, role: str) -> dict[str, Any]:
         "total_debts": float(orders_summary.get("TotalDettes", 0) or 0),
         "total_trays": int(orders_summary.get("NombreTotalBacs", 0) or 0),
         "total_expenses": float(cash.get("MontantTotalDepenses", 0) or 0),
+        "paid_debts_today": float(cash.get("DettesPayeesAujourdHui", 0) or 0),
         "total_commissions": sum(float(row.get("Commissions", 0) or 0) for row in commissions),
         "total_net_commissions": sum(float(row.get("NetAPayer", 0) or 0) for row in commissions),
-        "balance": float(orders_summary.get("MontantAttendu", 0) or 0)
-        - float(cash.get("MontantTotalDepenses", 0) or 0),
+        "total_entries": float(orders_summary.get("MontantRecu", 0) or 0)
+        + float(cash.get("DettesPayeesAujourdHui", 0) or 0),
+        "balance": (
+            float(orders_summary.get("MontantRecu", 0) or 0)
+            + float(cash.get("DettesPayeesAujourdHui", 0) or 0)
+            - float(cash.get("MontantTotalDepenses", 0) or 0)
+        ),
     }
 
 
@@ -279,6 +285,8 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     if "cash" in context["allowed_sections"]:
         rows.extend(
             [
+                ("Dettes payées aujourd'hui", context["paid_debts_today"], "monnaie"),
+                ("Total des entrées", context["total_entries"], "monnaie"),
                 ("Dépenses", context["total_expenses"], "monnaie"),
                 ("Solde du jour", context["balance"], "monnaie"),
             ]
@@ -472,6 +480,8 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         ("Montant attendu", context["total_expected"]),
         ("Montant reçu", context["total_received"]),
         ("Dettes", context["total_debts"]),
+        ("Dettes payées aujourd'hui", context["paid_debts_today"]),
+        ("Total des entrées", context["total_entries"]),
         ("Dépenses", context["total_expenses"]),
         ("Solde du jour", context["balance"]),
     ]

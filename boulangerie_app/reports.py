@@ -316,9 +316,11 @@ def create_daily_pdf_report(
     total_debts = float(orders_summary.get("TotalDettes", 0) or 0)
     total_trays = int(orders_summary.get("NombreTotalBacs", 0) or 0)
     total_expenses = float(cash.get("MontantTotalDepenses", 0) or 0)
+    paid_debts_today = float(cash.get("DettesPayeesAujourdHui", 0) or 0)
+    total_entries = total_received + paid_debts_today
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
-    balance = total_expected - total_expenses
+    balance = total_entries - total_expenses
 
     styles = _build_styles()
     doc = SimpleDocTemplate(
@@ -365,6 +367,8 @@ def create_daily_pdf_report(
     if "cash" in allowed_sections:
         overview_rows.extend(
             [
+                ["Dettes payées aujourd'hui", _format_fc(paid_debts_today)],
+                ["Total des entrées", _format_fc(total_entries)],
                 ["Dépenses", _format_fc(total_expenses)],
                 ["Solde du jour", _format_fc(balance)],
             ]
@@ -451,6 +455,8 @@ def create_daily_pdf_report(
             ["Montant attendu", _format_fc(total_expected)],
             ["Montant reçu", _format_fc(total_received)],
             ["Dettes", _format_fc(total_debts)],
+            ["Dettes payées aujourd'hui", _format_fc(paid_debts_today)],
+            ["Total des entrées", _format_fc(total_entries)],
             ["Dépenses", _format_fc(total_expenses)],
             ["Solde du jour", _format_fc(balance)],
         ]
