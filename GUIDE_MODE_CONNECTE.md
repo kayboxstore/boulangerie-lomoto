@@ -29,6 +29,7 @@ Important :
 
 - ces actions demandent les droits administrateur Windows sur le poste serveur
 - le service continue de tourner même si vous fermez l'application
+- l'application ouvre maintenant automatiquement le pare-feu Windows pour le port du serveur et la détection réseau
 - le dossier central du serveur est :
 
 ```text
@@ -49,6 +50,11 @@ Sur chaque autre poste :
 ```text
 http://192.168.1.10:8765
 ```
+
+Important :
+
+- n'utilisez pas `127.0.0.1` sur les autres postes
+- les postes clients doivent utiliser la vraie adresse IP du poste serveur sur le réseau local
 
 7. Si vous utilisez un jeton, saisissez-le aussi
 8. Cliquez sur `Tester la connexion`

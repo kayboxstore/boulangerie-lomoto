@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from .connected_mode import REMOTE_DEFAULT_PORT
+from .connected_mode import REMOTE_DEFAULT_PORT, REMOTE_DISCOVERY_PORT
 from .connected_server import list_local_server_urls
 from .version import APP_NAME
 
@@ -22,6 +22,8 @@ WINDOWS_SERVICE_DESCRIPTION = (
 WINDOWS_SERVICE_EXECUTABLE_NAME = "Boulangerie Lomoto Service.exe"
 SERVER_HOST_SETTINGS_FILENAME = "server-host-settings.json"
 SERVER_DATA_FOLDER_NAME = "central-server-data"
+FIREWALL_RULE_TCP_NAME = f"{APP_NAME} - Serveur central TCP"
+FIREWALL_RULE_UDP_NAME = f"{APP_NAME} - Découverte serveur UDP"
 
 
 def get_server_root_dir() -> Path:
@@ -231,6 +233,54 @@ def _format_command_error(result: subprocess.CompletedProcess[str], fallback_mes
     return "\n\n".join(output_parts)
 
 
+def _refresh_firewall_rule(rule_name: str, protocol: str, local_port: int) -> None:
+    _run_text_command(
+        [
+            "netsh",
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            f"name={rule_name}",
+        ],
+        timeout_seconds=20,
+    )
+    result = _run_text_command(
+        [
+            "netsh",
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            f"name={rule_name}",
+            "dir=in",
+            "action=allow",
+            f"protocol={protocol}",
+            f"localport={local_port}",
+            "profile=any",
+            "enable=yes",
+        ],
+        timeout_seconds=20,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            _format_command_error(
+                result,
+                f"Impossible d'ouvrir automatiquement le pare-feu Windows pour {protocol} {local_port}.",
+            )
+        )
+
+
+def ensure_windows_firewall_rules(port: int | None = None) -> str:
+    tcp_port = int(port or load_central_server_settings().normalized_port())
+    _refresh_firewall_rule(FIREWALL_RULE_TCP_NAME, "TCP", tcp_port)
+    _refresh_firewall_rule(FIREWALL_RULE_UDP_NAME, "UDP", REMOTE_DISCOVERY_PORT)
+    return (
+        "Les règles du pare-feu Windows ont été configurées pour "
+        f"TCP {tcp_port} et UDP {REMOTE_DISCOVERY_PORT}."
+    )
+
+
 def get_windows_service_status() -> WindowsServiceStatus:
     result = _run_text_command(["sc.exe", "query", WINDOWS_SERVICE_NAME], timeout_seconds=20)
     combined_text = "\n".join(part for part in (result.stdout, result.stderr) if part).lower()
@@ -273,6 +323,7 @@ def get_windows_service_status() -> WindowsServiceStatus:
 def install_or_update_windows_service(settings: CentralServerSettings, source_data_dir: str | Path | None = None) -> str:
     save_central_server_settings(settings)
     prepare_central_server_data(source_data_dir)
+    firewall_message = ensure_windows_firewall_rules(settings.normalized_port())
     command = get_service_management_command_prefix()
     result = _run_text_command([*command, "--startup", "auto", "install"], timeout_seconds=120)
     if result.returncode != 0:
@@ -281,21 +332,24 @@ def install_or_update_windows_service(settings: CentralServerSettings, source_da
         ["sc.exe", "description", WINDOWS_SERVICE_NAME, WINDOWS_SERVICE_DESCRIPTION],
         timeout_seconds=20,
     )
-    return "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip()) or (
+    service_message = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip()) or (
         "Le service Windows a ete installe ou mis a jour."
     )
+    return f"{service_message}\n{firewall_message}"
 
 
 def start_windows_service(wait_seconds: int = 30) -> str:
+    firewall_message = ensure_windows_firewall_rules()
     result = _run_text_command(
         [*get_service_management_command_prefix(), "--wait", str(wait_seconds), "start"],
         timeout_seconds=max(wait_seconds + 20, 60),
     )
     if result.returncode != 0:
         raise RuntimeError(_format_command_error(result, "Impossible de démarrer le service Windows."))
-    return "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip()) or (
+    service_message = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip()) or (
         "Le service Windows a démarré."
     )
+    return f"{service_message}\n{firewall_message}"
 
 
 def stop_windows_service(wait_seconds: int = 30) -> str:

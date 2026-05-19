@@ -40,6 +40,7 @@ from .reports import (
 from .server_host import (
     CentralServerSettings,
     build_local_server_addresses,
+    ensure_windows_firewall_rules,
     get_windows_service_status,
     install_or_update_windows_service,
     is_running_as_administrator,
@@ -1408,6 +1409,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
         try:
             save_central_server_settings(host_settings)
             prepare_central_server_data(DatabaseHelper.app_data_dir)
+            ensure_windows_firewall_rules(host_settings.normalized_port())
             handle = start_embedded_server(
                 port=host_settings.normalized_port(),
                 api_token=host_settings.normalized_token(),

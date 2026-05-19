@@ -144,7 +144,8 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
 
 
 def list_local_server_urls(port: int) -> list[str]:
-    urls = [f"http://127.0.0.1:{port}"]
+    loopback_url = f"http://127.0.0.1:{port}"
+    urls: list[str] = []
 
     try:
         host_name = socket.gethostname()
@@ -167,6 +168,9 @@ def list_local_server_urls(port: int) -> list[str]:
         if url not in seen:
             seen.add(url)
             urls.append(url)
+
+    if loopback_url not in seen:
+        urls.append(loopback_url)
 
     return urls
 
