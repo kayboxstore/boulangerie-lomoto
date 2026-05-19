@@ -423,7 +423,8 @@ class DatabaseHelper:
                 DateCaisse TEXT NOT NULL UNIQUE,
                 MontantTotalDepenses REAL NOT NULL,
                 DepensesEffectuees TEXT NOT NULL,
-                DettesPayeesAujourdHui REAL NOT NULL DEFAULT 0
+                DettesPayeesAujourdHui REAL NOT NULL DEFAULT 0,
+                DettesPayeesDetails TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS Commandes (
@@ -486,6 +487,13 @@ class DatabaseHelper:
                 """
                 ALTER TABLE CaisseJournaliere
                 ADD COLUMN DettesPayeesAujourdHui REAL NOT NULL DEFAULT 0
+                """
+            )
+        if "DettesPayeesDetails" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE CaisseJournaliere
+                ADD COLUMN DettesPayeesDetails TEXT NOT NULL DEFAULT ''
                 """
             )
 
@@ -1150,7 +1158,8 @@ class DatabaseHelper:
                 DateCaisse,
                 MontantTotalDepenses,
                 DepensesEffectuees,
-                IFNULL(DettesPayeesAujourdHui, 0) AS DettesPayeesAujourdHui
+                IFNULL(DettesPayeesAujourdHui, 0) AS DettesPayeesAujourdHui,
+                IFNULL(DettesPayeesDetails, '') AS DettesPayeesDetails
             FROM CaisseJournaliere
             WHERE DateCaisse = ?
             """,
@@ -1165,6 +1174,7 @@ class DatabaseHelper:
         total_expenses: float,
         expense_details: str,
         paid_debts_today: float = 0.0,
+        paid_debts_details: str = "",
     ) -> None:
         date_text = target_date.strftime(DB_DATE_FORMAT)
         exists = int(
@@ -1177,19 +1187,19 @@ class DatabaseHelper:
             cls._execute(
                 """
                 UPDATE CaisseJournaliere
-                SET MontantTotalDepenses = ?, DepensesEffectuees = ?, DettesPayeesAujourdHui = ?
+                SET MontantTotalDepenses = ?, DepensesEffectuees = ?, DettesPayeesAujourdHui = ?, DettesPayeesDetails = ?
                 WHERE DateCaisse = ?
                 """,
-                (total_expenses, expense_details, paid_debts_today, date_text),
+                (total_expenses, expense_details, paid_debts_today, paid_debts_details, date_text),
             )
         else:
             cls._execute(
                 """
                 INSERT INTO CaisseJournaliere
-                    (DateCaisse, MontantTotalDepenses, DepensesEffectuees, DettesPayeesAujourdHui)
-                VALUES (?, ?, ?, ?)
+                    (DateCaisse, MontantTotalDepenses, DepensesEffectuees, DettesPayeesAujourdHui, DettesPayeesDetails)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (date_text, total_expenses, expense_details, paid_debts_today),
+                (date_text, total_expenses, expense_details, paid_debts_today, paid_debts_details),
             )
 
     @classmethod
@@ -1207,7 +1217,8 @@ class DatabaseHelper:
                 (IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) AS TotalEntrees,
                 c.MontantTotalDepenses,
                 ((IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) - c.MontantTotalDepenses) AS Solde,
-                c.DepensesEffectuees
+                c.DepensesEffectuees,
+                IFNULL(c.DettesPayeesDetails, '') AS DettesPayeesDetails
             FROM CaisseJournaliere c
             LEFT JOIN (
                 SELECT
@@ -1238,7 +1249,8 @@ class DatabaseHelper:
                 (IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) AS TotalEntrees,
                 c.MontantTotalDepenses,
                 ((IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) - c.MontantTotalDepenses) AS Solde,
-                c.DepensesEffectuees
+                c.DepensesEffectuees,
+                IFNULL(c.DettesPayeesDetails, '') AS DettesPayeesDetails
             FROM CaisseJournaliere c
             LEFT JOIN (
                 SELECT

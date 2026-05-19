@@ -177,6 +177,44 @@ def create_logo_widget(
     return widget
 
 
+def create_branded_header(
+    parent: tk.Misc,
+    title: str,
+    *,
+    logo_size: int,
+    wraplength: int = 780,
+    bottom_padding: int = 12,
+) -> ttk.Frame:
+    header = ttk.Frame(parent)
+    header.pack(fill="x", pady=(0, bottom_padding))
+    header.columnconfigure(1, weight=1)
+
+    logo = create_logo_widget(header, logo_size)
+    spacer_width = max(logo_size + 14, 72) if logo is not None else 0
+    if logo is not None:
+        logo.grid(row=0, column=0, sticky="nw", padx=(0, 10))
+        setattr(header, "_header_logo", logo)
+
+    title_frame = ttk.Frame(header)
+    title_frame.grid(row=0, column=1, sticky="ew")
+    title_frame.columnconfigure(0, weight=1)
+    ttk.Label(
+        title_frame,
+        text=title,
+        style="Header.TLabel",
+        justify="center",
+        anchor="center",
+        wraplength=wraplength,
+    ).grid(row=0, column=0, sticky="ew")
+
+    if spacer_width > 0:
+        spacer = ttk.Frame(header, width=spacer_width)
+        spacer.grid(row=0, column=2, sticky="nsew")
+        spacer.grid_propagate(False)
+
+    return header
+
+
 def run_app() -> None:
     if os.name == "nt" and not is_running_as_administrator():
         if relaunch_current_process_as_administrator():
@@ -1060,12 +1098,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.scrollable_content = ScrollableContent(self, padding=(10, 4, 10, 10), background=MODULE_BACKGROUND)
         self.scrollable_content.grid(row=0, column=0, sticky="nsew")
         frame = self.scrollable_content.content
-        logo_label = create_logo_widget(frame, SETTINGS_LOGO_SIZE)
-        if logo_label is not None:
-            logo_label.place(x=0, y=0)
-            setattr(self, "_header_logo", logo_label)
-
-        ttk.Label(frame, text="Mode connecté", style="Header.TLabel").pack(pady=(0, 6))
+        header = create_branded_header(frame, "Mode connecté", logo_size=SETTINGS_LOGO_SIZE, wraplength=620)
+        setattr(self, "_header_logo", getattr(header, "_header_logo", None))
         ttk.Label(
             frame,
             text=(
@@ -1074,7 +1108,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
             ),
             wraplength=620,
             justify="center",
-        ).pack(fill="x", pady=(0, 12))
+        ).pack(fill="x", pady=(0, 10))
 
         mode_frame = ttk.LabelFrame(frame, text="Mode de travail", style="Card.TLabelframe")
         mode_frame.pack(fill="x", pady=(0, 12))
@@ -1123,7 +1157,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
             server_frame,
             text=(
                 "Vous pouvez démarrer un serveur central temporaire directement sur ce poste. "
-                "Ce mode reste pratique pour un test rapide, mais il faut laisser l'application ouverte."
+                "Ce mode reste pratique pour un test rapide, mais il faut laisser l'application ouverte. "
+                "Si le service Windows tourne déjà sur ce poste, il faut l'arrêter d'abord car les deux modes ne peuvent pas utiliser le même port en même temps."
             ),
             wraplength=620,
             justify="center",
@@ -1452,7 +1487,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
         service_status = get_windows_service_status()
         if service_status.is_running:
             self.message_var.set(
-                "Arrêtez d'abord le service Windows avant de démarrer un serveur temporaire sur ce poste."
+                "Arrêtez d'abord le service Windows avant de démarrer un serveur temporaire sur ce poste. "
+                "Le bouton démarre un serveur provisoire dans l'application elle-même, alors que le service Windows est le mode permanent recommandé pour le poste principal."
             )
             return
 
@@ -1553,16 +1589,13 @@ class DashboardWindow(tk.Toplevel):
 
     def build_ui(self) -> None:
         container = self.body
-        logo_label = create_logo_widget(container, DASHBOARD_LOGO_SIZE)
-        if logo_label is not None:
-            logo_label.place(x=0, y=0)
-            setattr(self, "_header_logo", logo_label)
-
-        ttk.Label(
+        header = create_branded_header(
             container,
-            text=f"Bienvenue, {self.user.display_name} ({self.user.role})",
-            style="Header.TLabel",
-        ).pack(anchor="center", pady=(0, 6))
+            f"Bienvenue, {self.user.display_name} ({self.user.role})",
+            logo_size=DASHBOARD_LOGO_SIZE,
+            wraplength=760,
+        )
+        setattr(self, "_header_logo", getattr(header, "_header_logo", None))
 
         ttk.Label(
             container,
@@ -2065,10 +2098,20 @@ class DashboardWindow(tk.Toplevel):
 
 
 class BaseModuleWindow(tk.Toplevel):
-    def __init__(self, parent: DashboardWindow, title: str, geometry: str) -> None:
+    def __init__(
+        self,
+        parent: DashboardWindow,
+        title: str,
+        geometry: str,
+        *,
+        start_maximized: bool = True,
+        min_width: int = 760,
+        min_height: int = 520,
+    ) -> None:
         super().__init__(parent)
         self.parent = parent
         self.live_refresh_after_id: str | None = None
+        self.header_title = title
         self.title(title)
         self.geometry(geometry)
         self.configure(bg=MODULE_BACKGROUND)
@@ -2078,15 +2121,14 @@ class BaseModuleWindow(tk.Toplevel):
         self.scrollable_content = ScrollableContent(self, padding=(10, 4, 10, 10), background=MODULE_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         shell = self.scrollable_content.content
-        logo_label = create_logo_widget(shell, FORM_LOGO_SIZE)
-        if logo_label is not None:
-            logo_label.place(x=0, y=0)
-            setattr(self, "_header_logo", logo_label)
+        header = create_branded_header(shell, title, logo_size=FORM_LOGO_SIZE, wraplength=860)
+        setattr(self, "_header_logo", getattr(header, "_header_logo", None))
         self.body = ttk.Frame(shell)
         self.body.pack(fill="both", expand=True)
-        if logo_label is not None:
-            logo_label.lift()
-        maximize_window(self)
+        if start_maximized:
+            maximize_window(self, min_width, min_height)
+        else:
+            center_window(self)
         if self.parent.is_live_sync_enabled():
             self.schedule_live_refresh()
 
@@ -2137,7 +2179,7 @@ class BaseModuleWindow(tk.Toplevel):
 class ServerBackupsWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow, selection_mode: bool) -> None:
         title = "Choisir une sauvegarde du serveur" if selection_mode else "Sauvegardes du serveur central"
-        super().__init__(parent, title, "920x460")
+        super().__init__(parent, title, "980x560", start_maximized=False)
         self.selection_mode = selection_mode
         self.selected_backup_path: Path | None = None
         self.server_directory_var = tk.StringVar(value="Chargement...")
@@ -2281,7 +2323,7 @@ class ServerBackupsWindow(BaseModuleWindow):
 
 class PdfReportWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Rapport PDF journalier", "620x360")
+        super().__init__(parent, "Rapport PDF journalier", "700x420", start_maximized=False)
         self.identifiant = parent.user.identifiant
         self.role = parent.user.role
         self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
@@ -2291,8 +2333,6 @@ class PdfReportWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-
-        ttk.Label(container, text="Rapport PDF journalier", style="Header.TLabel").pack(pady=(0, 8))
 
         intro = ttk.LabelFrame(container, text="Impression", style="Card.TLabelframe")
         intro.pack(fill="x", pady=(0, 14))
@@ -2391,7 +2431,7 @@ class PdfReportWindow(BaseModuleWindow):
 
 class ExcelReportWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Rapport Excel journalier", "620x360")
+        super().__init__(parent, "Rapport Excel journalier", "700x420", start_maximized=False)
         self.identifiant = parent.user.identifiant
         self.role = parent.user.role
         self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
@@ -2401,8 +2441,6 @@ class ExcelReportWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-
-        ttk.Label(container, text="Rapport Excel journalier", style="Header.TLabel").pack(pady=(0, 8))
 
         intro = ttk.LabelFrame(container, text="Export Excel", style="Card.TLabelframe")
         intro.pack(fill="x", pady=(0, 14))
@@ -2509,7 +2547,7 @@ class ChangePasswordWindow(BaseModuleWindow):
         identifiant: str,
         on_password_changed: Callable[[], None] | None = None,
     ) -> None:
-        super().__init__(parent, "Sécurité du compte", "560x420")
+        super().__init__(parent, "Sécurité du compte", "620x470", start_maximized=False)
         self.identifiant = identifiant
         self.on_password_changed = on_password_changed
         self.current_password_var = tk.StringVar()
@@ -2520,8 +2558,6 @@ class ChangePasswordWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-
-        ttk.Label(container, text="Changer mon mot de passe", style="Header.TLabel").pack(pady=(0, 8))
 
         description = ttk.LabelFrame(container, text="Protection du compte", style="Card.TLabelframe")
         description.pack(fill="x", pady=(0, 14))
@@ -2624,8 +2660,6 @@ class UsersWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-
-        ttk.Label(container, text="Gestion des utilisateurs", style="Header.TLabel").pack(pady=(0, 8))
 
         top = ttk.Frame(container)
         top.pack(fill="x")
@@ -2818,7 +2852,6 @@ class StockWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-        ttk.Label(container, text="Gestion du stock", style="Header.TLabel").pack(pady=(0, 8))
 
         info_frame = ttk.LabelFrame(container, text="Stock du jour", style="Card.TLabelframe")
         info_frame.pack(fill="x", pady=(0, 12))
@@ -3112,7 +3145,6 @@ class OrdersWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-        ttk.Label(container, text="Gestion des commandes", style="Header.TLabel").pack(pady=(0, 8))
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)
@@ -3485,7 +3517,6 @@ class CashWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-        ttk.Label(container, text="Gestion de la caisse", style="Header.TLabel").pack(pady=(0, 8))
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)
@@ -3514,21 +3545,26 @@ class CashWindow(BaseModuleWindow):
         ttk.Label(form, text="Dettes payées aujourd'hui").grid(row=5, column=0, sticky="w", pady=6)
         ttk.Entry(form, textvariable=self.paid_debts_var, width=28).grid(row=5, column=1, sticky="ew", pady=6)
 
-        self._make_label_value(form, "Total des entrées", self.total_entries_var, 6, "#1f4e79")
+        ttk.Label(form, text="Ceux qui ont payé leurs dettes").grid(row=6, column=0, sticky="nw", pady=6)
+        self.paid_debts_details_text = ScrolledText(form, width=28, height=6)
+        self.paid_debts_details_text.configure(font=UI_FONT)
+        self.paid_debts_details_text.grid(row=6, column=1, sticky="ew", pady=6)
 
-        ttk.Label(form, text="Montant total des dépenses").grid(row=7, column=0, sticky="w", pady=6)
+        self._make_label_value(form, "Total des entrées", self.total_entries_var, 7, "#1f4e79")
+
+        ttk.Label(form, text="Montant total des dépenses").grid(row=8, column=0, sticky="w", pady=6)
         self.expenses_var = tk.StringVar(value="0")
-        ttk.Entry(form, textvariable=self.expenses_var, width=28).grid(row=7, column=1, sticky="ew", pady=6)
+        ttk.Entry(form, textvariable=self.expenses_var, width=28).grid(row=8, column=1, sticky="ew", pady=6)
 
-        ttk.Label(form, text="Dépenses effectuées").grid(row=8, column=0, sticky="nw", pady=6)
+        ttk.Label(form, text="Dépenses effectuées").grid(row=9, column=0, sticky="nw", pady=6)
         self.expenses_text = ScrolledText(form, width=28, height=7)
         self.expenses_text.configure(font=UI_FONT)
-        self.expenses_text.grid(row=8, column=1, sticky="ew", pady=6)
+        self.expenses_text.grid(row=9, column=1, sticky="ew", pady=6)
 
-        self._make_label_value(form, "Solde", self.balance_var, 9, "#1b2d5d")
+        self._make_label_value(form, "Solde", self.balance_var, 10, "#1b2d5d")
 
         actions = ttk.Frame(form)
-        actions.grid(row=10, column=0, columnspan=2, pady=(14, 0))
+        actions.grid(row=11, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(actions, text="Enregistrer", command=self.save_cash).grid(row=0, column=0, padx=4, pady=4)
         ttk.Button(actions, text="Modifier", command=self.load_cash_for_edit).grid(row=0, column=1, padx=4, pady=4)
         ttk.Button(actions, text="Supprimer", command=self.delete_cash).grid(row=0, column=2, padx=4, pady=4)
@@ -3537,7 +3573,7 @@ class CashWindow(BaseModuleWindow):
 
         self.summary_var = tk.StringVar()
         ttk.Label(form, textvariable=self.summary_var, wraplength=420, justify="left").grid(
-            row=11, column=0, columnspan=2, sticky="ew", pady=(14, 0)
+            row=12, column=0, columnspan=2, sticky="ew", pady=(14, 0)
         )
 
         table_frame = ttk.LabelFrame(content, text="Historique de caisse", style="Card.TLabelframe")
@@ -3568,6 +3604,7 @@ class CashWindow(BaseModuleWindow):
         self.selected_cash_id = 0
         self.date_field.set_date(today_iso())
         self.expenses_var.set("0")
+        self.paid_debts_details_text.delete("1.0", "end")
         self.expenses_text.delete("1.0", "end")
         self.show_all_dates = False
         self.load_day_summary()
@@ -3593,12 +3630,15 @@ class CashWindow(BaseModuleWindow):
         if cash:
             self.selected_cash_id = int(cash["Id"])
             self.paid_debts_var.set(format_number(float(cash.get("DettesPayeesAujourdHui", 0) or 0)))
+            self.paid_debts_details_text.delete("1.0", "end")
+            self.paid_debts_details_text.insert("1.0", str(cash.get("DettesPayeesDetails", "")))
             self.expenses_var.set(format_number(float(cash["MontantTotalDepenses"])))
             self.expenses_text.delete("1.0", "end")
             self.expenses_text.insert("1.0", str(cash["DepensesEffectuees"]))
         else:
             self.selected_cash_id = 0
             self.paid_debts_var.set("0")
+            self.paid_debts_details_text.delete("1.0", "end")
             self.expenses_var.set("0")
             self.expenses_text.delete("1.0", "end")
 
@@ -3684,6 +3724,7 @@ class CashWindow(BaseModuleWindow):
                 "MontantTotalDepenses",
                 "Solde",
                 "DepensesEffectuees",
+                "DettesPayeesDetails",
             ],
             headings={
                 "DateCaisse": "Date",
@@ -3695,8 +3736,9 @@ class CashWindow(BaseModuleWindow):
                 "TotalEntrees": "Entrées",
                 "MontantTotalDepenses": "Dépenses",
                 "DepensesEffectuees": "Détails des dépenses",
+                "DettesPayeesDetails": "Ceux qui ont payé",
             },
-            hidden_columns=["Id"],
+            hidden_columns=["Id", "DettesPayeesDetails"],
             formatters={
                 "NombreTotalBacs": lambda value: f"{int(value)}",
                 "MontantAttendu": lambda value: format_fc(float(value)),
@@ -3727,15 +3769,22 @@ class CashWindow(BaseModuleWindow):
             return
 
         details = self.expenses_text.get("1.0", "end").strip()
+        paid_debts_details = self.paid_debts_details_text.get("1.0", "end").strip()
         if expenses > 0 and not details:
             messagebox.showwarning(
                 "Caisse",
                 "Veuillez décrire les dépenses effectuées avant d'enregistrer la caisse.",
             )
             return
+        if paid_debts > 0 and not paid_debts_details:
+            messagebox.showwarning(
+                "Caisse",
+                "Veuillez renseigner la liste des personnes qui ont payé leurs dettes avant d'enregistrer la caisse.",
+            )
+            return
 
         try:
-            DatabaseHelper.save_cash_day(target_date, expenses, details, paid_debts)
+            DatabaseHelper.save_cash_day(target_date, expenses, details, paid_debts, paid_debts_details)
             messagebox.showinfo("Caisse", "La fiche de caisse a été enregistrée avec succès.")
             self.refresh_data()
         except Exception as exc:
@@ -3749,9 +3798,12 @@ class CashWindow(BaseModuleWindow):
         self.selected_cash_id = int(row["Id"])
         self.date_field.set_date(str(row["DateCaisse"]))
         self.expenses_var.set(format_number(float(row["MontantTotalDepenses"])))
+        self.paid_debts_var.set(format_number(float(row.get("DettesPayeesAujourdHui", 0) or 0)))
+        self.paid_debts_details_text.delete("1.0", "end")
+        self.paid_debts_details_text.insert("1.0", str(row.get("DettesPayeesDetails", "")))
         self.expenses_text.delete("1.0", "end")
         self.expenses_text.insert("1.0", str(row["DepensesEffectuees"]))
-        self.load_day_summary()
+        self.calculate_balance()
         messagebox.showinfo("Caisse", "La fiche de caisse a été chargée.")
 
     def delete_cash(self) -> None:
@@ -3792,7 +3844,6 @@ class CommissionsWindow(BaseModuleWindow):
 
     def build_ui(self) -> None:
         container = self.body
-        ttk.Label(container, text="Gestion des commissions", style="Header.TLabel").pack(pady=(0, 8))
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)

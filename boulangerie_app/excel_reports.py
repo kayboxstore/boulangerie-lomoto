@@ -28,6 +28,8 @@ from .reports import (
     get_report_scope_label,
     get_report_sections_for_role,
     normalize_role,
+    parse_named_amount_lines,
+    split_structured_lines,
 )
 from .status_labels import normalize_status_form_label
 from .version import APP_NAME
@@ -211,6 +213,8 @@ def _build_report_context(target_date: date, role: str) -> dict[str, Any]:
     orders_summary = DatabaseHelper.get_orders_summary_for_date(target_date)
     cash = DatabaseHelper.get_cash_for_date(target_date)
     commissions = DatabaseHelper.list_commissions_by_date(target_date)
+    expense_details = _safe_text(cash.get("DepensesEffectuees")).strip()
+    paid_debts_details = _safe_text(cash.get("DettesPayeesDetails")).strip()
 
     return {
         "target_date": target_date,
@@ -224,6 +228,9 @@ def _build_report_context(target_date: date, role: str) -> dict[str, Any]:
         "orders_summary": orders_summary,
         "cash": cash,
         "commissions": commissions,
+        "expense_items": split_structured_lines(expense_details),
+        "paid_debts_details": paid_debts_details,
+        "paid_debts_items": parse_named_amount_lines(paid_debts_details),
         "total_expected": float(orders_summary.get("MontantAttendu", 0) or 0),
         "total_received": float(orders_summary.get("MontantRecu", 0) or 0),
         "total_debts": float(orders_summary.get("TotalDettes", 0) or 0),
@@ -495,13 +502,60 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     _add_table(sheet, 4, current_row, 2, "CaisseJour")
 
     current_row += 3
-    sheet.cell(current_row, 1, "Détails des dépenses")
+    sheet.cell(current_row, 1, "Liste des dépenses")
     _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
     current_row += 1
-    details = _safe_text(context["cash"].get("DepensesEffectuees")).strip() or "Aucun détail de dépense enregistré."
-    sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 2, end_column=4)
-    details_cell = sheet.cell(current_row, 1, details)
-    _apply_cell_style(details_cell, alignment=Alignment(horizontal="left", vertical="top", wrap_text=True))
+    expense_items = context["expense_items"]
+    if expense_items:
+        expense_header_row = current_row
+        for col_index, header in enumerate(("N°", "Détail"), start=1):
+            cell = sheet.cell(expense_header_row, col_index, header)
+            _apply_cell_style(cell, fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+        for index, item in enumerate(expense_items, start=1):
+            current_row += 1
+            sheet.cell(current_row, 1, index)
+            sheet.cell(current_row, 2, item)
+            _apply_cell_style(sheet.cell(current_row, 1), alignment=Alignment(horizontal="left"))
+            _apply_cell_style(sheet.cell(current_row, 2), alignment=Alignment(horizontal="left", wrap_text=True))
+        _add_table(sheet, expense_header_row, current_row, 2, "ListeDepensesJour")
+    else:
+        sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 1, end_column=4)
+        details_cell = sheet.cell(current_row, 1, "Aucune dépense détaillée n'a été enregistrée pour cette date.")
+        _apply_cell_style(details_cell, alignment=Alignment(horizontal="left", vertical="top", wrap_text=True), font=NOTE_FONT)
+        current_row += 1
+
+    current_row += 3
+    sheet.cell(current_row, 1, "Ceux qui ont payé leurs dettes")
+    _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
+    current_row += 1
+    paid_debts_items = context["paid_debts_items"]
+    if paid_debts_items:
+        has_amounts = any(amount for _, amount in paid_debts_items)
+        headers = ("Nom", "Montant payé") if has_amounts else ("N°", "Personne")
+        paid_header_row = current_row
+        for col_index, header in enumerate(headers, start=1):
+            cell = sheet.cell(paid_header_row, col_index, header)
+            _apply_cell_style(cell, fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+        for index, (name, amount) in enumerate(paid_debts_items, start=1):
+            current_row += 1
+            if has_amounts:
+                values = (name, amount or "-")
+            else:
+                values = (index, name)
+            for col_index, value in enumerate(values, start=1):
+                cell = sheet.cell(current_row, col_index, value)
+                _apply_cell_style(cell, alignment=Alignment(horizontal="left", wrap_text=True))
+        _add_table(sheet, paid_header_row, current_row, 2, "DettesPayeesJour")
+    else:
+        note = (
+            "Aucune personne n'a été renseignée dans la liste des dettes payées pour cette date."
+            if float(context["paid_debts_today"] or 0) > 0
+            else "Aucun paiement de dette n'a été enregistré pour cette date."
+        )
+        sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 1, end_column=4)
+        paid_note_cell = sheet.cell(current_row, 1, note)
+        _apply_cell_style(paid_note_cell, alignment=Alignment(horizontal="left", vertical="top", wrap_text=True), font=NOTE_FONT)
+        current_row += 1
 
     _autofit_columns(sheet)
     sheet.column_dimensions["D"].width = 18

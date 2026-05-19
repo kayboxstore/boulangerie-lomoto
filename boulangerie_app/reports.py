@@ -87,6 +87,41 @@ def get_report_scope_description(role: str) -> str:
     return REPORT_SCOPE_DESCRIPTIONS[normalize_role(role)]
 
 
+def split_structured_lines(text: str) -> list[str]:
+    items: list[str] = []
+    for raw_line in text.splitlines():
+        normalized = raw_line.strip().lstrip("-").lstrip("•").strip()
+        if normalized:
+            items.append(normalized)
+    return items
+
+
+def _format_amount_fragment(value: str) -> str:
+    cleaned = value.strip()
+    normalized = cleaned.upper().replace("FC", "").replace(" ", "").replace(",", ".")
+    try:
+        return _format_fc(float(normalized))
+    except ValueError:
+        return cleaned
+
+
+def parse_named_amount_lines(text: str) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for line in split_structured_lines(text):
+        matched = False
+        for separator in (" - ", " : ", "-", ":"):
+            if separator not in line:
+                continue
+            name, amount = line.rsplit(separator, 1)
+            if name.strip() and amount.strip():
+                rows.append((name.strip(), _format_amount_fragment(amount)))
+                matched = True
+                break
+        if not matched:
+            rows.append((line, ""))
+    return rows
+
+
 def _build_styles() -> dict[str, ParagraphStyle]:
     sample = getSampleStyleSheet()
     section_style = ParagraphStyle(
@@ -122,11 +157,22 @@ def _build_styles() -> dict[str, ParagraphStyle]:
         leading=15,
         textColor=colors.HexColor(REPORT_NAVY),
     )
+    subsection_style = ParagraphStyle(
+        "ReportSubsection",
+        parent=body_style,
+        fontName=PDF_FONT_BOLD,
+        fontSize=11.5,
+        leading=14,
+        textColor=colors.HexColor(REPORT_NAVY),
+        spaceBefore=4,
+        spaceAfter=4,
+    )
     return {
         "section": section_style,
         "body": body_style,
         "note": note_style,
         "meta": meta_style,
+        "subsection": subsection_style,
     }
 
 
@@ -317,6 +363,8 @@ def create_daily_pdf_report(
     total_trays = int(orders_summary.get("NombreTotalBacs", 0) or 0)
     total_expenses = float(cash.get("MontantTotalDepenses", 0) or 0)
     paid_debts_today = float(cash.get("DettesPayeesAujourdHui", 0) or 0)
+    expense_items = split_structured_lines(_safe_text(cash.get("DepensesEffectuees")).strip())
+    paid_debts_items = parse_named_amount_lines(_safe_text(cash.get("DettesPayeesDetails")).strip())
     total_entries = total_received + paid_debts_today
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
@@ -461,13 +509,31 @@ def create_daily_pdf_report(
             ["Solde du jour", _format_fc(balance)],
         ]
         elements.append(_make_table(cash_rows, [72 * mm, 88 * mm]))
-        expense_details = _safe_text(cash.get("DepensesEffectuees")).strip()
-        if expense_details:
+        if expense_items:
             elements.append(Spacer(1, 3 * mm))
-            elements.append(_paragraph(f"Détails des dépenses : {expense_details}", styles["body"]))
+            elements.append(_paragraph("Liste des dépenses", styles["subsection"]))
+            expense_rows: list[list[Any]] = [["N°", "Détail"]]
+            for index, item in enumerate(expense_items, start=1):
+                expense_rows.append([str(index), item])
+            elements.append(_make_table(expense_rows, [18 * mm, 142 * mm]))
         else:
             elements.append(Spacer(1, 2 * mm))
-            elements.append(_paragraph("Aucun détail de dépense enregistré pour cette date.", styles["note"]))
+            elements.append(_paragraph("Aucune dépense détaillée n'a été enregistrée pour cette date.", styles["note"]))
+
+        if paid_debts_items:
+            elements.append(Spacer(1, 4 * mm))
+            elements.append(_paragraph("Personnes ayant payé leurs dettes", styles["subsection"]))
+            if any(amount for _, amount in paid_debts_items):
+                paid_rows: list[list[Any]] = [["Nom", "Montant payé"]]
+                for name, amount in paid_debts_items:
+                    paid_rows.append([name, amount or "-"])
+                elements.append(_make_table(paid_rows, [108 * mm, 52 * mm]))
+            else:
+                paid_rows = [["N°", "Personne"], *[[str(index), name] for index, (name, _amount) in enumerate(paid_debts_items, start=1)]]
+                elements.append(_make_table(paid_rows, [18 * mm, 142 * mm]))
+        elif paid_debts_today > 0:
+            elements.append(Spacer(1, 4 * mm))
+            elements.append(_paragraph("Aucune liste détaillée des personnes ayant payé leurs dettes n'a été enregistrée pour cette date.", styles["note"]))
         elements.append(Spacer(1, 6 * mm))
 
     if "commissions" in allowed_sections:
