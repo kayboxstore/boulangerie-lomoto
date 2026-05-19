@@ -295,10 +295,21 @@ def _measure_window_size(window: tk.Misc) -> tuple[int, int]:
 def _measure_requested_content_size(window: tk.Misc) -> tuple[int, int]:
     scrollable_content = getattr(window, "scrollable_content", None)
     content = getattr(scrollable_content, "content", None)
+    footer = getattr(window, "fixed_footer", None)
     if content is not None:
         content.update_idletasks()
-        return content.winfo_reqwidth(), content.winfo_reqheight()
-    return window.winfo_reqwidth(), window.winfo_reqheight()
+        requested_width = content.winfo_reqwidth()
+        requested_height = content.winfo_reqheight()
+    else:
+        requested_width = window.winfo_reqwidth()
+        requested_height = window.winfo_reqheight()
+
+    if footer is not None:
+        footer.update_idletasks()
+        requested_width = max(requested_width, footer.winfo_reqwidth())
+        requested_height += footer.winfo_reqheight()
+
+    return requested_width, requested_height
 
 
 def center_window(window: tk.Misc) -> None:
@@ -1002,8 +1013,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.parent = parent
         self.title("Paramètres réseau")
-        self.geometry("760x700")
-        self.minsize(740, 660)
+        self.geometry("820x760")
+        self.minsize(780, 700)
         self.configure(bg=MODULE_BACKGROUND)
         apply_window_icon(self)
         self.transient(parent)
@@ -1020,8 +1031,11 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.server_status_var = tk.StringVar(value="")
         self.windows_service_status_var = tk.StringVar(value="")
         self.server_button_var = tk.StringVar(value="Démarrer le serveur sur ce poste")
+        self.message_box: ScrolledText | None = None
 
         self.build_ui()
+        self.message_var.trace_add("write", self._sync_message_box)
+        self._sync_message_box()
         self.refresh_server_status()
         self.refresh_windows_service_status()
         self.update_mode_fields()
@@ -1029,8 +1043,12 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.after(0, lambda: center_window(self))
 
     def build_ui(self) -> None:
-        frame = ttk.Frame(self, padding=18)
-        frame.pack(fill="both", expand=True)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self.scrollable_content = ScrollableContent(self, padding=18, background=MODULE_BACKGROUND)
+        self.scrollable_content.grid(row=0, column=0, sticky="nsew")
+        frame = self.scrollable_content.content
         logo_label = create_logo_widget(frame, SETTINGS_LOGO_SIZE)
         if logo_label is not None:
             logo_label.pack(anchor="w", pady=(0, 8))
@@ -1144,21 +1162,42 @@ class ConnectionSettingsDialog(tk.Toplevel):
             row=0, column=3, padx=6, pady=4
         )
 
-        footer = ttk.Frame(frame)
-        footer.pack(fill="x", pady=(8, 0))
-        ttk.Label(
+        footer = ttk.Frame(self, padding=(18, 8, 18, 18))
+        footer.grid(row=1, column=0, sticky="ew")
+        footer.columnconfigure(0, weight=1)
+        self.fixed_footer = footer
+
+        self.message_box = ScrolledText(
             footer,
-            textvariable=self.message_var,
-            foreground="#8b0000",
-            wraplength=620,
-            justify="center",
-        ).pack(fill="x", pady=(0, 12))
+            height=4,
+            wrap="word",
+            font=UI_FONT,
+            fg="#8b0000",
+            bg="#fff8f8",
+            relief="solid",
+            borderwidth=1,
+            padx=10,
+            pady=8,
+        )
+        self.message_box.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        self.message_box.configure(state="disabled")
         button_row = ttk.Frame(footer)
-        button_row.pack()
+        button_row.grid(row=1, column=0)
         ttk.Button(button_row, text="Enregistrer", style="Primary.TButton", command=self.save_settings).grid(
             row=0, column=0, padx=6
         )
         ttk.Button(button_row, text="Fermer", command=self.close_window).grid(row=0, column=1, padx=6)
+
+    def _sync_message_box(self, *_args: Any) -> None:
+        if self.message_box is None or not self.message_box.winfo_exists():
+            return
+        message = self.message_var.get().strip()
+        self.message_box.configure(state="normal")
+        self.message_box.delete("1.0", "end")
+        if message:
+            self.message_box.insert("1.0", message)
+            self.message_box.yview_moveto(0)
+        self.message_box.configure(state="disabled")
 
     def current_settings(self) -> ConnectionSettings:
         return ConnectionSettings(
