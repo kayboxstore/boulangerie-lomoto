@@ -192,8 +192,9 @@ def run_app() -> None:
     root.configure(bg=APP_BACKGROUND)
     apply_window_icon(root)
     configure_styles()
+    root.resizable(True, True)
     LoginWindow(root, post_update_notice)
-    maximize_window(root, 580, 380)
+    center_window(root)
     root.mainloop()
 
 
@@ -635,7 +636,7 @@ class ScrollableContent(ttk.Frame):
 
 class LoginWindow(ttk.Frame):
     def __init__(self, root: tk.Tk, post_update_notice: SessionNotice | None = None) -> None:
-        super().__init__(root, padding=24)
+        super().__init__(root, padding=(18, 8, 18, 18))
         self.root = root
         self.post_update_notice = post_update_notice
         self.notice_label: ttk.Label | None = None
@@ -650,7 +651,7 @@ class LoginWindow(ttk.Frame):
 
     def build_ui(self) -> None:
         card = ttk.LabelFrame(self, text="Connexion", style="Card.TLabelframe", padding=18)
-        card.pack(anchor="n", pady=(24, 0))
+        card.pack(anchor="n", pady=(6, 0))
         self.watermark_label = create_logo_widget(card, 210, opacity=40)
         if self.watermark_label is not None:
             self.watermark_label.place(relx=0.5, rely=0.53, anchor="center")
@@ -1027,9 +1028,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.geometry("900x760")
         self.minsize(820, 700)
         self.configure(bg=MODULE_BACKGROUND)
+        self.resizable(True, True)
         apply_window_icon(self)
-        self.transient(parent)
-        self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
 
         settings = DatabaseHelper.get_connection_settings()
@@ -1057,14 +1057,15 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self.scrollable_content = ScrollableContent(self, padding=12, background=MODULE_BACKGROUND)
+        self.scrollable_content = ScrollableContent(self, padding=(10, 4, 10, 10), background=MODULE_BACKGROUND)
         self.scrollable_content.grid(row=0, column=0, sticky="nsew")
         frame = self.scrollable_content.content
         logo_label = create_logo_widget(frame, SETTINGS_LOGO_SIZE)
         if logo_label is not None:
-            logo_label.pack(anchor="w", pady=(0, 4))
+            logo_label.place(x=0, y=0)
+            setattr(self, "_header_logo", logo_label)
 
-        ttk.Label(frame, text="Mode connecté", style="Header.TLabel").pack(pady=(0, 8))
+        ttk.Label(frame, text="Mode connecté", style="Header.TLabel").pack(pady=(0, 6))
         ttk.Label(
             frame,
             text=(
@@ -1536,9 +1537,10 @@ class DashboardWindow(tk.Toplevel):
         self.geometry("1180x760")
         self.minsize(980, 640)
         self.configure(bg=APP_BACKGROUND)
+        self.resizable(True, True)
         apply_window_icon(self)
         self.protocol("WM_DELETE_WINDOW", self.on_close_app)
-        self.scrollable_content = ScrollableContent(self, padding=12, background=APP_BACKGROUND)
+        self.scrollable_content = ScrollableContent(self, padding=(10, 4, 10, 10), background=APP_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         self.body = self.scrollable_content.content
         self.build_ui()
@@ -1553,13 +1555,14 @@ class DashboardWindow(tk.Toplevel):
         container = self.body
         logo_label = create_logo_widget(container, DASHBOARD_LOGO_SIZE)
         if logo_label is not None:
-            logo_label.pack(anchor="w", pady=(0, 4))
+            logo_label.place(x=0, y=0)
+            setattr(self, "_header_logo", logo_label)
 
         ttk.Label(
             container,
             text=f"Bienvenue, {self.user.display_name} ({self.user.role})",
             style="Header.TLabel",
-        ).pack(anchor="center", pady=(0, 10))
+        ).pack(anchor="center", pady=(0, 6))
 
         ttk.Label(
             container,
@@ -2069,18 +2072,20 @@ class BaseModuleWindow(tk.Toplevel):
         self.title(title)
         self.geometry(geometry)
         self.configure(bg=MODULE_BACKGROUND)
+        self.resizable(True, True)
         apply_window_icon(self)
-        self.transient(parent)
-        self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
-        self.scrollable_content = ScrollableContent(self, padding=10, background=MODULE_BACKGROUND)
+        self.scrollable_content = ScrollableContent(self, padding=(10, 4, 10, 10), background=MODULE_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         shell = self.scrollable_content.content
         logo_label = create_logo_widget(shell, FORM_LOGO_SIZE)
         if logo_label is not None:
-            logo_label.pack(anchor="w", pady=(0, 4))
+            logo_label.place(x=0, y=0)
+            setattr(self, "_header_logo", logo_label)
         self.body = ttk.Frame(shell)
         self.body.pack(fill="both", expand=True)
+        if logo_label is not None:
+            logo_label.lift()
         maximize_window(self)
         if self.parent.is_live_sync_enabled():
             self.schedule_live_refresh()
@@ -3025,9 +3030,8 @@ class StockWindow(BaseModuleWindow):
         dialog = tk.Toplevel(self)
         dialog.geometry("460x300")
         dialog.title("Paramètres du stock")
-        dialog.transient(self)
-        dialog.grab_set()
         dialog.configure(bg=MODULE_BACKGROUND)
+        dialog.resizable(True, True)
         apply_window_icon(dialog)
         frame = ttk.Frame(dialog, padding=16)
         frame.pack(fill="both", expand=True)
