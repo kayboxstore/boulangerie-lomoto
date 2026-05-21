@@ -30,10 +30,11 @@ from .connected_server import (
     stop_embedded_server,
 )
 from .database import AuthenticatedUser, DatabaseHelper
-from .excel_reports import create_daily_excel_report
+from .excel_reports import create_daily_excel_report, create_monthly_excel_report
 from .reports import (
     ReportGenerationError,
     create_daily_pdf_report,
+    create_monthly_pdf_report,
     get_report_scope_description,
     get_report_scope_label,
 )
@@ -2330,11 +2331,12 @@ class ServerBackupsWindow(BaseModuleWindow):
 
 class PdfReportWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Rapport PDF journalier", "700x420", start_maximized=False)
+        super().__init__(parent, "Rapports PDF", "720x470", start_maximized=False)
         self.identifiant = parent.user.identifiant
         self.role = parent.user.role
         self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
         self.open_after_generation_var = tk.BooleanVar(value=True)
+        self.report_mode_var = tk.StringVar(value="daily")
         self.message_var = tk.StringVar(value="")
         self.build_ui()
 
@@ -2346,7 +2348,8 @@ class PdfReportWindow(BaseModuleWindow):
         ttk.Label(
             intro,
             text=(
-                "Choisissez une date puis générez un document PDF prêt à imprimer. "
+                "Choisissez une date de référence puis générez un document PDF prêt à imprimer. "
+                "En mode mensuel, seul le mois et l'année de cette date seront utilisés. "
                 f"{get_report_scope_description(self.role)}"
             ),
             wraplength=500,
@@ -2362,18 +2365,31 @@ class PdfReportWindow(BaseModuleWindow):
         form = ttk.LabelFrame(container, text="Paramètres du rapport", style="Card.TLabelframe")
         form.pack(fill="x")
 
-        ttk.Label(form, text="Date du rapport").grid(row=0, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Type de rapport").grid(row=0, column=0, sticky="w", pady=6)
+        mode_row = ttk.Frame(form)
+        mode_row.grid(row=0, column=1, sticky="w", pady=6)
+        ttk.Radiobutton(mode_row, text="Journalier", value="daily", variable=self.report_mode_var).grid(row=0, column=0, padx=(0, 10))
+        ttk.Radiobutton(mode_row, text="Mensuel", value="monthly", variable=self.report_mode_var).grid(row=0, column=1)
+
+        ttk.Label(form, text="Date de référence").grid(row=1, column=0, sticky="w", pady=6)
         self.date_field = DateField(form)
-        self.date_field.grid(row=0, column=1, sticky="ew", pady=6)
+        self.date_field.grid(row=1, column=1, sticky="ew", pady=6)
+        ttk.Label(
+            form,
+            text="En mode mensuel, l'application regroupe toutes les données du mois de cette date.",
+            foreground="#4b5563",
+            wraplength=440,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
         ttk.Checkbutton(
             form,
             text="Proposer l'ouverture du PDF apres generation",
             variable=self.open_after_generation_var,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         actions = ttk.Frame(form)
-        actions.grid(row=2, column=0, columnspan=2, pady=(14, 0))
+        actions.grid(row=4, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(actions, text="Générer le PDF", style="Primary.TButton", command=self.generate_report).grid(
             row=0, column=0, padx=6
         )
@@ -2400,7 +2416,13 @@ class PdfReportWindow(BaseModuleWindow):
             return
 
         self.reports_dir.mkdir(parents=True, exist_ok=True)
-        suggested_path = self.reports_dir / f"rapport-journalier-{target_date.strftime('%Y%m%d')}.pdf"
+        monthly_mode = self.report_mode_var.get().strip().lower() == "monthly"
+        suggested_name = (
+            f"rapport-mensuel-{target_date.strftime('%Y%m')}.pdf"
+            if monthly_mode
+            else f"rapport-journalier-{target_date.strftime('%Y%m%d')}.pdf"
+        )
+        suggested_path = self.reports_dir / suggested_name
         destination = filedialog.asksaveasfilename(
             title="Enregistrer le rapport PDF",
             initialdir=str(self.reports_dir),
@@ -2412,13 +2434,22 @@ class PdfReportWindow(BaseModuleWindow):
             return
 
         try:
-            report_path = create_daily_pdf_report(
-                target_date,
-                destination,
-                role=self.role,
-                generated_by=self.parent.user.display_name,
-                generated_role=self.role,
-            )
+            if monthly_mode:
+                report_path = create_monthly_pdf_report(
+                    target_date,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                )
+            else:
+                report_path = create_daily_pdf_report(
+                    target_date,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                )
         except ReportGenerationError as exc:
             self.message_var.set(str(exc))
             return
@@ -2444,11 +2475,12 @@ class PdfReportWindow(BaseModuleWindow):
 
 class ExcelReportWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Rapport Excel journalier", "700x420", start_maximized=False)
+        super().__init__(parent, "Rapports Excel", "720x470", start_maximized=False)
         self.identifiant = parent.user.identifiant
         self.role = parent.user.role
         self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
         self.open_after_generation_var = tk.BooleanVar(value=True)
+        self.report_mode_var = tk.StringVar(value="daily")
         self.message_var = tk.StringVar(value="")
         self.build_ui()
 
@@ -2460,7 +2492,8 @@ class ExcelReportWindow(BaseModuleWindow):
         ttk.Label(
             intro,
             text=(
-                "Choisissez une date puis générez un classeur Excel prêt à partager ou à retravailler. "
+                "Choisissez une date de référence puis générez un classeur Excel prêt à partager ou à retravailler. "
+                "En mode mensuel, seul le mois et l'année de cette date seront utilisés. "
                 f"{get_report_scope_description(self.role)}"
             ),
             wraplength=500,
@@ -2476,18 +2509,31 @@ class ExcelReportWindow(BaseModuleWindow):
         form = ttk.LabelFrame(container, text="Paramètres du rapport", style="Card.TLabelframe")
         form.pack(fill="x")
 
-        ttk.Label(form, text="Date du rapport").grid(row=0, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Type de rapport").grid(row=0, column=0, sticky="w", pady=6)
+        mode_row = ttk.Frame(form)
+        mode_row.grid(row=0, column=1, sticky="w", pady=6)
+        ttk.Radiobutton(mode_row, text="Journalier", value="daily", variable=self.report_mode_var).grid(row=0, column=0, padx=(0, 10))
+        ttk.Radiobutton(mode_row, text="Mensuel", value="monthly", variable=self.report_mode_var).grid(row=0, column=1)
+
+        ttk.Label(form, text="Date de référence").grid(row=1, column=0, sticky="w", pady=6)
         self.date_field = DateField(form)
-        self.date_field.grid(row=0, column=1, sticky="ew", pady=6)
+        self.date_field.grid(row=1, column=1, sticky="ew", pady=6)
+        ttk.Label(
+            form,
+            text="En mode mensuel, l'application regroupe toutes les données du mois de cette date.",
+            foreground="#4b5563",
+            wraplength=440,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
         ttk.Checkbutton(
             form,
             text="Proposer l'ouverture du fichier Excel après génération",
             variable=self.open_after_generation_var,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         actions = ttk.Frame(form)
-        actions.grid(row=2, column=0, columnspan=2, pady=(14, 0))
+        actions.grid(row=4, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(
             actions,
             text="Générer le fichier Excel",
@@ -2517,7 +2563,13 @@ class ExcelReportWindow(BaseModuleWindow):
             return
 
         self.reports_dir.mkdir(parents=True, exist_ok=True)
-        suggested_path = self.reports_dir / f"rapport-excel-journalier-{target_date.strftime('%Y%m%d')}.xlsx"
+        monthly_mode = self.report_mode_var.get().strip().lower() == "monthly"
+        suggested_name = (
+            f"rapport-excel-mensuel-{target_date.strftime('%Y%m')}.xlsx"
+            if monthly_mode
+            else f"rapport-excel-journalier-{target_date.strftime('%Y%m%d')}.xlsx"
+        )
+        suggested_path = self.reports_dir / suggested_name
         destination = filedialog.asksaveasfilename(
             title="Enregistrer le rapport Excel",
             initialdir=str(self.reports_dir),
@@ -2529,13 +2581,22 @@ class ExcelReportWindow(BaseModuleWindow):
             return
 
         try:
-            report_path = create_daily_excel_report(
-                target_date,
-                destination,
-                role=self.role,
-                generated_by=self.parent.user.display_name,
-                generated_role=self.role,
-            )
+            if monthly_mode:
+                report_path = create_monthly_excel_report(
+                    target_date,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                )
+            else:
+                report_path = create_daily_excel_report(
+                    target_date,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                )
         except ReportGenerationError as exc:
             self.message_var.set(str(exc))
             return

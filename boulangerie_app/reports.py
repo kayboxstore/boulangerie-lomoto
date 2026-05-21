@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from datetime import date, datetime
 from html import escape
 from pathlib import Path
@@ -70,6 +71,38 @@ def _format_date(target_date: date) -> str:
     return target_date.strftime("%d/%m/%Y")
 
 
+def _format_month_label(target_date: date) -> str:
+    return target_date.strftime("%m/%Y")
+
+
+def _month_bounds(target_date: date) -> tuple[date, date]:
+    first_day = target_date.replace(day=1)
+    last_day = target_date.replace(day=monthrange(target_date.year, target_date.month)[1])
+    return first_day, last_day
+
+
+def _parse_row_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _filter_rows_for_month(rows: list[dict[str, Any]], date_key: str, reference_date: date) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if (row_date := _parse_row_date(row.get(date_key))) is not None
+        and row_date.year == reference_date.year
+        and row_date.month == reference_date.month
+    ]
+
+
 def normalize_role(role: str) -> str:
     normalized = role.strip()
     return normalized if normalized in REPORT_SECTIONS_BY_ROLE else "Admin"
@@ -128,12 +161,12 @@ def _cash_highlight_table_styles(rows: list[list[Any]]) -> list[tuple[Any, ...]]
         if row_index == 0 or not row:
             continue
         label = str(row[0]).strip()
-        if label in {"Montant reçu", "Dettes payées aujourd'hui", "Total des entrées"}:
+        if label in {"Montant reçu", "Dettes payées aujourd'hui", "Dettes payées du mois", "Total des entrées"}:
             styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
-        elif label == "Dépenses":
+        elif label in {"Dépenses", "Dépenses du mois"}:
             styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
             styles.append(("TEXTCOLOR", (0, row_index), (-1, row_index), colors.HexColor("#1E7D32")))
-        elif label == "Solde du jour":
+        elif label in {"Solde du jour", "Solde du mois"}:
             styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
             styles.append(("TEXTCOLOR", (0, row_index), (-1, row_index), colors.HexColor(REPORT_RED)))
     return styles
@@ -194,9 +227,9 @@ def _build_styles() -> dict[str, ParagraphStyle]:
 
 
 class ReportHeader(Flowable):
-    def __init__(self, target_date: date) -> None:
+    def __init__(self, subtitle_text: str) -> None:
         super().__init__()
-        self.target_date = target_date
+        self.subtitle_text = subtitle_text
         self.header_width = 0.0
         self.header_height = 120.0
 
@@ -276,7 +309,7 @@ class ReportHeader(Flowable):
             text_right_bound,
         )
         self._draw_centered_line(
-            f"RAPPORT JOURNALIER - {_format_date(self.target_date)}",
+            self.subtitle_text,
             48,
             REPORT_SUBTITLE_SIZE,
             REPORT_BLUE,
@@ -407,7 +440,7 @@ def create_daily_pdf_report(
     )
 
     elements: list[Any] = [
-        ReportHeader(target_date),
+        ReportHeader(f"RAPPORT JOURNALIER - {_format_date(target_date)}"),
         Spacer(1, 3 * mm),
         _paragraph(f"Profil du rapport : {scope_label}", styles["meta"]),
         _paragraph(scope_description, styles["note"]),
@@ -614,5 +647,304 @@ def create_daily_pdf_report(
         )
     except Exception as exc:
         raise ReportGenerationError("Impossible de générer le rapport PDF.") from exc
+
+    return report_path
+
+
+def create_monthly_pdf_report(
+    target_date: date,
+    destination: str | Path | None = None,
+    role: str = "Admin",
+    generated_by: str = "",
+    generated_role: str | None = None,
+) -> Path:
+    DatabaseHelper.initialize_database()
+    register_pdf_fonts()
+
+    report_path = Path(destination) if destination is not None else DatabaseHelper.build_report_path(
+        f"rapport-mensuel-{target_date.strftime('%Y%m')}"
+    )
+    if report_path.suffix.lower() != ".pdf":
+        report_path = report_path.with_suffix(".pdf")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    normalized_role = normalize_role(role)
+    allowed_sections = get_report_sections_for_role(normalized_role)
+    scope_label = get_report_scope_label(normalized_role)
+    scope_description = get_report_scope_description(normalized_role)
+    generator_name = generated_by.strip() or "Utilisateur non identifié"
+    generator_role = (generated_role or normalized_role).strip() or normalized_role
+    first_day, last_day = _month_bounds(target_date)
+    month_label = _format_month_label(target_date)
+
+    stock_exits = _filter_rows_for_month(DatabaseHelper.list_stock_exits(), "DateSortie", target_date)
+    stock_journals: list[dict[str, Any]] = []
+    for day_number in range(1, last_day.day + 1):
+        current_day = target_date.replace(day=day_number)
+        journal = DatabaseHelper.get_stock_journal(current_day)
+        if journal:
+            stock_journals.append(journal)
+    orders = _filter_rows_for_month(DatabaseHelper.list_orders(), "DateCommande", target_date)
+    cash_days = _filter_rows_for_month(DatabaseHelper.list_cash_days(), "DateCaisse", target_date)
+    commissions = _filter_rows_for_month(DatabaseHelper.list_commissions(), "DateCommission", target_date)
+
+    total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in orders)
+    total_expected = sum(float(row.get("MontantAPercevoir", 0) or 0) for row in orders)
+    total_received = sum(float(row.get("MontantRecu", 0) or 0) for row in orders)
+    total_debts = sum(float(row.get("Dette", 0) or 0) for row in orders)
+    paid_debts_month = sum(float(row.get("DettesPayeesAujourdHui", 0) or 0) for row in cash_days)
+    total_entries = total_received + paid_debts_month
+    total_expenses = sum(float(row.get("MontantTotalDepenses", 0) or 0) for row in cash_days)
+    balance = total_entries - total_expenses
+    total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
+    total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
+
+    total_farine = sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits)
+    total_levure = sum(float(row.get("PaquetsUtilises", 0) or 0) for row in stock_exits)
+    total_sel = sum(float(row.get("KgSelUtilises", 0) or 0) for row in stock_exits)
+    total_huile = sum(float(row.get("LitresHuileUtilises", 0) or 0) for row in stock_exits)
+
+    expense_items_by_day: list[tuple[str, str]] = []
+    paid_debts_items_by_day: list[tuple[str, str, str]] = []
+    for row in cash_days:
+        row_date = _parse_row_date(row.get("DateCaisse"))
+        row_date_label = _format_date(row_date) if row_date is not None else _safe_text(row.get("DateCaisse"))
+        for item in split_structured_lines(_safe_text(row.get("DepensesEffectuees")).strip()):
+            expense_items_by_day.append((row_date_label, item))
+        for name, amount in parse_named_amount_lines(_safe_text(row.get("DettesPayeesDetails")).strip()):
+            paid_debts_items_by_day.append((row_date_label, name, amount or "-"))
+
+    styles = _build_styles()
+    doc = SimpleDocTemplate(
+        str(report_path),
+        pagesize=A4,
+        leftMargin=16 * mm,
+        rightMargin=16 * mm,
+        topMargin=14 * mm,
+        bottomMargin=18 * mm,
+        title=f"{APP_NAME} - {scope_label} du mois {month_label}",
+        author="Kay Box Store",
+    )
+
+    elements: list[Any] = [
+        ReportHeader(f"RAPPORT MENSUEL - {month_label}"),
+        Spacer(1, 3 * mm),
+        _paragraph(f"Profil du rapport : {scope_label}", styles["meta"]),
+        _paragraph(scope_description, styles["note"]),
+        _paragraph(f"Généré par : {generator_name} ({generator_role})", styles["meta"]),
+        _paragraph(
+            (
+                f"Période couverte : du {_format_date(first_day)} au {_format_date(last_day)}. "
+                f"Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}."
+            ),
+            styles["note"],
+        ),
+        Spacer(1, 6 * mm),
+    ]
+
+    overview_rows = [["Indicateur", "Valeur"]]
+    if "stock" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Jours avec journal de stock", str(len(stock_journals))],
+                ["Sorties de stock du mois", str(len(stock_exits))],
+            ]
+        )
+    if "orders" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Commandes du mois", str(len(orders))],
+                ["Total bacs", str(total_trays)],
+                ["Montant attendu", _format_fc(total_expected)],
+                ["Montant reçu", _format_fc(total_received)],
+                ["Dettes", _format_fc(total_debts)],
+            ]
+        )
+    if "cash" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Dettes payées du mois", _format_fc(paid_debts_month)],
+                ["Total des entrées", _format_fc(total_entries)],
+                ["Dépenses du mois", _format_fc(total_expenses)],
+                ["Solde du mois", _format_fc(balance)],
+            ]
+        )
+    if "commissions" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Commissions", _format_fc(total_commissions)],
+                ["Net commissions", _format_fc(total_net_commissions)],
+            ]
+        )
+    elements.append(_make_table(overview_rows, [72 * mm, 88 * mm], extra_styles=_cash_highlight_table_styles(overview_rows)))
+    elements.append(Spacer(1, 6 * mm))
+
+    if "stock" in allowed_sections:
+        stock_intro_rows = [
+            ["Indicateur", "Valeur"],
+            ["Jours avec journal", str(len(stock_journals))],
+            ["Sorties enregistrées", str(len(stock_exits))],
+            ["Farine utilisée", _format_number(total_farine)],
+            ["Levure utilisée", _format_number(total_levure)],
+            ["Sel utilisé", _format_number(total_sel)],
+            ["Huile utilisée", _format_number(total_huile)],
+        ]
+        elements.append(
+            KeepTogether(
+                [
+                    _paragraph("Stock du mois", styles["section"]),
+                    _make_table(stock_intro_rows, [72 * mm, 88 * mm]),
+                ]
+            )
+        )
+        if stock_exits:
+            elements.append(Spacer(1, 4 * mm))
+            stock_rows: list[list[Any]] = [["Date", "Farine", "Levure", "Sel", "Huile"]]
+            for row in stock_exits:
+                row_date = _parse_row_date(row.get("DateSortie"))
+                stock_rows.append(
+                    [
+                        _format_date(row_date) if row_date is not None else _safe_text(row.get("DateSortie")),
+                        _format_number(float(row.get("SacsUtilises", 0) or 0)),
+                        _format_number(float(row.get("PaquetsUtilises", 0) or 0)),
+                        _format_number(float(row.get("KgSelUtilises", 0) or 0)),
+                        _format_number(float(row.get("LitresHuileUtilises", 0) or 0)),
+                    ]
+                )
+            elements.append(_make_table(stock_rows, [30 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm]))
+        else:
+            elements.append(Spacer(1, 2 * mm))
+            elements.append(_paragraph("Aucune sortie de stock n'a été enregistrée pour ce mois.", styles["note"]))
+        elements.append(Spacer(1, 6 * mm))
+
+    if "orders" in allowed_sections:
+        order_section: list[Any] = [_paragraph("Commandes du mois", styles["section"])]
+        if orders:
+            order_rows: list[list[Any]] = [["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]]
+            for row in orders:
+                row_date = _parse_row_date(row.get("DateCommande"))
+                order_rows.append(
+                    [
+                        _format_date(row_date) if row_date is not None else _safe_text(row.get("DateCommande")),
+                        _safe_text(row.get("Client")),
+                        normalize_status_label(row.get("Statut")),
+                        str(int(row.get("NombreBacs", 0) or 0)),
+                        _format_fc(float(row.get("MontantAPercevoir", 0) or 0)),
+                        _format_fc(float(row.get("MontantRecu", 0) or 0)),
+                        _format_fc(float(row.get("Dette", 0) or 0)),
+                    ]
+                )
+            order_section.append(
+                _make_table(order_rows, [22 * mm, 36 * mm, 26 * mm, 12 * mm, 28 * mm, 28 * mm, 24 * mm])
+            )
+        else:
+            order_section.append(_paragraph("Aucune commande n'a été enregistrée pour ce mois.", styles["body"]))
+        elements.append(KeepTogether(order_section))
+        elements.append(Spacer(1, 6 * mm))
+
+    if "cash" in allowed_sections:
+        cash_rows = [
+            ["Champ", "Valeur"],
+            ["Montant attendu", _format_fc(total_expected)],
+            ["Montant reçu", _format_fc(total_received)],
+            ["Dettes", _format_fc(total_debts)],
+            ["Dettes payées du mois", _format_fc(paid_debts_month)],
+            ["Total des entrées", _format_fc(total_entries)],
+            ["Dépenses du mois", _format_fc(total_expenses)],
+            ["Solde du mois", _format_fc(balance)],
+        ]
+        elements.append(
+            KeepTogether(
+                [
+                    _paragraph("Caisse du mois", styles["section"]),
+                    _make_table(cash_rows, [72 * mm, 88 * mm], extra_styles=_cash_highlight_table_styles(cash_rows)),
+                ]
+            )
+        )
+        if cash_days:
+            elements.append(Spacer(1, 4 * mm))
+            daily_cash_rows: list[list[Any]] = [["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde"]]
+            for row in cash_days:
+                row_date = _parse_row_date(row.get("DateCaisse"))
+                daily_cash_rows.append(
+                    [
+                        _format_date(row_date) if row_date is not None else _safe_text(row.get("DateCaisse")),
+                        _format_fc(float(row.get("MontantRecu", 0) or 0)),
+                        _format_fc(float(row.get("DettesPayeesAujourdHui", 0) or 0)),
+                        _format_fc(float(row.get("TotalEntrees", 0) or 0)),
+                        _format_fc(float(row.get("MontantTotalDepenses", 0) or 0)),
+                        _format_fc(float(row.get("Solde", 0) or 0)),
+                    ]
+                )
+            elements.append(_make_table(daily_cash_rows, [24 * mm, 28 * mm, 28 * mm, 28 * mm, 28 * mm, 24 * mm]))
+        if expense_items_by_day:
+            elements.append(Spacer(1, 4 * mm))
+            elements.append(_paragraph("Liste mensuelle des dépenses", styles["subsection"]))
+            expense_rows: list[list[Any]] = [["Date", "Détail"]]
+            for row_date, detail in expense_items_by_day:
+                expense_rows.append([row_date, detail])
+            elements.append(_make_table(expense_rows, [28 * mm, 132 * mm]))
+        if paid_debts_items_by_day:
+            elements.append(Spacer(1, 4 * mm))
+            elements.append(_paragraph("Personnes ayant payé leurs dettes", styles["subsection"]))
+            paid_rows: list[list[Any]] = [["Date", "Nom", "Montant payé"]]
+            for row_date, name, amount in paid_debts_items_by_day:
+                paid_rows.append([row_date, name, amount])
+            elements.append(_make_table(paid_rows, [24 * mm, 92 * mm, 44 * mm]))
+        elements.append(Spacer(1, 6 * mm))
+
+    if "commissions" in allowed_sections:
+        commission_section: list[Any] = [_paragraph("Commissions du mois", styles["section"])]
+        if commissions:
+            commission_rows: list[list[Any]] = [["Date", "Nom", "Statut", "Bacs", "Payé", "Commission", "Dette", "Net"]]
+            for row in commissions:
+                row_date = _parse_row_date(row.get("DateCommission"))
+                commission_rows.append(
+                    [
+                        _format_date(row_date) if row_date is not None else _safe_text(row.get("DateCommission")),
+                        _safe_text(row.get("Nom")),
+                        normalize_status_label(row.get("Statut")),
+                        str(int(row.get("NombreBacs", 0) or 0)),
+                        _format_fc(float(row.get("MontantPaye", 0) or 0)),
+                        _format_fc(float(row.get("Commissions", 0) or 0)),
+                        _format_fc(float(row.get("Dettes", 0) or 0)),
+                        _format_fc(float(row.get("NetAPayer", 0) or 0)),
+                    ]
+                )
+            commission_section.append(
+                _make_table(
+                    commission_rows,
+                    [22 * mm, 30 * mm, 24 * mm, 12 * mm, 22 * mm, 24 * mm, 20 * mm, 18 * mm],
+                )
+            )
+        else:
+            commission_section.append(_paragraph("Aucune commission n'a été enregistrée pour ce mois.", styles["body"]))
+        elements.append(KeepTogether(commission_section))
+
+    elements.append(Spacer(1, 6 * mm))
+    elements.append(_paragraph("NB", styles["section"]))
+    if "cash" in allowed_sections:
+        recap_text = (
+            f"Pour le mois {month_label}, les entrées correspondent au montant reçu "
+            f"({_format_fc(total_received)}) additionné aux dettes payées ({_format_fc(paid_debts_month)}), "
+            f"soit un total des entrées de {_format_fc(total_entries)}. Les sorties correspondent aux dépenses "
+            f"enregistrées sur la période, soit {_format_fc(total_expenses)}. Le solde mensuel ressort donc à "
+            f"{_format_fc(balance)}."
+        )
+    else:
+        recap_text = (
+            f"Ce rapport mensuel couvre la période du {_format_date(first_day)} au {_format_date(last_day)} "
+            f"et reprend uniquement les rubriques autorisées pour le profil {scope_label}."
+        )
+    elements.append(_paragraph(recap_text, styles["body"]))
+
+    try:
+        doc.build(
+            elements,
+            onFirstPage=_draw_report_page_background,
+            onLaterPages=_draw_report_page_background,
+        )
+    except Exception as exc:
+        raise ReportGenerationError("Impossible de générer le rapport PDF mensuel.") from exc
 
     return report_path
