@@ -206,6 +206,7 @@ class DatabaseHelper:
             shutil.copy2(cls.legacy_db_path, cls.db_path)
         with cls.connect() as connection:
             cls._create_tables(connection)
+            cls._migrate_stock_configuration_table(connection)
             cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
             cls._migrate_commissions_table(connection)
@@ -358,6 +359,7 @@ class DatabaseHelper:
 
         with cls.connect() as connection:
             cls._create_tables(connection)
+            cls._migrate_stock_configuration_table(connection)
             cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
             cls._migrate_commissions_table(connection)
@@ -384,7 +386,11 @@ class DatabaseHelper:
                 FarineInitial REAL NOT NULL,
                 LevureInitial REAL NOT NULL,
                 SelInitial REAL NOT NULL,
-                HuileInitial REAL NOT NULL
+                HuileInitial REAL NOT NULL,
+                FarineAlerteMin REAL NOT NULL DEFAULT 20,
+                LevureAlerteMin REAL NOT NULL DEFAULT 16,
+                SelAlerteMin REAL NOT NULL DEFAULT 10,
+                HuileAlerteMin REAL NOT NULL DEFAULT 12
             );
 
             CREATE TABLE IF NOT EXISTS StockSorties (
@@ -449,6 +455,17 @@ class DatabaseHelper:
                 Dettes REAL NOT NULL,
                 NetAPayer REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS HistoriqueActions (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateAction TEXT NOT NULL,
+                Identifiant TEXT NOT NULL,
+                NomComplet TEXT NOT NULL,
+                Role TEXT NOT NULL,
+                Module TEXT NOT NULL,
+                Action TEXT NOT NULL,
+                Details TEXT NOT NULL DEFAULT ''
+            );
             """
         )
 
@@ -475,6 +492,28 @@ class DatabaseHelper:
                 )
                 """,
                 (DEPOSITARY_STATUS, LEGACY_DEPOSITARY_6000_STATUS),
+            )
+
+    @classmethod
+    def _migrate_stock_configuration_table(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "ConfigurationStock")
+        if not columns:
+            return
+
+        default_thresholds = {
+            "FarineAlerteMin": 20,
+            "LevureAlerteMin": 16,
+            "SelAlerteMin": 10,
+            "HuileAlerteMin": 12,
+        }
+        for column_name, default_value in default_thresholds.items():
+            if column_name in columns:
+                continue
+            connection.execute(
+                f"""
+                ALTER TABLE ConfigurationStock
+                ADD COLUMN {column_name} REAL NOT NULL DEFAULT {default_value}
+                """
             )
 
     @classmethod
@@ -674,8 +713,18 @@ class DatabaseHelper:
         connection.execute(
             """
             INSERT INTO ConfigurationStock
-                (Id, FarineInitial, LevureInitial, SelInitial, HuileInitial)
-            VALUES (1, 100, 80, 50, 60)
+                (
+                    Id,
+                    FarineInitial,
+                    LevureInitial,
+                    SelInitial,
+                    HuileInitial,
+                    FarineAlerteMin,
+                    LevureAlerteMin,
+                    SelAlerteMin,
+                    HuileAlerteMin
+                )
+            VALUES (1, 100, 80, 50, 60, 20, 16, 10, 12)
             """
         )
 
@@ -894,7 +943,16 @@ class DatabaseHelper:
     def get_stock_configuration(cls) -> dict[str, Any]:
         row = cls._fetch_one(
             """
-            SELECT Id, FarineInitial, LevureInitial, SelInitial, HuileInitial
+            SELECT
+                Id,
+                FarineInitial,
+                LevureInitial,
+                SelInitial,
+                HuileInitial,
+                IFNULL(FarineAlerteMin, 20) AS FarineAlerteMin,
+                IFNULL(LevureAlerteMin, 16) AS LevureAlerteMin,
+                IFNULL(SelAlerteMin, 10) AS SelAlerteMin,
+                IFNULL(HuileAlerteMin, 12) AS HuileAlerteMin
             FROM ConfigurationStock
             WHERE Id = 1
             """
@@ -908,15 +966,72 @@ class DatabaseHelper:
         levure: float,
         sel: float,
         huile: float,
+        farine_alert: float | None = None,
+        levure_alert: float | None = None,
+        sel_alert: float | None = None,
+        huile_alert: float | None = None,
     ) -> None:
+        farine_alert = float(farine * 0.2 if farine_alert is None else farine_alert)
+        levure_alert = float(levure * 0.2 if levure_alert is None else levure_alert)
+        sel_alert = float(sel * 0.2 if sel_alert is None else sel_alert)
+        huile_alert = float(huile * 0.2 if huile_alert is None else huile_alert)
         cls._execute(
             """
             UPDATE ConfigurationStock
-            SET FarineInitial = ?, LevureInitial = ?, SelInitial = ?, HuileInitial = ?
+            SET
+                FarineInitial = ?,
+                LevureInitial = ?,
+                SelInitial = ?,
+                HuileInitial = ?,
+                FarineAlerteMin = ?,
+                LevureAlerteMin = ?,
+                SelAlerteMin = ?,
+                HuileAlerteMin = ?
             WHERE Id = 1
             """,
-            (farine, levure, sel, huile),
+            (
+                farine,
+                levure,
+                sel,
+                huile,
+                farine_alert,
+                levure_alert,
+                sel_alert,
+                huile_alert,
+            ),
         )
+
+    @classmethod
+    def get_low_stock_alerts(cls) -> list[dict[str, Any]]:
+        configuration = cls.get_stock_configuration()
+        summary = cls.get_stock_summary()
+        if not configuration or not summary:
+            return []
+
+        definitions = [
+            ("Farine", "sacs", "FarineInitial", "FarineAlerteMin", "FarineRestante"),
+            ("Levure", "paquets", "LevureInitial", "LevureAlerteMin", "LevureRestante"),
+            ("Sel", "kg", "SelInitial", "SelAlerteMin", "SelRestant"),
+            ("Huile", "litres", "HuileInitial", "HuileAlerteMin", "HuileRestante"),
+        ]
+        alerts: list[dict[str, Any]] = []
+        for article, unite, initial_key, threshold_key, remaining_key in definitions:
+            initial_value = float(configuration.get(initial_key, 0) or 0)
+            threshold_value = float(configuration.get(threshold_key, 0) or 0)
+            remaining_value = float(summary.get(remaining_key, 0) or 0)
+            if remaining_value > threshold_value:
+                continue
+            alerts.append(
+                {
+                    "Article": article,
+                    "Unite": unite,
+                    "StockInitial": initial_value,
+                    "SeuilAlerte": threshold_value,
+                    "StockRestant": remaining_value,
+                    "Niveau": "critique" if remaining_value <= max(threshold_value * 0.5, 0) else "attention",
+                }
+            )
+        return alerts
 
     @classmethod
     def get_stock_summary(cls, exclude_exit_id: int = 0) -> dict[str, Any]:
@@ -1347,6 +1462,25 @@ class DatabaseHelper:
         return int(cls._fetch_value("SELECT COUNT(*) FROM Commandes WHERE Dette > 0"))
 
     @classmethod
+    def get_debt_alerts(cls, limit: int = 10) -> list[dict[str, Any]]:
+        row_limit = max(int(limit), 1)
+        return cls._fetch_all(
+            f"""
+            SELECT
+                TRIM(Client) AS Client,
+                COUNT(*) AS NombreCommandes,
+                IFNULL(SUM(NombreBacs), 0) AS TotalBacs,
+                IFNULL(SUM(Dette), 0) AS DetteTotale,
+                MAX(DateCommande) AS DerniereCommande
+            FROM Commandes
+            WHERE IFNULL(Dette, 0) > 0
+            GROUP BY UPPER(TRIM(Client))
+            ORDER BY DetteTotale DESC, DerniereCommande DESC, Client ASC
+            LIMIT {row_limit}
+            """
+        )
+
+    @classmethod
     def update_order(
         cls,
         order_id: int,
@@ -1595,6 +1729,76 @@ class DatabaseHelper:
     def get_total_commissions(cls) -> float:
         value = cls._fetch_value("SELECT IFNULL(SUM(Commissions), 0) FROM Commissions")
         return float(value or 0)
+
+    @classmethod
+    def log_activity(
+        cls,
+        identifiant: str,
+        full_name: str,
+        role: str,
+        module: str,
+        action: str,
+        details: str = "",
+    ) -> None:
+        normalized_identifiant = identifiant.strip()
+        normalized_module = module.strip()
+        normalized_action = action.strip()
+        if not normalized_identifiant or not normalized_module or not normalized_action:
+            return
+
+        cls._execute(
+            """
+            INSERT INTO HistoriqueActions
+                (DateAction, Identifiant, NomComplet, Role, Module, Action, Details)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now().isoformat(timespec="seconds"),
+                normalized_identifiant,
+                full_name.strip() or normalized_identifiant,
+                role.strip(),
+                normalized_module,
+                normalized_action,
+                details.strip(),
+            ),
+        )
+
+    @classmethod
+    def list_activity_logs(
+        cls,
+        limit: int = 300,
+        identifiant: str = "",
+        role: str = "",
+    ) -> list[dict[str, Any]]:
+        row_limit = max(int(limit), 1)
+        sql = """
+            SELECT
+                Id,
+                DateAction,
+                Identifiant,
+                NomComplet,
+                Role,
+                Module,
+                Action,
+                Details
+            FROM HistoriqueActions
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        normalized_identifiant = identifiant.strip()
+        if normalized_identifiant:
+            sql += " AND UPPER(Identifiant) LIKE UPPER(?)"
+            params.append(f"%{normalized_identifiant}%")
+        normalized_role = role.strip()
+        if normalized_role:
+            sql += " AND Role = ?"
+            params.append(normalized_role)
+        sql += f" ORDER BY DateAction DESC, Id DESC LIMIT {row_limit}"
+        return cls._fetch_all(sql, tuple(params))
+
+    @classmethod
+    def get_recent_activity_summary(cls, limit: int = 8) -> list[dict[str, Any]]:
+        return cls.list_activity_logs(limit=limit)
 
     @classmethod
     def _fetch_all(
