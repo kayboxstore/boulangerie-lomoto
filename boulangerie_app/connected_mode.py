@@ -3,17 +3,20 @@ from __future__ import annotations
 import json
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime
+from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
 REMOTE_DEFAULT_PORT = 8765
 REMOTE_DISCOVERY_PORT = 8766
-REMOTE_DISCOVERY_TIMEOUT_SECONDS = 1.8
+REMOTE_DISCOVERY_TIMEOUT_SECONDS = 3.0
 REMOTE_REFRESH_INTERVAL_MS = 5000
 CONNECTION_CONFIG_FILENAME = "connection_settings.json"
 DISCOVERY_APP_ID = "boulangerie-lomoto-sync"
@@ -117,6 +120,23 @@ class ConnectionSettings:
         url = self.server_url.strip().rstrip("/")
         if url and not url.startswith(("http://", "https://")):
             url = f"http://{url}"
+        if url:
+            parsed = urlsplit(url)
+            try:
+                parsed_port = parsed.port
+            except ValueError:
+                parsed_port = None
+            if parsed.scheme in {"http", "https"} and parsed.hostname and parsed_port is None:
+                host = parsed.hostname
+                if ":" in host and not host.startswith("["):
+                    host = f"[{host}]"
+                netloc = f"{host}:{REMOTE_DEFAULT_PORT}"
+                if parsed.username:
+                    credentials = parsed.username
+                    if parsed.password:
+                        credentials += f":{parsed.password}"
+                    netloc = f"{credentials}@{netloc}"
+                url = urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
         return url
 
     def is_remote(self) -> bool:
@@ -164,6 +184,108 @@ def save_connection_settings(app_data_dir: Path, settings: ConnectionSettings) -
     return config_path
 
 
+def _local_ipv4_addresses() -> list[str]:
+    discovered: list[str] = []
+
+    try:
+        host_name = socket.gethostname()
+        discovered.extend(socket.gethostbyname_ex(host_name)[2])
+    except OSError:
+        pass
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            discovered.append(sock.getsockname()[0])
+    except OSError:
+        pass
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for ip_address in discovered:
+        ip_text = str(ip_address or "").strip()
+        if not ip_text or ip_text.startswith(("127.", "169.254.")):
+            continue
+        try:
+            IPv4Address(ip_text)
+        except ValueError:
+            continue
+        if ip_text not in seen:
+            seen.add(ip_text)
+            unique.append(ip_text)
+    return unique
+
+
+def _discovery_targets(discovery_port: int) -> list[tuple[str, int]]:
+    targets: list[tuple[str, int]] = [
+        ("255.255.255.255", discovery_port),
+        ("127.0.0.1", discovery_port),
+    ]
+    seen = {target[0] for target in targets}
+
+    for local_ip in _local_ipv4_addresses():
+        parts = local_ip.split(".")
+        if len(parts) != 4:
+            continue
+        subnet_broadcast = ".".join([parts[0], parts[1], parts[2], "255"])
+        if subnet_broadcast not in seen:
+            seen.add(subnet_broadcast)
+            targets.append((subnet_broadcast, discovery_port))
+        try:
+            network = IPv4Network(f"{local_ip}/24", strict=False)
+        except ValueError:
+            continue
+        for host in network.hosts():
+            host_text = str(host)
+            if host_text == local_ip or host_text in seen:
+                continue
+            seen.add(host_text)
+            targets.append((host_text, discovery_port))
+    return targets
+
+
+def _health_probe_server(ip_address: str, server_port: int) -> DiscoveredServerInfo | None:
+    server_url = f"http://{ip_address}:{server_port}"
+    request = Request(f"{server_url}/health", headers={"Accept": "application/json"}, method="GET")
+    try:
+        with urlopen(request, timeout=0.45) as response:
+            payload = json.loads(response.read().decode("utf-8-sig"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or not payload.get("ok", False):
+        return None
+    if str(payload.get("app_name", "")).strip() not in {"", "Boulangerie Lomoto"}:
+        return None
+    detected_port = int(payload.get("server_port", server_port) or server_port)
+    return DiscoveredServerInfo(
+        server_url=f"http://{ip_address}:{detected_port}",
+        server_name=str(payload.get("server_name") or ip_address),
+        app_version=str(payload.get("app_version", "")),
+        token_required=bool(payload.get("token_required", False)),
+        raw_address=ip_address,
+    )
+
+
+def _merge_discovered_server(
+    discovered: dict[tuple[str, int], DiscoveredServerInfo],
+    discovered_info: DiscoveredServerInfo,
+) -> None:
+    try:
+        server_port = int(urlsplit(discovered_info.server_url).port or REMOTE_DEFAULT_PORT)
+    except ValueError:
+        server_port = REMOTE_DEFAULT_PORT
+    discovered_key = (discovered_info.server_name.lower(), server_port)
+    existing_info = discovered.get(discovered_key)
+    if existing_info is None:
+        discovered[discovered_key] = discovered_info
+        return
+
+    existing_is_loopback = existing_info.raw_address.startswith("127.")
+    current_is_loopback = discovered_info.raw_address.startswith("127.")
+    if existing_is_loopback and not current_is_loopback:
+        discovered[discovered_key] = discovered_info
+
+
 def discover_remote_servers(
     timeout_seconds: float = REMOTE_DISCOVERY_TIMEOUT_SECONDS,
     discovery_port: int = REMOTE_DISCOVERY_PORT,
@@ -185,7 +307,7 @@ def discover_remote_servers(
             sock.settimeout(0.35)
             sock.bind(("", 0))
 
-            for target in (("255.255.255.255", discovery_port), ("127.0.0.1", discovery_port)):
+            for target in _discovery_targets(discovery_port):
                 try:
                     sock.sendto(request_payload, target)
                 except OSError:
@@ -225,18 +347,38 @@ def discover_remote_servers(
                     token_required=bool(payload.get("token_required", False)),
                     raw_address=source_ip,
                 )
-                discovered_key = (server_name.lower(), server_port)
-                existing_info = discovered.get(discovered_key)
-                if existing_info is None:
-                    discovered[discovered_key] = discovered_info
-                    continue
-
-                existing_is_loopback = existing_info.raw_address.startswith("127.")
-                current_is_loopback = discovered_info.raw_address.startswith("127.")
-                if existing_is_loopback and not current_is_loopback:
-                    discovered[discovered_key] = discovered_info
+                _merge_discovered_server(discovered, discovered_info)
     except OSError:
-        return []
+        pass
+
+    if not discovered:
+        candidates = ["127.0.0.1"]
+        seen_candidates = set(candidates)
+        for local_ip in _local_ipv4_addresses():
+            try:
+                network = IPv4Network(f"{local_ip}/24", strict=False)
+            except ValueError:
+                continue
+            for host in network.hosts():
+                host_text = str(host)
+                if host_text in seen_candidates:
+                    continue
+                seen_candidates.add(host_text)
+                candidates.append(host_text)
+
+        with ThreadPoolExecutor(max_workers=min(64, max(len(candidates), 1))) as executor:
+            future_map = {
+                executor.submit(_health_probe_server, candidate, REMOTE_DEFAULT_PORT): candidate
+                for candidate in candidates
+            }
+            for future in as_completed(future_map):
+                try:
+                    discovered_info = future.result()
+                except Exception:
+                    continue
+                if discovered_info is not None:
+                    _merge_discovered_server(discovered, discovered_info)
+                    break
 
     return sorted(discovered.values(), key=lambda item: (item.server_name.lower(), item.server_url.lower()))
 

@@ -61,18 +61,27 @@ def _database_helper():
 class SyncRequestHandler(BaseHTTPRequestHandler):
     server_version = f"{APP_NAME} Sync/{APP_VERSION}"
 
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(204)
+        self._send_common_headers(0)
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path.rstrip("/") != "/health":
             self._send_json(404, {"ok": False, "error": {"message": "Route introuvable."}})
             return
 
+        server_token = str(getattr(self.server, "api_token", "") or "")
         self._send_json(
             200,
             {
                 "ok": True,
                 "app_name": APP_NAME,
                 "app_version": APP_VERSION,
+                "server_name": socket.gethostname(),
                 "server_port": self.server.server_port,
+                "discovery_port": REMOTE_DISCOVERY_PORT,
+                "token_required": bool(server_token.strip()),
             },
         )
 
@@ -137,10 +146,18 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         self.send_response(status_code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+        self._send_common_headers(len(body))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_common_headers(self, content_length: int) -> None:
+        # Le mobile web et l'APK peuvent appeler directement le serveur central depuis le réseau local.
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(content_length))
 
 
 def list_local_server_urls(port: int) -> list[str]:
