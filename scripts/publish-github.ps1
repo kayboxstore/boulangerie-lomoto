@@ -135,7 +135,18 @@ function Build-ReleaseArtifacts {
         }
 
         Write-Host "Build PyInstaller du service Windows en cours..." -ForegroundColor Cyan
-        & $python -m PyInstaller --noconfirm --clean --console --onefile --name "Boulangerie Lomoto Service" --distpath ".\dist\Boulangerie Lomoto" --workpath $serviceWorkPath serveur_windows_service.py
+        & $python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --console `
+            --onefile `
+            --name "Boulangerie Lomoto Service" `
+            --distpath ".\dist\Boulangerie Lomoto" `
+            --workpath $serviceWorkPath `
+            --icon ".\boulangerie_app\assets\logo-boulangerie-lomoto.ico" `
+            --add-data ".\boulangerie_app\assets;boulangerie_app\assets" `
+            --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" `
+            serveur_windows_service.py
         if ($LASTEXITCODE -ne 0) {
             throw "Le build PyInstaller du service Windows a echoue."
         }
