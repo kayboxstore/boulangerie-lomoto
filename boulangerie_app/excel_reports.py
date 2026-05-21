@@ -48,6 +48,9 @@ SECTION_FONT = Font(name="Poppins", size=12, bold=True, color="1F3D5B")
 HEADER_FONT = Font(name="Poppins", size=11, bold=True, color="102840")
 BODY_FONT = Font(name="Poppins", size=11)
 NOTE_FONT = Font(name="Poppins", size=10, italic=True, color="505050")
+CASH_BOLD_FONT = Font(name="Poppins", size=11, bold=True)
+CASH_GREEN_FONT = Font(name="Poppins", size=11, bold=True, color="1E7D32")
+CASH_RED_FONT = Font(name="Poppins", size=11, bold=True, color=REPORT_RED.replace("#", ""))
 BRAND_NAME_FONT = Font(
     name="Poppins",
     size=REPORT_BRAND_NAME_SIZE,
@@ -140,7 +143,14 @@ def _add_sheet_watermark(sheet: Worksheet, anchor: str, width: int, height: int)
     sheet.add_image(image, anchor)
 
 
-def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, scope_description: str) -> int:
+def _apply_brand_header(
+    sheet: Worksheet,
+    target_date: date,
+    scope_label: str,
+    scope_description: str,
+    generated_by: str,
+    generated_role: str,
+) -> int:
     sheet.merge_cells("B1:G2")
     title_cell = sheet["B1"]
     title_cell.value = "BOULANGERIE LOMOTO"
@@ -169,6 +179,8 @@ def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, s
         7: 22,
         8: 22,
         9: 22,
+        10: 22,
+        11: 22,
     }.items():
         sheet.row_dimensions[row_index].height = row_height
 
@@ -183,10 +195,14 @@ def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, s
     sheet["B8"] = scope_description
     sheet["A9"] = "Généré le"
     sheet["B9"] = datetime.now().strftime("%d/%m/%Y à %H:%M")
+    sheet["A10"] = "Généré par"
+    sheet["B10"] = generated_by
+    sheet["A11"] = "Rôle du générateur"
+    sheet["B11"] = generated_role
 
-    for cell_ref in ("A6", "A7", "A8", "A9"):
+    for cell_ref in ("A6", "A7", "A8", "A9", "A10", "A11"):
         _apply_cell_style(sheet[cell_ref], bold=True, fill=SECTION_FILL, alignment=Alignment(horizontal="left"))
-    for cell_ref in ("B6", "B7", "B8", "B9"):
+    for cell_ref in ("B6", "B7", "B8", "B9", "B10", "B11"):
         _apply_cell_style(sheet[cell_ref], alignment=Alignment(horizontal="left", wrap_text=True))
 
     sheet.column_dimensions["A"].width = 16
@@ -196,10 +212,29 @@ def _apply_brand_header(sheet: Worksheet, target_date: date, scope_label: str, s
     sheet.column_dimensions["H"].width = 18
     sheet.column_dimensions["I"].width = 10
 
-    return 11
+    return 13
 
 
-def _build_report_context(target_date: date, role: str) -> dict[str, Any]:
+def _apply_cash_emphasis(sheet: Worksheet, row_index: int, label: str, end_column: int = 2) -> None:
+    if label in {"Montant reçu", "Dettes payées aujourd'hui", "Total des entrées"}:
+        font = CASH_BOLD_FONT
+    elif label == "Dépenses":
+        font = CASH_GREEN_FONT
+    elif label == "Solde du jour":
+        font = CASH_RED_FONT
+    else:
+        return
+
+    for col_index in range(1, end_column + 1):
+        sheet.cell(row_index, col_index).font = font
+
+
+def _build_report_context(
+    target_date: date,
+    role: str,
+    generated_by: str = "",
+    generated_role: str | None = None,
+) -> dict[str, Any]:
     DatabaseHelper.initialize_database()
 
     normalized_role = normalize_role(role)
@@ -222,6 +257,8 @@ def _build_report_context(target_date: date, role: str) -> dict[str, Any]:
         "allowed_sections": allowed_sections,
         "scope_label": scope_label,
         "scope_description": scope_description,
+        "generated_by": generated_by.strip() or "Utilisateur non identifié",
+        "generated_role": (generated_role or normalized_role).strip() or normalized_role,
         "stock_journal": stock_journal,
         "stock_exits": stock_exits,
         "orders": orders,
@@ -259,6 +296,8 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         context["target_date"],
         context["scope_label"],
         context["scope_description"],
+        context["generated_by"],
+        context["generated_role"],
     )
     sheet.cell(start_row, 1, "Indicateur")
     sheet.cell(start_row, 2, "Valeur")
@@ -316,6 +355,7 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         _apply_cell_style(sheet.cell(row_index, 3), alignment=Alignment(horizontal="left"))
         if kind == "monnaie":
             value_cell.number_format = MONEY_FORMAT
+        _apply_cash_emphasis(sheet, row_index, label, end_column=2)
 
     end_row = start_row + len(rows)
     _add_table(sheet, start_row, end_row, 3, "ResumeJournalier")
@@ -499,6 +539,7 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         sheet.cell(current_row, 2, value)
         _apply_cell_style(sheet.cell(current_row, 1), alignment=Alignment(horizontal="left"))
         _apply_cell_style(sheet.cell(current_row, 2), alignment=Alignment(horizontal="left"), number_format=MONEY_FORMAT)
+        _apply_cash_emphasis(sheet, current_row, label, end_column=2)
     _add_table(sheet, 4, current_row, 2, "CaisseJour")
 
     current_row += 3
@@ -556,6 +597,21 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         paid_note_cell = sheet.cell(current_row, 1, note)
         _apply_cell_style(paid_note_cell, alignment=Alignment(horizontal="left", vertical="top", wrap_text=True), font=NOTE_FONT)
         current_row += 1
+
+    current_row += 3
+    sheet.cell(current_row, 1, "NB")
+    _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
+    current_row += 1
+    recap_text = (
+        f"Les entrées du jour correspondent au montant reçu ({context['total_received']:,.0f} FC) "
+        f"additionné aux dettes payées aujourd'hui ({context['paid_debts_today']:,.0f} FC), "
+        f"soit un total des entrées de {context['total_entries']:,.0f} FC. "
+        f"Les sorties du jour correspondent aux dépenses enregistrées, soit {context['total_expenses']:,.0f} FC. "
+        f"Le solde du jour ressort donc à {context['balance']:,.0f} FC."
+    ).replace(",", " ")
+    sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 2, end_column=5)
+    recap_cell = sheet.cell(current_row, 1, recap_text)
+    _apply_cell_style(recap_cell, alignment=Alignment(horizontal="left", vertical="top", wrap_text=True))
 
     _autofit_columns(sheet)
     sheet.column_dimensions["D"].width = 18
@@ -624,6 +680,8 @@ def create_daily_excel_report(
     target_date: date,
     destination: str | Path | None = None,
     role: str = "Admin",
+    generated_by: str = "",
+    generated_role: str | None = None,
 ) -> Path:
     report_path = Path(destination) if destination is not None else DatabaseHelper.build_report_path(
         f"rapport-excel-journalier-{target_date.strftime('%Y%m%d')}"
@@ -632,7 +690,7 @@ def create_daily_excel_report(
         report_path = report_path.with_suffix(".xlsx")
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
-    context = _build_report_context(target_date, role)
+    context = _build_report_context(target_date, role, generated_by=generated_by, generated_role=generated_role)
     workbook = Workbook()
 
     try:

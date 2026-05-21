@@ -11,7 +11,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
-from reportlab.platypus import Flowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Flowable, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .database import DatabaseHelper
 from .report_branding import (
@@ -120,6 +120,23 @@ def parse_named_amount_lines(text: str) -> list[tuple[str, str]]:
         if not matched:
             rows.append((line, ""))
     return rows
+
+
+def _cash_highlight_table_styles(rows: list[list[Any]]) -> list[tuple[Any, ...]]:
+    styles: list[tuple[Any, ...]] = []
+    for row_index, row in enumerate(rows):
+        if row_index == 0 or not row:
+            continue
+        label = str(row[0]).strip()
+        if label in {"Montant reçu", "Dettes payées aujourd'hui", "Total des entrées"}:
+            styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
+        elif label == "Dépenses":
+            styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
+            styles.append(("TEXTCOLOR", (0, row_index), (-1, row_index), colors.HexColor("#1E7D32")))
+        elif label == "Solde du jour":
+            styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
+            styles.append(("TEXTCOLOR", (0, row_index), (-1, row_index), colors.HexColor(REPORT_RED)))
+    return styles
 
 
 def _build_styles() -> dict[str, ParagraphStyle]:
@@ -273,28 +290,31 @@ class ReportHeader(Flowable):
         canvas.restoreState()
 
 
-def _make_table(rows: list[list[Any]], column_widths: list[float] | None = None) -> Table:
+def _make_table(
+    rows: list[list[Any]],
+    column_widths: list[float] | None = None,
+    extra_styles: list[tuple[Any, ...]] | None = None,
+) -> Table:
     table = Table(rows, colWidths=column_widths, repeatRows=1)
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE8F4")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(REPORT_NAVY)),
-                ("FONTNAME", (0, 0), (-1, 0), PDF_FONT_BOLD),
-                ("FONTNAME", (0, 1), (-1, -1), PDF_FONT_REGULAR),
-                ("FONTSIZE", (0, 0), (-1, -1), 9.5),
-                ("LEADING", (0, 0), (-1, -1), 11.5),
-                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#AEBFD0")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7FAFC")]),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ]
-        )
-    )
+    table_styles: list[tuple[Any, ...]] = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE8F4")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(REPORT_NAVY)),
+        ("FONTNAME", (0, 0), (-1, 0), PDF_FONT_BOLD),
+        ("FONTNAME", (0, 1), (-1, -1), PDF_FONT_REGULAR),
+        ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+        ("LEADING", (0, 0), (-1, -1), 11.5),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#AEBFD0")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7FAFC")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]
+    if extra_styles:
+        table_styles.extend(extra_styles)
+    table.setStyle(TableStyle(table_styles))
     return table
 
 
@@ -334,6 +354,8 @@ def create_daily_pdf_report(
     target_date: date,
     destination: str | Path | None = None,
     role: str = "Admin",
+    generated_by: str = "",
+    generated_role: str | None = None,
 ) -> Path:
     DatabaseHelper.initialize_database()
     register_pdf_fonts()
@@ -349,6 +371,8 @@ def create_daily_pdf_report(
     allowed_sections = get_report_sections_for_role(normalized_role)
     scope_label = get_report_scope_label(normalized_role)
     scope_description = get_report_scope_description(normalized_role)
+    generator_name = generated_by.strip() or "Utilisateur non identifié"
+    generator_role = (generated_role or normalized_role).strip() or normalized_role
 
     stock_journal = DatabaseHelper.get_stock_journal(target_date)
     stock_exits = DatabaseHelper.list_stock_exits_by_date(target_date)
@@ -387,6 +411,7 @@ def create_daily_pdf_report(
         Spacer(1, 3 * mm),
         _paragraph(f"Profil du rapport : {scope_label}", styles["meta"]),
         _paragraph(scope_description, styles["note"]),
+        _paragraph(f"Généré par : {generator_name} ({generator_role})", styles["meta"]),
         _paragraph(
             f"Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}.",
             styles["note"],
@@ -428,11 +453,11 @@ def create_daily_pdf_report(
                 ["Net commissions", _format_fc(total_net_commissions)],
             ]
         )
-    elements.append(_make_table(overview_rows, [72 * mm, 88 * mm]))
+    elements.append(_make_table(overview_rows, [72 * mm, 88 * mm], extra_styles=_cash_highlight_table_styles(overview_rows)))
     elements.append(Spacer(1, 6 * mm))
 
     if "stock" in allowed_sections:
-        elements.append(_paragraph("Stock du jour", styles["section"]))
+        stock_intro: list[Any] = [_paragraph("Stock du jour", styles["section"])]
         if stock_journal:
             stock_rows = [
                 ["Mouvement", "Farine", "Levure", "Sel", "Huile"],
@@ -451,9 +476,10 @@ def create_daily_pdf_report(
                     _format_number(float(stock_journal.get("HuileCloture", 0) or 0)),
                 ],
             ]
-            elements.append(_make_table(stock_rows, [36 * mm, 31 * mm, 31 * mm, 31 * mm, 31 * mm]))
+            stock_intro.append(_make_table(stock_rows, [36 * mm, 31 * mm, 31 * mm, 31 * mm, 31 * mm]))
         else:
-            elements.append(_paragraph("Aucun journal de stock disponible pour cette date.", styles["body"]))
+            stock_intro.append(_paragraph("Aucun journal de stock disponible pour cette date.", styles["body"]))
+        elements.append(KeepTogether(stock_intro))
 
         if stock_exits:
             elements.append(Spacer(1, 4 * mm))
@@ -475,7 +501,7 @@ def create_daily_pdf_report(
         elements.append(Spacer(1, 6 * mm))
 
     if "orders" in allowed_sections:
-        elements.append(_paragraph("Commandes", styles["section"]))
+        order_section: list[Any] = [_paragraph("Commandes", styles["section"])]
         if orders:
             order_rows: list[list[Any]] = [["Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]]
             for row in orders:
@@ -489,15 +515,15 @@ def create_daily_pdf_report(
                         _format_fc(float(row.get("Dette", 0) or 0)),
                     ]
                 )
-            elements.append(
+            order_section.append(
                 _make_table(order_rows, [42 * mm, 34 * mm, 16 * mm, 30 * mm, 28 * mm, 24 * mm])
             )
         else:
-            elements.append(_paragraph("Aucune commande enregistrée pour cette date.", styles["body"]))
+            order_section.append(_paragraph("Aucune commande enregistrée pour cette date.", styles["body"]))
+        elements.append(KeepTogether(order_section))
         elements.append(Spacer(1, 6 * mm))
 
     if "cash" in allowed_sections:
-        elements.append(_paragraph("Caisse", styles["section"]))
         cash_rows = [
             ["Champ", "Valeur"],
             ["Montant attendu", _format_fc(total_expected)],
@@ -508,7 +534,8 @@ def create_daily_pdf_report(
             ["Dépenses", _format_fc(total_expenses)],
             ["Solde du jour", _format_fc(balance)],
         ]
-        elements.append(_make_table(cash_rows, [72 * mm, 88 * mm]))
+        cash_table = _make_table(cash_rows, [72 * mm, 88 * mm], extra_styles=_cash_highlight_table_styles(cash_rows))
+        elements.append(KeepTogether([_paragraph("Caisse", styles["section"]), cash_table]))
         if expense_items:
             elements.append(Spacer(1, 3 * mm))
             elements.append(_paragraph("Liste des dépenses", styles["subsection"]))
@@ -537,7 +564,7 @@ def create_daily_pdf_report(
         elements.append(Spacer(1, 6 * mm))
 
     if "commissions" in allowed_sections:
-        elements.append(_paragraph("Commissions", styles["section"]))
+        commission_section: list[Any] = [_paragraph("Commissions", styles["section"])]
         if commissions:
             commission_rows: list[list[Any]] = [["Nom", "Statut", "Bacs", "Payé", "Commission", "Dette", "Net"]]
             for row in commissions:
@@ -552,14 +579,32 @@ def create_daily_pdf_report(
                         _format_fc(float(row.get("NetAPayer", 0) or 0)),
                     ]
                 )
-            elements.append(
+            commission_section.append(
                 _make_table(
                     commission_rows,
                     [34 * mm, 30 * mm, 14 * mm, 24 * mm, 26 * mm, 22 * mm, 20 * mm],
                 )
             )
         else:
-            elements.append(_paragraph("Aucune commission enregistrée pour cette date.", styles["body"]))
+            commission_section.append(_paragraph("Aucune commission enregistrée pour cette date.", styles["body"]))
+        elements.append(KeepTogether(commission_section))
+
+    elements.append(Spacer(1, 6 * mm))
+    elements.append(_paragraph("NB", styles["section"]))
+    if "cash" in allowed_sections:
+        recap_text = (
+            f"Les entrées du jour correspondent au montant reçu ({_format_fc(total_received)}) "
+            f"additionné aux dettes payées aujourd'hui ({_format_fc(paid_debts_today)}), "
+            f"soit un total des entrées de {_format_fc(total_entries)}. "
+            f"Les sorties du jour correspondent aux dépenses enregistrées, soit {_format_fc(total_expenses)}. "
+            f"Le solde du jour ressort donc à {_format_fc(balance)}."
+        )
+    else:
+        recap_text = (
+            f"Ce rapport a été généré par {generator_name} ({generator_role}) "
+            f"et reprend uniquement les rubriques autorisées pour le profil {scope_label}."
+        )
+    elements.append(_paragraph(recap_text, styles["body"]))
 
     try:
         doc.build(

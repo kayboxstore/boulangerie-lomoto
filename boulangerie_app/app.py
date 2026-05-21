@@ -313,6 +313,13 @@ def format_file_size(value: int | float) -> str:
     return f"{size:.1f} {units[unit_index]}"
 
 
+def compact_multiline_text(value: Any) -> str:
+    if value is None:
+        return ""
+    parts = [line.strip() for line in str(value).splitlines() if line.strip()]
+    return " | ".join(parts)
+
+
 def _measure_window_size(window: tk.Misc) -> tuple[int, int]:
     width = window.winfo_width()
     height = window.winfo_height()
@@ -2405,7 +2412,13 @@ class PdfReportWindow(BaseModuleWindow):
             return
 
         try:
-            report_path = create_daily_pdf_report(target_date, destination, role=self.role)
+            report_path = create_daily_pdf_report(
+                target_date,
+                destination,
+                role=self.role,
+                generated_by=self.parent.user.display_name,
+                generated_role=self.role,
+            )
         except ReportGenerationError as exc:
             self.message_var.set(str(exc))
             return
@@ -2516,7 +2529,13 @@ class ExcelReportWindow(BaseModuleWindow):
             return
 
         try:
-            report_path = create_daily_excel_report(target_date, destination, role=self.role)
+            report_path = create_daily_excel_report(
+                target_date,
+                destination,
+                role=self.role,
+                generated_by=self.parent.user.display_name,
+                generated_role=self.role,
+            )
         except ReportGenerationError as exc:
             self.message_var.set(str(exc))
             return
@@ -3738,7 +3757,7 @@ class CashWindow(BaseModuleWindow):
                 "DepensesEffectuees": "Détails des dépenses",
                 "DettesPayeesDetails": "Ceux qui ont payé",
             },
-            hidden_columns=["Id", "DettesPayeesDetails"],
+            hidden_columns=["Id"],
             formatters={
                 "NombreTotalBacs": lambda value: f"{int(value)}",
                 "MontantAttendu": lambda value: format_fc(float(value)),
@@ -3748,8 +3767,12 @@ class CashWindow(BaseModuleWindow):
                 "TotalEntrees": lambda value: format_fc(float(value)),
                 "MontantTotalDepenses": lambda value: format_fc(float(value)),
                 "Solde": lambda value: format_fc(float(value)),
+                "DepensesEffectuees": compact_multiline_text,
+                "DettesPayeesDetails": compact_multiline_text,
             },
         )
+        self.table.tree.column("DepensesEffectuees", width=260, stretch=True)
+        self.table.tree.column("DettesPayeesDetails", width=280, stretch=True)
         self.update_summary(len(rows))
 
     def refresh_live_view(self) -> None:
