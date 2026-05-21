@@ -1444,6 +1444,12 @@ class ConnectionSettingsDialog(tk.Toplevel):
             )
             return
         try:
+            service_status = get_windows_service_status()
+            if service_status.installed and service_status.is_running:
+                message = start_windows_service()
+                self.refresh_windows_service_status()
+                self.message_var.set(message)
+                return
             install_or_update_windows_service(
                 self.current_server_host_settings(),
                 source_data_dir=DatabaseHelper.app_data_dir,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import locale
 import os
 import shutil
 import subprocess
@@ -215,11 +216,12 @@ def relaunch_current_process_as_administrator() -> bool:
 
 
 def _run_text_command(command: Sequence[str], timeout_seconds: int = 90) -> subprocess.CompletedProcess[str]:
+    preferred_encoding = "mbcs" if os.name == "nt" else locale.getpreferredencoding(False) or "utf-8"
     return subprocess.run(
         list(command),
         capture_output=True,
         text=True,
-        encoding="utf-8",
+        encoding=preferred_encoding,
         errors="replace",
         timeout=timeout_seconds,
     )
@@ -340,11 +342,24 @@ def install_or_update_windows_service(settings: CentralServerSettings, source_da
 
 def start_windows_service(wait_seconds: int = 30) -> str:
     firewall_message = ensure_windows_firewall_rules()
+    status_before_start = get_windows_service_status()
+    if status_before_start.installed and status_before_start.is_running:
+        return (
+            "Le service Windows est déjà actif. Aucun nouveau démarrage n'est nécessaire.\n"
+            f"{firewall_message}"
+        )
+
     result = _run_text_command(
         [*get_service_management_command_prefix(), "--wait", str(wait_seconds), "start"],
         timeout_seconds=max(wait_seconds + 20, 60),
     )
     if result.returncode != 0:
+        status_after_error = get_windows_service_status()
+        if status_after_error.installed and status_after_error.is_running:
+            return (
+                "Le service Windows est déjà actif. Le serveur central fonctionne déjà.\n"
+                f"{firewall_message}"
+            )
         raise RuntimeError(_format_command_error(result, "Impossible de démarrer le service Windows."))
     service_message = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip()) or (
         "Le service Windows a démarré."
