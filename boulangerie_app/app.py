@@ -8,7 +8,7 @@ from queue import Empty, Queue
 import tkinter as tk
 import webbrowser
 from datetime import date, datetime
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable
 
@@ -1793,6 +1793,7 @@ class DashboardWindow(tk.Toplevel):
         self.stock_alerts_var = tk.StringVar(value="Chargement des alertes de stock...")
         self.debt_alerts_var = tk.StringVar(value="Chargement des alertes de dettes...")
         self.recent_activity_var = tk.StringVar(value="Chargement de l'historique...")
+        self.closure_status_var = tk.StringVar(value="Chargement du statut de clôture...")
         self.title(f"{APP_NAME} - Tableau de bord - v{APP_VERSION}")
         self.geometry("1180x760")
         self.minsize(980, 640)
@@ -1911,6 +1912,47 @@ class DashboardWindow(tk.Toplevel):
                 text="Ouvrir l'historique complet",
                 command=self.open_activity_history,
             ).pack(anchor="center")
+
+            closure_frame = ttk.LabelFrame(container, text="Clôture journalière", style="Card.TLabelframe")
+            closure_frame.pack(fill="x", pady=(0, 18))
+            ttk.Label(
+                closure_frame,
+                text=(
+                    "Clôturez une journée pour figer les écritures, générer un rapport signé "
+                    "et créer automatiquement une sauvegarde de sécurité."
+                ),
+                wraplength=760,
+                justify="center",
+            ).pack(fill="x", pady=(0, 10))
+            closure_date_row = ttk.Frame(closure_frame)
+            closure_date_row.pack(anchor="center", pady=(0, 10))
+            ttk.Label(closure_date_row, text="Date à clôturer").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            self.closure_date_field = DateField(closure_date_row, today_iso())
+            self.closure_date_field.grid(row=0, column=1, sticky="ew")
+            self.closure_date_field.bind_change(self.refresh_closure_status)
+            closure_buttons = ttk.Frame(closure_frame)
+            closure_buttons.pack(anchor="center", pady=(0, 10))
+            ttk.Button(
+                closure_buttons,
+                text="Clôturer la journée",
+                command=self.close_selected_day,
+            ).grid(row=0, column=0, padx=6, pady=4)
+            ttk.Button(
+                closure_buttons,
+                text="Réouvrir la journée",
+                command=self.reopen_selected_day,
+            ).grid(row=0, column=1, padx=6, pady=4)
+            ttk.Button(
+                closure_buttons,
+                text="Historique des clôtures",
+                command=self.open_closure_history,
+            ).grid(row=0, column=2, padx=6, pady=4)
+            ttk.Label(
+                closure_frame,
+                textvariable=self.closure_status_var,
+                wraplength=760,
+                justify="left",
+            ).pack(fill="x")
 
         self.security_message_var = tk.StringVar(value="")
         security_frame = ttk.LabelFrame(container, text="Sécurité du compte", style="Card.TLabelframe")
@@ -2057,6 +2099,7 @@ class DashboardWindow(tk.Toplevel):
         self.refresh_metric_cards()
         self.refresh_alerts()
         self.refresh_recent_activity()
+        self.refresh_closure_status()
 
     def build_dashboard_summary(self) -> str:
         role = self.user.role
@@ -2233,6 +2276,157 @@ class DashboardWindow(tk.Toplevel):
                 f"{format_activity_timestamp(row.get('DateAction'))} | {row.get('NomComplet')} | {row.get('Module')} | {row.get('Action')}"
             )
         self.recent_activity_var.set("\n".join(lines))
+
+    def refresh_closure_status(self) -> None:
+        if self.user.role != "Admin":
+            return
+        date_field = getattr(self, "closure_date_field", None)
+        if date_field is None:
+            return
+        try:
+            target_date = date_field.get_date()
+        except ValueError as exc:
+            self.closure_status_var.set(str(exc))
+            return
+
+        try:
+            closure = DatabaseHelper.get_day_closure(target_date)
+        except Exception:
+            self.closure_status_var.set("Statut de clôture indisponible pour le moment.")
+            return
+
+        if not closure:
+            self.closure_status_var.set(
+                f"Journée du {target_date.strftime('%d/%m/%Y')} ouverte. "
+                "Vous pouvez encore modifier les écritures."
+            )
+            return
+
+        lines = [
+            f"Statut : {closure.get('StatutAffichage', 'Clôturée')}",
+            (
+                f"Clôturée le {format_activity_timestamp(closure.get('DateCloture'))} "
+                f"par {closure.get('NomComplet') or closure.get('Identifiant')}"
+            ),
+        ]
+        report_path = str(closure.get("CheminRapport", "") or "").strip()
+        backup_path = str(closure.get("CheminSauvegarde", "") or "").strip()
+        if report_path:
+            lines.append(f"Rapport : {report_path}")
+        if backup_path:
+            lines.append(f"Sauvegarde : {backup_path}")
+        if bool(closure.get("EstReouverte", False)):
+            reopen_actor = closure.get("ReouvertParNomComplet") or closure.get("ReouvertParIdentifiant") or "Admin"
+            lines.append(
+                f"Réouverte le {format_activity_timestamp(closure.get('DateReouverture'))} par {reopen_actor}"
+            )
+            reopen_reason = str(closure.get("MotifReouverture", "") or "").strip()
+            if reopen_reason:
+                lines.append(f"Motif : {reopen_reason}")
+        self.closure_status_var.set("\n".join(lines))
+
+    def close_selected_day(self) -> None:
+        if self.user.role != "Admin":
+            messagebox.showwarning("Clôture journalière", "Accès non autorisé.")
+            return
+        date_field = getattr(self, "closure_date_field", None)
+        if date_field is None:
+            return
+        try:
+            target_date = date_field.get_date()
+        except ValueError as exc:
+            messagebox.showwarning("Clôture journalière", str(exc))
+            return
+
+        if not messagebox.askyesno(
+            "Clôture journalière",
+            (
+                f"Voulez-vous clôturer la journée du {target_date.strftime('%d/%m/%Y')} ?\n\n"
+                "Cette opération va figer les écritures, générer un rapport signé "
+                "et créer automatiquement une sauvegarde de sécurité."
+            ),
+        ):
+            return
+
+        try:
+            closure = DatabaseHelper.close_day(
+                target_date,
+                self.user.identifiant,
+                self.user.display_name,
+                self.user.role,
+            )
+        except ValueError as exc:
+            messagebox.showwarning("Clôture journalière", str(exc))
+            return
+        except Exception as exc:
+            messagebox.showerror("Clôture journalière", str(exc))
+            return
+
+        self.refresh_summary()
+        report_path = str(closure.get("CheminRapport", "") or "").strip()
+        backup_path = str(closure.get("CheminSauvegarde", "") or "").strip()
+        message = [f"La journée du {target_date.strftime('%d/%m/%Y')} a été clôturée avec succès."]
+        if report_path:
+            message.append(f"Rapport : {report_path}")
+        if backup_path:
+            message.append(f"Sauvegarde : {backup_path}")
+        message.append("")
+        message.append("Voulez-vous ouvrir le rapport de clôture ?")
+        if messagebox.askyesno("Clôture journalière", "\n".join(message)):
+            try:
+                open_file(report_path)
+            except Exception as exc:
+                messagebox.showerror("Clôture journalière", str(exc))
+
+    def reopen_selected_day(self) -> None:
+        if self.user.role != "Admin":
+            messagebox.showwarning("Clôture journalière", "Accès non autorisé.")
+            return
+        date_field = getattr(self, "closure_date_field", None)
+        if date_field is None:
+            return
+        try:
+            target_date = date_field.get_date()
+        except ValueError as exc:
+            messagebox.showwarning("Clôture journalière", str(exc))
+            return
+
+        reason = simpledialog.askstring(
+            "Réouverture d'une journée",
+            f"Motif de réouverture pour le {target_date.strftime('%d/%m/%Y')} :",
+            parent=self,
+        )
+        if reason is None:
+            return
+
+        try:
+            DatabaseHelper.reopen_day(
+                target_date,
+                self.user.identifiant,
+                self.user.display_name,
+                self.user.role,
+                reason,
+            )
+        except ValueError as exc:
+            messagebox.showwarning("Clôture journalière", str(exc))
+            return
+        except Exception as exc:
+            messagebox.showerror("Clôture journalière", str(exc))
+            return
+
+        self.refresh_summary()
+        messagebox.showinfo(
+            "Clôture journalière",
+            f"La journée du {target_date.strftime('%d/%m/%Y')} a été réouverte.",
+        )
+
+    def open_closure_history(self) -> None:
+        if self.user.role != "Admin":
+            messagebox.showwarning("Accès refusé", "Accès non autorisé.")
+            return
+        window = DayClosuresWindow(self)
+        self.wait_window(window)
+        self.refresh_summary()
 
     def refresh_security_notice(self) -> None:
         if DatabaseHelper.is_using_default_password(self.user.identifiant):
@@ -2546,6 +2740,150 @@ class BaseModuleWindow(tk.Toplevel):
 
     def refresh_live_view(self) -> None:
         return
+
+
+class DayClosuresWindow(BaseModuleWindow):
+    def __init__(self, parent: DashboardWindow) -> None:
+        super().__init__(parent, "Historique des clôtures journalières", "1160x620", start_maximized=False)
+        self.message_var = tk.StringVar(value="Chargement des clôtures...")
+        self.table = DataTable(self.body, height=12)
+        self.build_ui()
+        self.refresh_closures()
+
+    def build_ui(self) -> None:
+        container = self.body
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            container,
+            text=(
+                "Consultez les journées clôturées, les réouvertures effectuées, "
+                "ainsi que les chemins du rapport signé et de la sauvegarde automatique."
+            ),
+            wraplength=820,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+        self.table.grid(row=1, column=0, sticky="nsew")
+        self.table.tree.bind("<Double-1>", lambda _event: self.open_selected_report())
+
+        ttk.Label(
+            container,
+            textvariable=self.message_var,
+            wraplength=820,
+            justify="left",
+            foreground="#4b5563",
+        ).grid(row=2, column=0, sticky="ew", pady=(12, 10))
+
+        actions = ttk.Frame(container)
+        actions.grid(row=3, column=0, sticky="e")
+        ttk.Button(actions, text="Actualiser", command=self.refresh_closures).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(actions, text="Ouvrir le rapport", command=self.open_selected_report).grid(
+            row=0, column=1, padx=(0, 8)
+        )
+        ttk.Button(actions, text="Ouvrir le dossier de sauvegarde", command=self.open_selected_backup_folder).grid(
+            row=0, column=2, padx=(0, 8)
+        )
+        ttk.Button(actions, text="Copier les chemins", command=self.copy_selected_paths).grid(
+            row=0, column=3, padx=(0, 8)
+        )
+        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=4)
+
+    def refresh_closures(self) -> None:
+        try:
+            rows = DatabaseHelper.list_day_closures(limit=240)
+        except Exception as exc:
+            self.message_var.set(f"Impossible de charger l'historique des clôtures : {exc}")
+            self.table.set_data([], ["DateJour", "StatutAffichage", "DateCloture"])
+            return
+
+        self.table.set_data(
+            rows,
+            columns=[
+                "Id",
+                "DateJour",
+                "StatutAffichage",
+                "DateCloture",
+                "NomComplet",
+                "Role",
+                "DateReouverture",
+                "ReouvertParNomComplet",
+                "MotifReouverture",
+                "CheminRapport",
+                "CheminSauvegarde",
+            ],
+            headings={
+                "DateJour": "Jour",
+                "StatutAffichage": "Statut",
+                "DateCloture": "Date de clôture",
+                "NomComplet": "Clôturée par",
+                "Role": "Rôle",
+                "DateReouverture": "Date de réouverture",
+                "ReouvertParNomComplet": "Réouverte par",
+                "MotifReouverture": "Motif",
+                "CheminRapport": "Rapport",
+                "CheminSauvegarde": "Sauvegarde",
+            },
+            hidden_columns=["Id", "CheminRapport", "CheminSauvegarde"],
+            formatters={
+                "DateJour": lambda value: format_activity_timestamp(f"{value}T00:00:00")[:10]
+                if value
+                else "",
+                "DateCloture": format_activity_timestamp,
+                "DateReouverture": format_activity_timestamp,
+            },
+        )
+        if rows:
+            self.message_var.set(f"{len(rows)} journée(s) de clôture enregistrée(s).")
+        else:
+            self.message_var.set("Aucune clôture n'a encore été enregistrée.")
+
+    def refresh_live_view(self) -> None:
+        self.refresh_closures()
+
+    def selected_closure(self) -> dict[str, Any] | None:
+        row = self.table.selected_row()
+        if row is None:
+            messagebox.showwarning("Clôtures", "Veuillez sélectionner une journée dans la grille.")
+            return None
+        return row
+
+    def open_selected_report(self) -> None:
+        row = self.selected_closure()
+        if row is None:
+            return
+        report_path = str(row.get("CheminRapport", "") or "").strip()
+        if not report_path:
+            messagebox.showwarning("Clôtures", "Aucun rapport n'est associé à cette clôture.")
+            return
+        if not Path(report_path).exists():
+            messagebox.showwarning("Clôtures", "Le fichier de rapport est introuvable.")
+            return
+        open_file(report_path)
+
+    def open_selected_backup_folder(self) -> None:
+        row = self.selected_closure()
+        if row is None:
+            return
+        backup_path = str(row.get("CheminSauvegarde", "") or "").strip()
+        if not backup_path:
+            messagebox.showwarning("Clôtures", "Aucune sauvegarde n'est associée à cette clôture.")
+            return
+        backup_file = Path(backup_path)
+        target_folder = backup_file.parent if backup_file.parent else DatabaseHelper.backups_dir
+        open_folder(target_folder)
+
+    def copy_selected_paths(self) -> None:
+        row = self.selected_closure()
+        if row is None:
+            return
+        report_path = str(row.get("CheminRapport", "") or "").strip()
+        backup_path = str(row.get("CheminSauvegarde", "") or "").strip()
+        payload = f"Rapport : {report_path}\nSauvegarde : {backup_path}".strip()
+        self.clipboard_clear()
+        self.clipboard_append(payload)
+        self.message_var.set("Les chemins du rapport et de la sauvegarde ont été copiés dans le presse-papiers.")
 
 
 class ServerBackupsWindow(BaseModuleWindow):
@@ -3555,6 +3893,8 @@ class StockWindow(BaseModuleWindow):
                 messagebox.showinfo("Stock", "La sortie de stock a été enregistrée avec succès.")
             self.reset_form()
             self.refresh_data()
+        except ValueError as exc:
+            messagebox.showwarning("Stock", str(exc))
         except Exception as exc:
             messagebox.showerror("Stock", str(exc))
 
@@ -3593,6 +3933,8 @@ class StockWindow(BaseModuleWindow):
                 self.refresh_data()
             else:
                 messagebox.showwarning("Stock", "Aucune sortie n'a été supprimée.")
+        except ValueError as exc:
+            messagebox.showwarning("Stock", str(exc))
         except Exception as exc:
             messagebox.showerror("Stock", str(exc))
 
@@ -3965,6 +4307,8 @@ class OrdersWindow(BaseModuleWindow):
                 messagebox.showinfo("Commandes", "La commande a été enregistrée avec succès.")
             self.reset_form()
             self.refresh_orders()
+        except ValueError as exc:
+            messagebox.showwarning("Commandes", str(exc))
         except Exception as exc:
             messagebox.showerror("Commandes", str(exc))
 
@@ -4084,6 +4428,8 @@ class OrdersWindow(BaseModuleWindow):
                 self.refresh_orders()
             else:
                 messagebox.showwarning("Commandes", "Aucune commande n'a été supprimée.")
+        except ValueError as exc:
+            messagebox.showwarning("Commandes", str(exc))
         except Exception as exc:
             messagebox.showerror("Commandes", str(exc))
 
@@ -4396,6 +4742,8 @@ class CashWindow(BaseModuleWindow):
             )
             messagebox.showinfo("Caisse", "La fiche de caisse a été enregistrée avec succès.")
             self.refresh_data()
+        except ValueError as exc:
+            messagebox.showwarning("Caisse", str(exc))
         except Exception as exc:
             messagebox.showerror("Caisse", str(exc))
 
@@ -4436,6 +4784,8 @@ class CashWindow(BaseModuleWindow):
                 self.refresh_data()
             else:
                 messagebox.showwarning("Caisse", "Aucune fiche de caisse n'a été supprimée.")
+        except ValueError as exc:
+            messagebox.showwarning("Caisse", str(exc))
         except Exception as exc:
             messagebox.showerror("Caisse", str(exc))
 
@@ -4817,6 +5167,8 @@ class CommissionsWindow(BaseModuleWindow):
                 messagebox.showinfo("Commissions", "La commission a été enregistrée avec succès.")
             self.reset_form()
             self.refresh_commissions()
+        except ValueError as exc:
+            messagebox.showwarning("Commissions", str(exc))
         except Exception as exc:
             messagebox.showerror("Commissions", str(exc))
 
@@ -4870,5 +5222,7 @@ class CommissionsWindow(BaseModuleWindow):
                 self.refresh_commissions()
             else:
                 messagebox.showwarning("Commissions", "Aucune commission n'a été supprimée.")
+        except ValueError as exc:
+            messagebox.showwarning("Commissions", str(exc))
         except Exception as exc:
             messagebox.showerror("Commissions", str(exc))

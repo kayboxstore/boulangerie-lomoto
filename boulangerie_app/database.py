@@ -213,11 +213,23 @@ class DatabaseHelper:
             cls._normalize_status_values(connection)
             cls._insert_default_admin(connection)
             cls._insert_default_stock_config(connection)
-            connection.execute("PRAGMA journal_mode = WAL")
+        pragma_connection: sqlite3.Connection | None = None
+        try:
+            pragma_connection = sqlite3.connect(cls.db_path, timeout=10)
+            pragma_connection.execute("PRAGMA journal_mode = WAL")
+        finally:
+            if pragma_connection is not None:
+                pragma_connection.close()
 
     @classmethod
     def _timestamp_for_filename(cls) -> str:
         return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    @staticmethod
+    def _coerce_date(value: date | str) -> date:
+        if isinstance(value, date):
+            return value
+        return datetime.strptime(str(value).strip(), DB_DATE_FORMAT).date()
 
     @classmethod
     def build_backup_path(cls, prefix: str = "boulangerie-lomoto-backup") -> Path:
@@ -454,6 +466,23 @@ class DatabaseHelper:
                 Commissions REAL NOT NULL,
                 Dettes REAL NOT NULL,
                 NetAPayer REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS CloturesJournalieres (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateJour TEXT NOT NULL UNIQUE,
+                DateCloture TEXT NOT NULL,
+                Identifiant TEXT NOT NULL,
+                NomComplet TEXT NOT NULL,
+                Role TEXT NOT NULL,
+                CheminRapport TEXT NOT NULL DEFAULT '',
+                CheminSauvegarde TEXT NOT NULL DEFAULT '',
+                EstReouverte INTEGER NOT NULL DEFAULT 0,
+                DateReouverture TEXT NOT NULL DEFAULT '',
+                ReouvertParIdentifiant TEXT NOT NULL DEFAULT '',
+                ReouvertParNomComplet TEXT NOT NULL DEFAULT '',
+                ReouvertParRole TEXT NOT NULL DEFAULT '',
+                MotifReouverture TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS HistoriqueActions (
@@ -1123,6 +1152,8 @@ class DatabaseHelper:
 
     @classmethod
     def update_stock_closing(cls, target_date: date) -> None:
+        if cls.is_day_closed(target_date):
+            return
         summary = cls.get_stock_summary()
         if not summary:
             return
@@ -1181,6 +1212,7 @@ class DatabaseHelper:
         kg_sel: float,
         litres_huile: float,
     ) -> None:
+        cls.ensure_day_open_for_write(target_date, "le stock")
         cls._execute(
             """
             INSERT INTO StockSorties (
@@ -1207,6 +1239,8 @@ class DatabaseHelper:
         kg_sel: float,
         litres_huile: float,
     ) -> int:
+        original_date_text = cls._get_record_date_text("StockSorties", "DateSortie", exit_id)
+        cls._ensure_update_dates_open("le stock", original_date_text, target_date)
         return cls._execute(
             """
             UPDATE StockSorties
@@ -1230,6 +1264,9 @@ class DatabaseHelper:
 
     @classmethod
     def delete_stock_exit(cls, exit_id: int) -> int:
+        original_date_text = cls._get_record_date_text("StockSorties", "DateSortie", exit_id)
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, "le stock")
         return cls._execute("DELETE FROM StockSorties WHERE Id = ?", (exit_id,))
 
     @classmethod
@@ -1291,6 +1328,7 @@ class DatabaseHelper:
         paid_debts_today: float = 0.0,
         paid_debts_details: str = "",
     ) -> None:
+        cls.ensure_day_open_for_write(target_date, "la caisse")
         date_text = target_date.strftime(DB_DATE_FORMAT)
         exists = int(
             cls._fetch_value(
@@ -1385,6 +1423,9 @@ class DatabaseHelper:
 
     @classmethod
     def delete_cash_day(cls, cash_id: int) -> int:
+        original_date_text = cls._get_record_date_text("CaisseJournaliere", "DateCaisse", cash_id)
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, "la caisse")
         return cls._execute("DELETE FROM CaisseJournaliere WHERE Id = ?", (cash_id,))
 
     @classmethod
@@ -1440,6 +1481,7 @@ class DatabaseHelper:
         amount_received: float,
         debt: float,
     ) -> None:
+        cls.ensure_day_open_for_write(target_date, "les commandes")
         cls._execute(
             """
             INSERT INTO Commandes
@@ -1492,6 +1534,8 @@ class DatabaseHelper:
         amount_received: float,
         debt: float,
     ) -> int:
+        original_date_text = cls._get_record_date_text("Commandes", "DateCommande", order_id)
+        cls._ensure_update_dates_open("les commandes", original_date_text, target_date)
         return cls._execute(
             """
             UPDATE Commandes
@@ -1519,6 +1563,9 @@ class DatabaseHelper:
 
     @classmethod
     def delete_order(cls, order_id: int) -> int:
+        original_date_text = cls._get_record_date_text("Commandes", "DateCommande", order_id)
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, "les commandes")
         return cls._execute("DELETE FROM Commandes WHERE Id = ?", (order_id,))
 
     @classmethod
@@ -1663,6 +1710,7 @@ class DatabaseHelper:
         debts: float,
         net_to_pay: float,
     ) -> None:
+        cls.ensure_day_open_for_write(target_date, "les commissions")
         cls._execute(
             """
             INSERT INTO Commissions
@@ -1694,6 +1742,8 @@ class DatabaseHelper:
         debts: float,
         net_to_pay: float,
     ) -> int:
+        original_date_text = cls._get_record_date_text("Commissions", "DateCommission", commission_id)
+        cls._ensure_update_dates_open("les commissions", original_date_text, target_date)
         return cls._execute(
             """
             UPDATE Commissions
@@ -1723,12 +1773,279 @@ class DatabaseHelper:
 
     @classmethod
     def delete_commission(cls, commission_id: int) -> int:
+        original_date_text = cls._get_record_date_text("Commissions", "DateCommission", commission_id)
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, "les commissions")
         return cls._execute("DELETE FROM Commissions WHERE Id = ?", (commission_id,))
 
     @classmethod
     def get_total_commissions(cls) -> float:
         value = cls._fetch_value("SELECT IFNULL(SUM(Commissions), 0) FROM Commissions")
         return float(value or 0)
+
+    @classmethod
+    def _decorate_day_closure_row(cls, row: dict[str, Any] | None) -> dict[str, Any]:
+        if not row:
+            return {}
+        decorated = dict(row)
+        decorated["EstReouverte"] = bool(int(decorated.get("EstReouverte", 0) or 0))
+        decorated["StatutAffichage"] = "Réouverte" if decorated["EstReouverte"] else "Clôturée"
+        return decorated
+
+    @classmethod
+    def get_day_closure(cls, target_date: date | str) -> dict[str, Any]:
+        normalized_date = cls._coerce_date(target_date)
+        row = cls._fetch_one(
+            """
+            SELECT
+                Id,
+                DateJour,
+                DateCloture,
+                Identifiant,
+                NomComplet,
+                Role,
+                CheminRapport,
+                CheminSauvegarde,
+                EstReouverte,
+                DateReouverture,
+                ReouvertParIdentifiant,
+                ReouvertParNomComplet,
+                ReouvertParRole,
+                MotifReouverture
+            FROM CloturesJournalieres
+            WHERE DateJour = ?
+            """,
+            (normalized_date.strftime(DB_DATE_FORMAT),),
+        )
+        return cls._decorate_day_closure_row(row)
+
+    @classmethod
+    def is_day_closed(cls, target_date: date | str) -> bool:
+        closure = cls.get_day_closure(target_date)
+        return bool(closure) and not bool(closure.get("EstReouverte", False))
+
+    @classmethod
+    def list_day_closures(cls, limit: int = 120) -> list[dict[str, Any]]:
+        row_limit = max(int(limit), 1)
+        rows = cls._fetch_all(
+            f"""
+            SELECT
+                Id,
+                DateJour,
+                DateCloture,
+                Identifiant,
+                NomComplet,
+                Role,
+                CheminRapport,
+                CheminSauvegarde,
+                EstReouverte,
+                DateReouverture,
+                ReouvertParIdentifiant,
+                ReouvertParNomComplet,
+                ReouvertParRole,
+                MotifReouverture
+            FROM CloturesJournalieres
+            ORDER BY DateJour DESC, Id DESC
+            LIMIT {row_limit}
+            """
+        )
+        return [cls._decorate_day_closure_row(row) for row in rows]
+
+    @classmethod
+    def ensure_day_open_for_write(cls, target_date: date | str, module_name: str) -> None:
+        normalized_date = cls._coerce_date(target_date)
+        closure = cls.get_day_closure(normalized_date)
+        if not closure or bool(closure.get("EstReouverte", False)):
+            return
+
+        closed_by = str(closure.get("NomComplet", "") or closure.get("Identifiant", "")).strip()
+        closed_date = normalized_date.strftime("%d/%m/%Y")
+        module_label = module_name.strip() or "ce module"
+        message = f"La journée du {closed_date} est déjà clôturée pour {module_label}."
+        if closed_by:
+            message += f" Clôturée par {closed_by}."
+        message += " Réouvrez-la d'abord depuis le tableau de bord administrateur."
+        raise ValueError(message)
+
+    @classmethod
+    def _get_record_date_text(
+        cls,
+        table_name: str,
+        date_column: str,
+        record_id: int,
+    ) -> str:
+        value = cls._fetch_value(
+            f"SELECT {date_column} FROM {table_name} WHERE Id = ?",
+            (record_id,),
+        )
+        return "" if value is None else str(value)
+
+    @classmethod
+    def _ensure_update_dates_open(
+        cls,
+        module_name: str,
+        original_date_text: str,
+        target_date: date,
+    ) -> None:
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, module_name)
+        if not original_date_text or original_date_text != target_date.strftime(DB_DATE_FORMAT):
+            cls.ensure_day_open_for_write(target_date, module_name)
+
+    @classmethod
+    def close_day(
+        cls,
+        target_date: date | str,
+        identifiant: str,
+        full_name: str,
+        role: str,
+    ) -> dict[str, Any]:
+        normalized_date = cls._coerce_date(target_date)
+        if normalized_date > date.today():
+            raise ValueError("Impossible de clôturer une journée future.")
+
+        existing = cls.get_day_closure(normalized_date)
+        if existing and not bool(existing.get("EstReouverte", False)):
+            raise ValueError("Cette journée est déjà clôturée.")
+
+        cls.initialize_stock_day(normalized_date)
+        cls.update_stock_closing(normalized_date)
+
+        backup_path = cls.backup_database(
+            cls.build_backup_path(f"cloture-{normalized_date.strftime('%Y%m%d')}")
+        )
+
+        from .reports import create_daily_pdf_report
+
+        report_dir = cls.get_reports_dir_for_user(identifiant.strip() or "admin")
+        report_path = create_daily_pdf_report(
+            normalized_date,
+            destination=report_dir / f"cloture-journaliere-{normalized_date.strftime('%Y%m%d')}.pdf",
+            role="Admin",
+            generated_by=full_name.strip() or identifiant.strip(),
+            generated_role=role.strip() or "Admin",
+        )
+
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        if existing:
+            cls._execute(
+                """
+                UPDATE CloturesJournalieres
+                SET
+                    DateCloture = ?,
+                    Identifiant = ?,
+                    NomComplet = ?,
+                    Role = ?,
+                    CheminRapport = ?,
+                    CheminSauvegarde = ?,
+                    EstReouverte = 0,
+                    DateReouverture = '',
+                    ReouvertParIdentifiant = '',
+                    ReouvertParNomComplet = '',
+                    ReouvertParRole = '',
+                    MotifReouverture = ''
+                WHERE DateJour = ?
+                """,
+                (
+                    timestamp,
+                    identifiant.strip(),
+                    full_name.strip() or identifiant.strip(),
+                    role.strip(),
+                    str(report_path),
+                    str(backup_path),
+                    normalized_date.strftime(DB_DATE_FORMAT),
+                ),
+            )
+        else:
+            cls._execute(
+                """
+                INSERT INTO CloturesJournalieres
+                    (
+                        DateJour,
+                        DateCloture,
+                        Identifiant,
+                        NomComplet,
+                        Role,
+                        CheminRapport,
+                        CheminSauvegarde
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_date.strftime(DB_DATE_FORMAT),
+                    timestamp,
+                    identifiant.strip(),
+                    full_name.strip() or identifiant.strip(),
+                    role.strip(),
+                    str(report_path),
+                    str(backup_path),
+                ),
+            )
+
+        cls.log_activity(
+            identifiant.strip(),
+            full_name.strip() or identifiant.strip(),
+            role.strip(),
+            "Clôture journalière",
+            "Journée clôturée",
+            (
+                f"{normalized_date.strftime('%d/%m/%Y')} | "
+                f"Sauvegarde : {backup_path} | Rapport : {report_path}"
+            ),
+        )
+        return cls.get_day_closure(normalized_date)
+
+    @classmethod
+    def reopen_day(
+        cls,
+        target_date: date | str,
+        identifiant: str,
+        full_name: str,
+        role: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        normalized_date = cls._coerce_date(target_date)
+        closure = cls.get_day_closure(normalized_date)
+        if not closure:
+            raise ValueError("Aucune clôture n'a été trouvée pour cette journée.")
+        if bool(closure.get("EstReouverte", False)):
+            raise ValueError("Cette journée est déjà réouverte.")
+
+        normalized_reason = reason.strip()
+        if not normalized_reason:
+            raise ValueError("Veuillez renseigner le motif de réouverture.")
+
+        cls._execute(
+            """
+            UPDATE CloturesJournalieres
+            SET
+                EstReouverte = 1,
+                DateReouverture = ?,
+                ReouvertParIdentifiant = ?,
+                ReouvertParNomComplet = ?,
+                ReouvertParRole = ?,
+                MotifReouverture = ?
+            WHERE DateJour = ?
+            """,
+            (
+                datetime.now().isoformat(timespec="seconds"),
+                identifiant.strip(),
+                full_name.strip() or identifiant.strip(),
+                role.strip(),
+                normalized_reason,
+                normalized_date.strftime(DB_DATE_FORMAT),
+            ),
+        )
+
+        cls.log_activity(
+            identifiant.strip(),
+            full_name.strip() or identifiant.strip(),
+            role.strip(),
+            "Clôture journalière",
+            "Journée réouverte",
+            f"{normalized_date.strftime('%d/%m/%Y')} | Motif : {normalized_reason}",
+        )
+        return cls.get_day_closure(normalized_date)
 
     @classmethod
     def log_activity(
