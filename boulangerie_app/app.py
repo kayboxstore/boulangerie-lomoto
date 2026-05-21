@@ -260,6 +260,7 @@ def configure_styles() -> None:
     style.configure("Treeview", font=UI_FONT, rowheight=28)
     style.configure("Treeview.Heading", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
     style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 44, "bold"), foreground="#B30000")
+    style.configure("DayLock.TLabel", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"), foreground="#8b0000")
     style.configure("Card.TLabelframe", padding=8)
     style.configure("Card.TLabelframe.Label", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
     style.configure("Primary.TButton", padding=(12, 8))
@@ -452,6 +453,19 @@ def format_activity_timestamp(value: Any) -> str:
         return datetime.fromisoformat(raw).strftime("%d/%m/%Y %H:%M:%S")
     except ValueError:
         return raw
+
+
+def build_day_lock_notice(target_date: date, closure: dict[str, Any], module_label: str) -> str:
+    closed_by = str(closure.get("NomComplet") or closure.get("Identifiant") or "Administrateur").strip()
+    role = str(closure.get("Role") or "").strip()
+    closed_at = format_activity_timestamp(closure.get("DateCloture"))
+    actor = f"{closed_by} ({role})" if role else closed_by
+    closed_at_text = f" le {closed_at}" if closed_at else ""
+    return (
+        f"Journée clôturée - {target_date.strftime('%d/%m/%Y')}. "
+        f"Clôturée par {actor}{closed_at_text}. "
+        f"Les enregistrements, modifications et suppressions de {module_label} sont verrouillés."
+    )
 
 
 class DateField(ttk.Frame):
@@ -2747,6 +2761,80 @@ class BaseModuleWindow(tk.Toplevel):
     def refresh_live_view(self) -> None:
         return
 
+    def create_day_lock_notice(
+        self,
+        parent: tk.Misc,
+        module_label: str,
+        *,
+        before: tk.Misc | None = None,
+        wraplength: int = 980,
+    ) -> None:
+        self.day_lock_module_label = module_label
+        self.day_lock_notice_before = before
+        self.day_lock_notice_var = tk.StringVar(value="")
+        self.day_lock_notice_label = ttk.Label(
+            parent,
+            textvariable=self.day_lock_notice_var,
+            style="DayLock.TLabel",
+            justify="left",
+            wraplength=wraplength,
+        )
+        self.day_lock_write_buttons: list[Any] = []
+        self.day_lock_date_field: DateField | None = None
+
+    def configure_day_lock_controls(self, date_field: DateField, write_buttons: list[Any]) -> None:
+        self.day_lock_date_field = date_field
+        self.day_lock_write_buttons = write_buttons
+        date_field.bind_change(self.refresh_day_lock_state)
+        self.refresh_day_lock_state()
+
+    def set_day_lock_write_buttons_enabled(self, enabled: bool) -> None:
+        for button in getattr(self, "day_lock_write_buttons", []):
+            try:
+                button.state(["!disabled"] if enabled else ["disabled"])
+            except AttributeError:
+                button.configure(state="normal" if enabled else "disabled")
+
+    def refresh_day_lock_state(self) -> bool:
+        date_field = getattr(self, "day_lock_date_field", None)
+        notice_label = getattr(self, "day_lock_notice_label", None)
+        notice_var = getattr(self, "day_lock_notice_var", None)
+        if date_field is None or notice_label is None or notice_var is None:
+            return False
+        try:
+            target_date = date_field.get_date()
+            closure = DatabaseHelper.get_day_closure(target_date)
+        except Exception:
+            notice_var.set("")
+            if notice_label.winfo_ismapped():
+                notice_label.pack_forget()
+            self.set_day_lock_write_buttons_enabled(True)
+            return False
+
+        locked = bool(closure) and not bool(closure.get("EstReouverte", False))
+        if locked:
+            notice_var.set(
+                build_day_lock_notice(
+                    target_date,
+                    closure,
+                    str(getattr(self, "day_lock_module_label", "ce module")),
+                )
+            )
+            if not notice_label.winfo_ismapped():
+                pack_options: dict[str, Any] = {"fill": "x", "pady": (0, 10)}
+                before = getattr(self, "day_lock_notice_before", None)
+                if before is not None and before.winfo_exists():
+                    pack_options["before"] = before
+                notice_label.pack(**pack_options)
+            self.set_day_lock_write_buttons_enabled(False)
+            return True
+
+        notice_var.set("")
+        if notice_label.winfo_ismapped():
+            notice_label.pack_forget()
+        self.set_day_lock_write_buttons_enabled(True)
+        return False
+
 
 class DayClosuresWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
@@ -3730,6 +3818,7 @@ class StockWindow(BaseModuleWindow):
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)
+        self.create_day_lock_notice(container, "la gestion du stock", before=content)
 
         form = ttk.LabelFrame(content, text="Sortie de stock", style="Card.TLabelframe")
         form.pack(side="left", fill="y", padx=(0, 12))
@@ -3750,9 +3839,12 @@ class StockWindow(BaseModuleWindow):
 
         button_bar = ttk.Frame(form)
         button_bar.grid(row=5, column=0, columnspan=2, pady=(14, 0))
-        ttk.Button(button_bar, text="Enregistrer", command=self.save_exit).grid(row=0, column=0, padx=4, pady=4)
-        ttk.Button(button_bar, text="Modifier", command=self.load_selected_exit).grid(row=0, column=1, padx=4, pady=4)
-        ttk.Button(button_bar, text="Supprimer", command=self.delete_exit).grid(row=0, column=2, padx=4, pady=4)
+        self.save_button = ttk.Button(button_bar, text="Enregistrer", command=self.save_exit)
+        self.save_button.grid(row=0, column=0, padx=4, pady=4)
+        self.edit_button = ttk.Button(button_bar, text="Modifier", command=self.load_selected_exit)
+        self.edit_button.grid(row=0, column=1, padx=4, pady=4)
+        self.delete_button = ttk.Button(button_bar, text="Supprimer", command=self.delete_exit)
+        self.delete_button.grid(row=0, column=2, padx=4, pady=4)
         ttk.Button(button_bar, text="Paramètres", command=self.edit_stock_parameters).grid(
             row=1, column=0, padx=4, pady=4
         )
@@ -3764,6 +3856,10 @@ class StockWindow(BaseModuleWindow):
         table_frame.pack(side="left", fill="both", expand=True)
         self.table = DataTable(table_frame, height=18)
         self.table.pack(fill="both", expand=True)
+        self.configure_day_lock_controls(
+            self.date_field,
+            [self.save_button, self.edit_button, self.delete_button],
+        )
 
     def _make_entry(self, parent: ttk.LabelFrame, label: str, variable: tk.StringVar, row: int) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
@@ -3809,6 +3905,7 @@ class StockWindow(BaseModuleWindow):
                 "LitresHuileUtilises": lambda value: format_number(float(value)),
             },
         )
+        self.refresh_day_lock_state()
 
     def show_opening_message(self) -> None:
         journal = DatabaseHelper.get_stock_journal(date.today())
@@ -3916,6 +4013,7 @@ class StockWindow(BaseModuleWindow):
         self.paquets_var.set(format_number(float(row["PaquetsUtilises"])))
         self.sel_var.set(format_number(float(row["KgSelUtilises"])))
         self.huile_var.set(format_number(float(row["LitresHuileUtilises"])))
+        self.refresh_day_lock_state()
         messagebox.showinfo("Stock", "La sortie a été chargée. Modifiez-la puis enregistrez.")
 
     def delete_exit(self) -> None:
@@ -4037,6 +4135,7 @@ class StockWindow(BaseModuleWindow):
         self.huile_var.set("")
         self.edit_mode = False
         self.selected_exit_id = 0
+        self.refresh_day_lock_state()
 
     def close_window(self) -> None:
         if not self.closing_message_shown:
@@ -4071,6 +4170,7 @@ class OrdersWindow(BaseModuleWindow):
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)
+        self.create_day_lock_notice(container, "les commandes", before=content)
 
         form = ttk.LabelFrame(content, text="Commande", style="Card.TLabelframe")
         form.pack(side="left", fill="y", padx=(0, 12))
@@ -4118,9 +4218,12 @@ class OrdersWindow(BaseModuleWindow):
 
         actions = ttk.Frame(form)
         actions.grid(row=7, column=0, columnspan=2, pady=(14, 0))
-        ttk.Button(actions, text="Enregistrer", command=self.save_order).grid(row=0, column=0, padx=4, pady=4)
-        ttk.Button(actions, text="Modifier", command=self.load_order_for_edit).grid(row=0, column=1, padx=4, pady=4)
-        ttk.Button(actions, text="Supprimer", command=self.delete_order).grid(row=0, column=2, padx=4, pady=4)
+        self.save_button = ttk.Button(actions, text="Enregistrer", command=self.save_order)
+        self.save_button.grid(row=0, column=0, padx=4, pady=4)
+        self.edit_button = ttk.Button(actions, text="Modifier", command=self.load_order_for_edit)
+        self.edit_button.grid(row=0, column=1, padx=4, pady=4)
+        self.delete_button = ttk.Button(actions, text="Supprimer", command=self.delete_order)
+        self.delete_button.grid(row=0, column=2, padx=4, pady=4)
         ttk.Button(actions, text="Tout afficher", command=self.show_all).grid(row=1, column=0, padx=4, pady=4)
         ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=1, column=1, padx=4, pady=4)
 
@@ -4138,6 +4241,10 @@ class OrdersWindow(BaseModuleWindow):
         self.amount_received_var.trace_add("write", lambda *_args: self.recalculate_amounts())
         self.trays_var.trace_add("write", lambda *_args: self.recalculate_amounts())
         form.columnconfigure(1, weight=1)
+        self.configure_day_lock_controls(
+            self.date_field,
+            [self.save_button, self.edit_button, self.delete_button],
+        )
 
     def _on_date_change(self) -> None:
         self.show_all_dates = False
@@ -4360,6 +4467,7 @@ class OrdersWindow(BaseModuleWindow):
             },
         )
         self.update_summary(rows)
+        self.refresh_day_lock_state()
 
     def update_summary(self, rows: list[dict[str, Any]]) -> None:
         if self.show_all_dates:
@@ -4411,6 +4519,7 @@ class OrdersWindow(BaseModuleWindow):
         else:
             self.loaded_amount_due_rate = None
         self.recalculate_amounts()
+        self.refresh_day_lock_state()
         messagebox.showinfo("Commandes", "La commande a été chargée. Modifiez-la puis enregistrez.")
 
     def delete_order(self) -> None:
@@ -4450,6 +4559,7 @@ class OrdersWindow(BaseModuleWindow):
         self.loaded_amount_due_rate = None
         self.show_all_dates = False
         self.recalculate_amounts()
+        self.refresh_day_lock_state()
 
 
 class CashWindow(BaseModuleWindow):
@@ -4471,6 +4581,7 @@ class CashWindow(BaseModuleWindow):
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)
+        self.create_day_lock_notice(container, "la caisse", before=content)
 
         form = ttk.LabelFrame(content, text="Fiche journalière", style="Card.TLabelframe")
         form.pack(side="left", fill="y", padx=(0, 12))
@@ -4516,9 +4627,12 @@ class CashWindow(BaseModuleWindow):
 
         actions = ttk.Frame(form)
         actions.grid(row=11, column=0, columnspan=2, pady=(14, 0))
-        ttk.Button(actions, text="Enregistrer", command=self.save_cash).grid(row=0, column=0, padx=4, pady=4)
-        ttk.Button(actions, text="Modifier", command=self.load_cash_for_edit).grid(row=0, column=1, padx=4, pady=4)
-        ttk.Button(actions, text="Supprimer", command=self.delete_cash).grid(row=0, column=2, padx=4, pady=4)
+        self.save_button = ttk.Button(actions, text="Enregistrer", command=self.save_cash)
+        self.save_button.grid(row=0, column=0, padx=4, pady=4)
+        self.edit_button = ttk.Button(actions, text="Modifier", command=self.load_cash_for_edit)
+        self.edit_button.grid(row=0, column=1, padx=4, pady=4)
+        self.delete_button = ttk.Button(actions, text="Supprimer", command=self.delete_cash)
+        self.delete_button.grid(row=0, column=2, padx=4, pady=4)
         ttk.Button(actions, text="Tout afficher", command=self.show_all).grid(row=1, column=0, padx=4, pady=4)
         ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=1, column=1, padx=4, pady=4)
 
@@ -4535,6 +4649,10 @@ class CashWindow(BaseModuleWindow):
         self.paid_debts_var.trace_add("write", lambda *_args: self.calculate_balance())
         self.expenses_var.trace_add("write", lambda *_args: self.calculate_balance())
         form.columnconfigure(1, weight=1)
+        self.configure_day_lock_controls(
+            self.date_field,
+            [self.save_button, self.edit_button, self.delete_button],
+        )
 
     def _make_label_value(
         self,
@@ -4559,6 +4677,7 @@ class CashWindow(BaseModuleWindow):
         self.expenses_text.delete("1.0", "end")
         self.show_all_dates = False
         self.load_day_summary()
+        self.refresh_day_lock_state()
 
     def load_day_summary(self) -> None:
         try:
@@ -4706,6 +4825,7 @@ class CashWindow(BaseModuleWindow):
         self.table.tree.column("DepensesEffectuees", width=260, stretch=True)
         self.table.tree.column("DettesPayeesDetails", width=280, stretch=True)
         self.update_summary(len(rows))
+        self.refresh_day_lock_state()
 
     def refresh_live_view(self) -> None:
         self.refresh_data()
@@ -4767,6 +4887,7 @@ class CashWindow(BaseModuleWindow):
         self.expenses_text.delete("1.0", "end")
         self.expenses_text.insert("1.0", str(row["DepensesEffectuees"]))
         self.calculate_balance()
+        self.refresh_day_lock_state()
         messagebox.showinfo("Caisse", "La fiche de caisse a été chargée.")
 
     def delete_cash(self) -> None:
@@ -4818,6 +4939,7 @@ class CommissionsWindow(BaseModuleWindow):
 
         content = ttk.Frame(container)
         content.pack(fill="both", expand=True)
+        self.create_day_lock_notice(container, "les commissions", before=content)
 
         form = ttk.LabelFrame(content, text="Commission", style="Card.TLabelframe")
         form.pack(side="left", fill="y", padx=(0, 12))
@@ -4863,11 +4985,12 @@ class CommissionsWindow(BaseModuleWindow):
 
         actions = ttk.Frame(form)
         actions.grid(row=9, column=0, columnspan=2, pady=(14, 0))
-        ttk.Button(actions, text="Enregistrer", command=self.save_commission).grid(row=0, column=0, padx=4, pady=4)
-        ttk.Button(actions, text="Modifier", command=self.load_commission_for_edit).grid(
-            row=0, column=1, padx=4, pady=4
-        )
-        ttk.Button(actions, text="Supprimer", command=self.delete_commission).grid(row=0, column=2, padx=4, pady=4)
+        self.save_button = ttk.Button(actions, text="Enregistrer", command=self.save_commission)
+        self.save_button.grid(row=0, column=0, padx=4, pady=4)
+        self.edit_button = ttk.Button(actions, text="Modifier", command=self.load_commission_for_edit)
+        self.edit_button.grid(row=0, column=1, padx=4, pady=4)
+        self.delete_button = ttk.Button(actions, text="Supprimer", command=self.delete_commission)
+        self.delete_button.grid(row=0, column=2, padx=4, pady=4)
         ttk.Button(actions, text="Tout afficher", command=self.show_all).grid(row=1, column=0, padx=4, pady=4)
         ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=1, column=1, padx=4, pady=4)
 
@@ -4882,6 +5005,10 @@ class CommissionsWindow(BaseModuleWindow):
         self.table.pack(fill="both", expand=True)
 
         form.columnconfigure(1, weight=1)
+        self.configure_day_lock_controls(
+            self.date_field,
+            [self.save_button, self.edit_button, self.delete_button],
+        )
 
     def _make_label_value(
         self,
@@ -4922,6 +5049,7 @@ class CommissionsWindow(BaseModuleWindow):
         self.filter_var.set(COMMISSION_FILTERS[0])
         self.reset_synthesis()
         self.load_names()
+        self.refresh_day_lock_state()
 
     def load_names(self) -> None:
         try:
@@ -4967,6 +5095,7 @@ class CommissionsWindow(BaseModuleWindow):
         self.debts_value.set(format_fc(self.current_debt))
         self.net_value.set(format_fc(self.current_net))
         self.net_label.configure(foreground="#8b0000" if self.current_net < 0 else "#1b2d5d")
+        self.refresh_day_lock_state()
 
     def refresh_commissions(self) -> None:
         try:
@@ -4979,6 +5108,7 @@ class CommissionsWindow(BaseModuleWindow):
             else DatabaseHelper.list_commissions_by_date(target_date)
         )
         self.apply_filter()
+        self.refresh_day_lock_state()
 
     def refresh_live_view(self) -> None:
         self.refresh_commissions()
@@ -5205,6 +5335,7 @@ class CommissionsWindow(BaseModuleWindow):
         self.debts_value.set(format_fc(self.current_debt))
         self.net_value.set(format_fc(self.current_net))
         self.net_label.configure(foreground="#8b0000" if self.current_net < 0 else "#1b2d5d")
+        self.refresh_day_lock_state()
         messagebox.showinfo("Commissions", "La commission a été chargée. Modifiez-la puis enregistrez.")
 
     def delete_commission(self) -> None:
