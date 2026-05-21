@@ -30,11 +30,12 @@ from .connected_server import (
     stop_embedded_server,
 )
 from .database import AuthenticatedUser, DatabaseHelper
-from .excel_reports import create_daily_excel_report, create_monthly_excel_report
+from .excel_reports import create_daily_excel_report, create_monthly_excel_report, create_period_excel_report
 from .reports import (
     ReportGenerationError,
     create_daily_pdf_report,
     create_monthly_pdf_report,
+    create_period_pdf_report,
     get_report_scope_description,
     get_report_scope_label,
 )
@@ -451,6 +452,11 @@ class DateField(ttk.Frame):
 
     def get(self) -> str:
         return self.var.get()
+
+    def set_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        self.entry.configure(state=state)
+        self.button.state(["!disabled"] if enabled else ["disabled"])
 
 
 class DataTable(ttk.Frame):
@@ -2331,7 +2337,7 @@ class ServerBackupsWindow(BaseModuleWindow):
 
 class PdfReportWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Rapports PDF", "720x470", start_maximized=False)
+        super().__init__(parent, "Rapports PDF", "760x560", start_maximized=False)
         self.identifiant = parent.user.identifiant
         self.role = parent.user.role
         self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
@@ -2350,9 +2356,10 @@ class PdfReportWindow(BaseModuleWindow):
             text=(
                 "Choisissez une date de référence puis générez un document PDF prêt à imprimer. "
                 "En mode mensuel, seul le mois et l'année de cette date seront utilisés. "
+                "En mode période, vous définissez une date de début et une date de fin. "
                 f"{get_report_scope_description(self.role)}"
             ),
-            wraplength=500,
+            wraplength=560,
             justify="center",
         ).pack(fill="x")
         ttk.Label(
@@ -2370,26 +2377,34 @@ class PdfReportWindow(BaseModuleWindow):
         mode_row.grid(row=0, column=1, sticky="w", pady=6)
         ttk.Radiobutton(mode_row, text="Journalier", value="daily", variable=self.report_mode_var).grid(row=0, column=0, padx=(0, 10))
         ttk.Radiobutton(mode_row, text="Mensuel", value="monthly", variable=self.report_mode_var).grid(row=0, column=1)
+        ttk.Radiobutton(mode_row, text="Période", value="period", variable=self.report_mode_var).grid(row=0, column=2, padx=(10, 0))
 
-        ttk.Label(form, text="Date de référence").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Date de début / référence").grid(row=1, column=0, sticky="w", pady=6)
         self.date_field = DateField(form)
         self.date_field.grid(row=1, column=1, sticky="ew", pady=6)
+        ttk.Label(form, text="Date de fin").grid(row=2, column=0, sticky="w", pady=6)
+        self.end_date_field = DateField(form)
+        self.end_date_field.grid(row=2, column=1, sticky="ew", pady=6)
         ttk.Label(
             form,
-            text="En mode mensuel, l'application regroupe toutes les données du mois de cette date.",
+            text=(
+                "Journalier : la date de début est utilisée seule. "
+                "Mensuel : le mois de la date de début est utilisé. "
+                "Période : toutes les données entre la date de début et la date de fin sont regroupées."
+            ),
             foreground="#4b5563",
-            wraplength=440,
+            wraplength=520,
             justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
         ttk.Checkbutton(
             form,
             text="Proposer l'ouverture du PDF apres generation",
             variable=self.open_after_generation_var,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         actions = ttk.Frame(form)
-        actions.grid(row=4, column=0, columnspan=2, pady=(14, 0))
+        actions.grid(row=5, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(actions, text="Générer le PDF", style="Primary.TButton", command=self.generate_report).grid(
             row=0, column=0, padx=6
         )
@@ -2399,6 +2414,8 @@ class PdfReportWindow(BaseModuleWindow):
         ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=2, padx=6)
 
         form.columnconfigure(1, weight=1)
+        self.report_mode_var.trace_add("write", self._on_report_mode_change)
+        self._on_report_mode_change()
 
         ttk.Label(
             container,
@@ -2408,20 +2425,28 @@ class PdfReportWindow(BaseModuleWindow):
             justify="center",
         ).pack(fill="x", pady=(12, 0))
 
+    def _on_report_mode_change(self, *_args: Any) -> None:
+        period_mode = self.report_mode_var.get().strip().lower() == "period"
+        self.end_date_field.set_enabled(period_mode)
+        if not period_mode:
+            self.end_date_field.set_date(self.date_field.get())
+
     def generate_report(self) -> None:
         try:
             target_date = self.date_field.get_date()
+            end_date = self.end_date_field.get_date()
         except Exception as exc:
             self.message_var.set(str(exc))
             return
 
         self.reports_dir.mkdir(parents=True, exist_ok=True)
-        monthly_mode = self.report_mode_var.get().strip().lower() == "monthly"
-        suggested_name = (
-            f"rapport-mensuel-{target_date.strftime('%Y%m')}.pdf"
-            if monthly_mode
-            else f"rapport-journalier-{target_date.strftime('%Y%m%d')}.pdf"
-        )
+        mode = self.report_mode_var.get().strip().lower()
+        if mode == "monthly":
+            suggested_name = f"rapport-mensuel-{target_date.strftime('%Y%m')}.pdf"
+        elif mode == "period":
+            suggested_name = f"rapport-periode-{target_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}.pdf"
+        else:
+            suggested_name = f"rapport-journalier-{target_date.strftime('%Y%m%d')}.pdf"
         suggested_path = self.reports_dir / suggested_name
         destination = filedialog.asksaveasfilename(
             title="Enregistrer le rapport PDF",
@@ -2434,9 +2459,18 @@ class PdfReportWindow(BaseModuleWindow):
             return
 
         try:
-            if monthly_mode:
+            if mode == "monthly":
                 report_path = create_monthly_pdf_report(
                     target_date,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                )
+            elif mode == "period":
+                report_path = create_period_pdf_report(
+                    target_date,
+                    end_date,
                     destination,
                     role=self.role,
                     generated_by=self.parent.user.display_name,
@@ -2475,7 +2509,7 @@ class PdfReportWindow(BaseModuleWindow):
 
 class ExcelReportWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
-        super().__init__(parent, "Rapports Excel", "720x470", start_maximized=False)
+        super().__init__(parent, "Rapports Excel", "760x560", start_maximized=False)
         self.identifiant = parent.user.identifiant
         self.role = parent.user.role
         self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
@@ -2494,9 +2528,10 @@ class ExcelReportWindow(BaseModuleWindow):
             text=(
                 "Choisissez une date de référence puis générez un classeur Excel prêt à partager ou à retravailler. "
                 "En mode mensuel, seul le mois et l'année de cette date seront utilisés. "
+                "En mode période, vous définissez une date de début et une date de fin. "
                 f"{get_report_scope_description(self.role)}"
             ),
-            wraplength=500,
+            wraplength=560,
             justify="center",
         ).pack(fill="x")
         ttk.Label(
@@ -2514,26 +2549,34 @@ class ExcelReportWindow(BaseModuleWindow):
         mode_row.grid(row=0, column=1, sticky="w", pady=6)
         ttk.Radiobutton(mode_row, text="Journalier", value="daily", variable=self.report_mode_var).grid(row=0, column=0, padx=(0, 10))
         ttk.Radiobutton(mode_row, text="Mensuel", value="monthly", variable=self.report_mode_var).grid(row=0, column=1)
+        ttk.Radiobutton(mode_row, text="Période", value="period", variable=self.report_mode_var).grid(row=0, column=2, padx=(10, 0))
 
-        ttk.Label(form, text="Date de référence").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Date de début / référence").grid(row=1, column=0, sticky="w", pady=6)
         self.date_field = DateField(form)
         self.date_field.grid(row=1, column=1, sticky="ew", pady=6)
+        ttk.Label(form, text="Date de fin").grid(row=2, column=0, sticky="w", pady=6)
+        self.end_date_field = DateField(form)
+        self.end_date_field.grid(row=2, column=1, sticky="ew", pady=6)
         ttk.Label(
             form,
-            text="En mode mensuel, l'application regroupe toutes les données du mois de cette date.",
+            text=(
+                "Journalier : la date de début est utilisée seule. "
+                "Mensuel : le mois de la date de début est utilisé. "
+                "Période : toutes les données entre la date de début et la date de fin sont regroupées."
+            ),
             foreground="#4b5563",
-            wraplength=440,
+            wraplength=520,
             justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
         ttk.Checkbutton(
             form,
             text="Proposer l'ouverture du fichier Excel après génération",
             variable=self.open_after_generation_var,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         actions = ttk.Frame(form)
-        actions.grid(row=4, column=0, columnspan=2, pady=(14, 0))
+        actions.grid(row=5, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(
             actions,
             text="Générer le fichier Excel",
@@ -2546,6 +2589,8 @@ class ExcelReportWindow(BaseModuleWindow):
         ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=2, padx=6)
 
         form.columnconfigure(1, weight=1)
+        self.report_mode_var.trace_add("write", self._on_report_mode_change)
+        self._on_report_mode_change()
 
         ttk.Label(
             container,
@@ -2555,20 +2600,30 @@ class ExcelReportWindow(BaseModuleWindow):
             justify="center",
         ).pack(fill="x", pady=(12, 0))
 
+    def _on_report_mode_change(self, *_args: Any) -> None:
+        period_mode = self.report_mode_var.get().strip().lower() == "period"
+        self.end_date_field.set_enabled(period_mode)
+        if not period_mode:
+            self.end_date_field.set_date(self.date_field.get())
+
     def generate_report(self) -> None:
         try:
             target_date = self.date_field.get_date()
+            end_date = self.end_date_field.get_date()
         except Exception as exc:
             self.message_var.set(str(exc))
             return
 
         self.reports_dir.mkdir(parents=True, exist_ok=True)
-        monthly_mode = self.report_mode_var.get().strip().lower() == "monthly"
-        suggested_name = (
-            f"rapport-excel-mensuel-{target_date.strftime('%Y%m')}.xlsx"
-            if monthly_mode
-            else f"rapport-excel-journalier-{target_date.strftime('%Y%m%d')}.xlsx"
-        )
+        mode = self.report_mode_var.get().strip().lower()
+        if mode == "monthly":
+            suggested_name = f"rapport-excel-mensuel-{target_date.strftime('%Y%m')}.xlsx"
+        elif mode == "period":
+            suggested_name = (
+                f"rapport-excel-periode-{target_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}.xlsx"
+            )
+        else:
+            suggested_name = f"rapport-excel-journalier-{target_date.strftime('%Y%m%d')}.xlsx"
         suggested_path = self.reports_dir / suggested_name
         destination = filedialog.asksaveasfilename(
             title="Enregistrer le rapport Excel",
@@ -2581,9 +2636,18 @@ class ExcelReportWindow(BaseModuleWindow):
             return
 
         try:
-            if monthly_mode:
+            if mode == "monthly":
                 report_path = create_monthly_excel_report(
                     target_date,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                )
+            elif mode == "period":
+                report_path = create_period_excel_report(
+                    target_date,
+                    end_date,
                     destination,
                     role=self.role,
                     generated_by=self.parent.user.display_name,
