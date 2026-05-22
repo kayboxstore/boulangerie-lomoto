@@ -446,6 +446,9 @@ def create_daily_pdf_report(
     total_trays = int(orders_summary.get("NombreTotalBacs", 0) or 0)
     total_expenses = float(cash.get("MontantTotalDepenses", 0) or 0)
     paid_debts_today = float(cash.get("DettesPayeesAujourdHui", 0) or 0)
+    accumulated_debts = DatabaseHelper.get_accumulated_debt_totals_for_date(target_date)
+    accumulated_debts_before = float(accumulated_debts.get("DettesAccumuleesAvantPaiement", 0) or 0)
+    accumulated_debts_remaining = max(accumulated_debts_before - paid_debts_today, 0.0)
     expense_items = split_structured_lines(_safe_text(cash.get("DepensesEffectuees")).strip())
     paid_debts_items = parse_named_amount_lines(_safe_text(cash.get("DettesPayeesDetails")).strip())
     total_entries = total_received + paid_debts_today
@@ -493,13 +496,15 @@ def create_daily_pdf_report(
                 ["Total bacs", str(total_trays)],
                 ["Montant attendu", _format_fc(total_expected)],
                 ["Montant reçu", _format_fc(total_received)],
-                ["Dettes", _format_fc(total_debts)],
+                ["Dettes du jour", _format_fc(total_debts)],
             ]
         )
     if "cash" in allowed_sections:
         overview_rows.extend(
             [
+                ["Dettes accumulées", _format_fc(accumulated_debts_before)],
                 ["Dettes payées aujourd'hui", _format_fc(paid_debts_today)],
+                ["Dettes accumulées restantes", _format_fc(accumulated_debts_remaining)],
                 ["Total des entrées", _format_fc(total_entries)],
                 ["Dépenses", _format_fc(total_expenses)],
                 ["Solde du jour", _format_fc(balance)],
@@ -587,8 +592,10 @@ def create_daily_pdf_report(
             ["Champ", "Valeur"],
             ["Montant attendu", _format_fc(total_expected)],
             ["Montant reçu", _format_fc(total_received)],
-            ["Dettes", _format_fc(total_debts)],
+            ["Dettes du jour", _format_fc(total_debts)],
+            ["Dettes accumulées", _format_fc(accumulated_debts_before)],
             ["Dettes payées aujourd'hui", _format_fc(paid_debts_today)],
+            ["Dettes accumulées restantes", _format_fc(accumulated_debts_remaining)],
             ["Total des entrées", _format_fc(total_entries)],
             ["Dépenses", _format_fc(total_expenses)],
             ["Solde du jour", _format_fc(balance)],

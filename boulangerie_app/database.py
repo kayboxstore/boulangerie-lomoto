@@ -11,7 +11,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -29,6 +29,17 @@ DB_DATE_FORMAT = "%Y-%m-%d"
 PASSWORD_PREFIX = "PBKDF2$"
 PASSWORD_ITERATIONS = 100_000
 DEFAULT_ADMIN_PASSWORD = "010203"
+OUTSTANDING_DEBT_SQL = (
+    "CASE WHEN IFNULL(Dette, 0) - IFNULL(DettePayee, 0) > 0 "
+    "THEN IFNULL(Dette, 0) - IFNULL(DettePayee, 0) ELSE 0 END"
+)
+DEBT_STATUS_SQL = (
+    "CASE "
+    "WHEN IFNULL(Dette, 0) <= 0 THEN 'Sans dette' "
+    "WHEN IFNULL(DettePayee, 0) >= IFNULL(Dette, 0) THEN 'Payée' "
+    "WHEN IFNULL(DettePayee, 0) > 0 THEN 'Partiellement payée' "
+    "ELSE 'En attente' END"
+)
 
 
 @dataclass
@@ -209,8 +220,11 @@ class DatabaseHelper:
             cls._migrate_stock_configuration_table(connection)
             cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
+            cls._migrate_order_debt_payment_columns(connection)
             cls._migrate_commissions_table(connection)
             cls._normalize_status_values(connection)
+            cls._recalculate_debt_payments(connection)
+            cls._sync_all_commissions(connection)
             cls._insert_default_admin(connection)
             cls._insert_default_stock_config(connection)
         pragma_connection: sqlite3.Connection | None = None
@@ -453,7 +467,9 @@ class DatabaseHelper:
                 NombreBacs INTEGER NOT NULL,
                 MontantAPercevoir REAL NOT NULL,
                 MontantRecu REAL NOT NULL,
-                Dette REAL NOT NULL
+                Dette REAL NOT NULL,
+                DettePayee REAL NOT NULL DEFAULT 0,
+                DetteSoldee INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS Commissions (
@@ -594,7 +610,9 @@ class DatabaseHelper:
                 NombreBacs INTEGER NOT NULL,
                 MontantAPercevoir REAL NOT NULL,
                 MontantRecu REAL NOT NULL,
-                Dette REAL NOT NULL
+                Dette REAL NOT NULL,
+                DettePayee REAL NOT NULL DEFAULT 0,
+                DetteSoldee INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -621,7 +639,7 @@ class DatabaseHelper:
                 connection.execute(
                     """
                     INSERT INTO Commandes_Nouvelle
-                        (Id, DateCommande, Client, Statut, NombreBacs, MontantAPercevoir, MontantRecu, Dette)
+                        (Id, DateCommande, Client, Statut, NombreBacs, MontantAPercevoir, MontantRecu, Dette, DettePayee, DetteSoldee)
                     SELECT
                         Id,
                         DateCommande,
@@ -630,7 +648,9 @@ class DatabaseHelper:
                         IFNULL(NombreBacs, 0),
                         IFNULL(MontantAPercevoir, 0),
                         IFNULL(MontantRecu, 0),
-                        IFNULL(Dette, 0)
+                        IFNULL(Dette, 0),
+                        IFNULL(DettePayee, 0),
+                        IFNULL(DetteSoldee, 0)
                     FROM Commandes
                     """
                 )
@@ -639,6 +659,26 @@ class DatabaseHelper:
 
         connection.execute("DROP TABLE Commandes")
         connection.execute("ALTER TABLE Commandes_Nouvelle RENAME TO Commandes")
+
+    @classmethod
+    def _migrate_order_debt_payment_columns(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "Commandes")
+        if not columns:
+            return
+        if "DettePayee" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE Commandes
+                ADD COLUMN DettePayee REAL NOT NULL DEFAULT 0
+                """
+            )
+        if "DetteSoldee" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE Commandes
+                ADD COLUMN DetteSoldee INTEGER NOT NULL DEFAULT 0
+                """
+            )
 
     @classmethod
     def _migrate_commissions_table(cls, connection: sqlite3.Connection) -> None:
@@ -1272,12 +1312,12 @@ class DatabaseHelper:
     @classmethod
     def get_orders_summary_for_date(cls, target_date: date) -> dict[str, Any]:
         row = cls._fetch_one(
-            """
+            f"""
             SELECT
                 IFNULL(SUM(NombreBacs), 0) AS NombreTotalBacs,
                 IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
                 IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
-                IFNULL(SUM(Dette), 0) AS TotalDettes
+                IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS TotalDettes
             FROM Commandes
             WHERE DateCommande = ?
             """,
@@ -1288,14 +1328,14 @@ class DatabaseHelper:
     @classmethod
     def get_global_orders_summary(cls) -> dict[str, Any]:
         row = cls._fetch_one(
-            """
+            f"""
             SELECT
                 COUNT(*) AS NombreCommandes,
                 IFNULL(SUM(NombreBacs), 0) AS TotalBacs,
                 IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
                 IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
-                IFNULL(SUM(Dette), 0) AS TotalDettes,
-                IFNULL(SUM(CASE WHEN Dette > 0 THEN 1 ELSE 0 END), 0) AS NombreAvecDette
+                IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS TotalDettes,
+                IFNULL(SUM(CASE WHEN {OUTSTANDING_DEBT_SQL} > 0 THEN 1 ELSE 0 END), 0) AS NombreAvecDette
             FROM Commandes
             """
         )
@@ -1320,6 +1360,128 @@ class DatabaseHelper:
         return row or {}
 
     @classmethod
+    def get_accumulated_debt_totals_for_date(cls, target_date: date) -> dict[str, Any]:
+        date_text = target_date.strftime(DB_DATE_FORMAT)
+        total_previous_debts = float(
+            cls._fetch_value(
+                "SELECT IFNULL(SUM(Dette), 0) FROM Commandes WHERE DateCommande < ?",
+                (date_text,),
+            )
+            or 0
+        )
+        paid_before_date = float(
+            cls._fetch_value(
+                """
+                SELECT IFNULL(SUM(DettesPayeesAujourdHui), 0)
+                FROM CaisseJournaliere
+                WHERE DateCaisse < ?
+                """,
+                (date_text,),
+            )
+            or 0
+        )
+        paid_on_date = float(
+            cls._fetch_value(
+                """
+                SELECT IFNULL(SUM(DettesPayeesAujourdHui), 0)
+                FROM CaisseJournaliere
+                WHERE DateCaisse = ?
+                """,
+                (date_text,),
+            )
+            or 0
+        )
+        accumulated_before_payment = max(total_previous_debts - paid_before_date, 0.0)
+        remaining_after_saved_payment = max(accumulated_before_payment - paid_on_date, 0.0)
+        return {
+            "TotalDettesJoursPrecedents": total_previous_debts,
+            "DettesPayeesAvantDate": paid_before_date,
+            "DettesPayeesDate": paid_on_date,
+            "DettesAccumuleesAvantPaiement": accumulated_before_payment,
+            "DettesAccumuleesRestantes": remaining_after_saved_payment,
+            "StatutDettesAccumulees": (
+                "Aucune dette accumulée"
+                if accumulated_before_payment <= 0
+                else "Payées"
+                if remaining_after_saved_payment <= 0
+                else "Partiellement payées"
+                if paid_on_date > 0
+                else "En attente"
+            ),
+        }
+
+    @classmethod
+    def _recalculate_debt_payments(cls, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            UPDATE Commandes
+            SET DettePayee = 0,
+                DetteSoldee = CASE WHEN IFNULL(Dette, 0) <= 0 THEN 1 ELSE 0 END
+            """
+        )
+
+        cash_rows = connection.execute(
+            """
+            SELECT DateCaisse, IFNULL(DettesPayeesAujourdHui, 0) AS Montant
+            FROM CaisseJournaliere
+            WHERE IFNULL(DettesPayeesAujourdHui, 0) > 0
+            ORDER BY DateCaisse ASC, Id ASC
+            """
+        ).fetchall()
+
+        for cash_row in cash_rows:
+            remaining_payment = max(float(cash_row["Montant"] or 0), 0.0)
+            if remaining_payment <= 0:
+                continue
+            order_rows = connection.execute(
+                f"""
+                SELECT Id, IFNULL(Dette, 0) AS Dette, IFNULL(DettePayee, 0) AS DettePayee
+                FROM Commandes
+                WHERE DateCommande < ?
+                  AND {OUTSTANDING_DEBT_SQL} > 0
+                ORDER BY DateCommande ASC, Id ASC
+                """,
+                (cash_row["DateCaisse"],),
+            ).fetchall()
+            for order_row in order_rows:
+                outstanding = max(float(order_row["Dette"] or 0) - float(order_row["DettePayee"] or 0), 0.0)
+                if outstanding <= 0:
+                    continue
+                amount_to_apply = min(outstanding, remaining_payment)
+                connection.execute(
+                    """
+                    UPDATE Commandes
+                    SET DettePayee = IFNULL(DettePayee, 0) + ?,
+                        DetteSoldee = CASE
+                            WHEN IFNULL(DettePayee, 0) + ? >= IFNULL(Dette, 0) THEN 1
+                            ELSE 0
+                        END
+                    WHERE Id = ?
+                    """,
+                    (amount_to_apply, amount_to_apply, order_row["Id"]),
+                )
+                remaining_payment -= amount_to_apply
+                if remaining_payment <= 0:
+                    break
+
+        connection.execute(
+            """
+            UPDATE Commandes
+            SET DetteSoldee = CASE
+                WHEN IFNULL(Dette, 0) <= 0 THEN 1
+                WHEN IFNULL(DettePayee, 0) >= IFNULL(Dette, 0) THEN 1
+                ELSE 0
+            END
+            """
+        )
+
+    @classmethod
+    def recalculate_debt_payments(cls) -> None:
+        with cls.connect() as connection:
+            cls._recalculate_debt_payments(connection)
+            cls._sync_all_commissions(connection)
+
+    @classmethod
     def save_cash_day(
         cls,
         target_date: date,
@@ -1329,6 +1491,16 @@ class DatabaseHelper:
         paid_debts_details: str = "",
     ) -> None:
         cls.ensure_day_open_for_write(target_date, "la caisse")
+        if total_expenses < 0:
+            raise ValueError("Le montant total des dépenses ne peut pas être négatif.")
+        if paid_debts_today < 0:
+            raise ValueError("Le montant des dettes payées aujourd'hui ne peut pas être négatif.")
+        accumulated = cls.get_accumulated_debt_totals_for_date(target_date)
+        available_debts = float(accumulated.get("DettesAccumuleesAvantPaiement", 0) or 0)
+        if paid_debts_today > available_debts + 0.01:
+            raise ValueError(
+                "Le montant des dettes payées aujourd'hui dépasse les dettes accumulées des jours précédents."
+            )
         date_text = target_date.strftime(DB_DATE_FORMAT)
         exists = int(
             cls._fetch_value(
@@ -1354,11 +1526,12 @@ class DatabaseHelper:
                 """,
                 (date_text, total_expenses, expense_details, paid_debts_today, paid_debts_details),
             )
+        cls.recalculate_debt_payments()
 
     @classmethod
     def list_cash_days(cls) -> list[dict[str, Any]]:
         return cls._fetch_all(
-            """
+            f"""
             SELECT
                 c.Id,
                 c.DateCaisse,
@@ -1366,7 +1539,23 @@ class DatabaseHelper:
                 IFNULL(cmd.MontantAttendu, 0) AS MontantAttendu,
                 IFNULL(cmd.MontantRecu, 0) AS MontantRecu,
                 IFNULL(cmd.TotalDettes, 0) AS TotalDettes,
+                CASE
+                    WHEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) > 0
+                    THEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0)
+                    ELSE 0
+                END AS TotalDettesAccumulees,
                 IFNULL(c.DettesPayeesAujourdHui, 0) AS DettesPayeesAujourdHui,
+                CASE
+                    WHEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) - IFNULL(c.DettesPayeesAujourdHui, 0) > 0
+                    THEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) - IFNULL(c.DettesPayeesAujourdHui, 0)
+                    ELSE 0
+                END AS DettesAccumuleesRestantes,
+                CASE
+                    WHEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) <= 0 THEN 'Aucune dette accumulée'
+                    WHEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) - IFNULL(c.DettesPayeesAujourdHui, 0) <= 0 THEN 'Payées'
+                    WHEN IFNULL(c.DettesPayeesAujourdHui, 0) > 0 THEN 'Partiellement payées'
+                    ELSE 'En attente'
+                END AS StatutDettesAccumulees,
                 (IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) AS TotalEntrees,
                 c.MontantTotalDepenses,
                 ((IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) - c.MontantTotalDepenses) AS Solde,
@@ -1379,10 +1568,26 @@ class DatabaseHelper:
                     SUM(NombreBacs) AS NombreTotalBacs,
                     SUM(MontantAPercevoir) AS MontantAttendu,
                     SUM(MontantRecu) AS MontantRecu,
-                    SUM(Dette) AS TotalDettes
+                    SUM({OUTSTANDING_DEBT_SQL}) AS TotalDettes
                 FROM Commandes
                 GROUP BY DateCommande
             ) cmd ON cmd.DateCommande = c.DateCaisse
+            LEFT JOIN (
+                SELECT
+                    base.DateCaisse,
+                    IFNULL(SUM(o.Dette), 0) AS TotalDettesPrecedentes
+                FROM CaisseJournaliere base
+                LEFT JOIN Commandes o ON o.DateCommande < base.DateCaisse
+                GROUP BY base.DateCaisse
+            ) prev ON prev.DateCaisse = c.DateCaisse
+            LEFT JOIN (
+                SELECT
+                    base.DateCaisse,
+                    IFNULL(SUM(previous_cash.DettesPayeesAujourdHui), 0) AS DettesPayeesAvantDate
+                FROM CaisseJournaliere base
+                LEFT JOIN CaisseJournaliere previous_cash ON previous_cash.DateCaisse < base.DateCaisse
+                GROUP BY base.DateCaisse
+            ) prev_pay ON prev_pay.DateCaisse = c.DateCaisse
             ORDER BY c.DateCaisse DESC
             """
         )
@@ -1390,7 +1595,7 @@ class DatabaseHelper:
     @classmethod
     def list_cash_days_by_date(cls, target_date: date) -> list[dict[str, Any]]:
         return cls._fetch_all(
-            """
+            f"""
             SELECT
                 c.Id,
                 c.DateCaisse,
@@ -1398,7 +1603,23 @@ class DatabaseHelper:
                 IFNULL(cmd.MontantAttendu, 0) AS MontantAttendu,
                 IFNULL(cmd.MontantRecu, 0) AS MontantRecu,
                 IFNULL(cmd.TotalDettes, 0) AS TotalDettes,
+                CASE
+                    WHEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) > 0
+                    THEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0)
+                    ELSE 0
+                END AS TotalDettesAccumulees,
                 IFNULL(c.DettesPayeesAujourdHui, 0) AS DettesPayeesAujourdHui,
+                CASE
+                    WHEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) - IFNULL(c.DettesPayeesAujourdHui, 0) > 0
+                    THEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) - IFNULL(c.DettesPayeesAujourdHui, 0)
+                    ELSE 0
+                END AS DettesAccumuleesRestantes,
+                CASE
+                    WHEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) <= 0 THEN 'Aucune dette accumulée'
+                    WHEN IFNULL(prev.TotalDettesPrecedentes, 0) - IFNULL(prev_pay.DettesPayeesAvantDate, 0) - IFNULL(c.DettesPayeesAujourdHui, 0) <= 0 THEN 'Payées'
+                    WHEN IFNULL(c.DettesPayeesAujourdHui, 0) > 0 THEN 'Partiellement payées'
+                    ELSE 'En attente'
+                END AS StatutDettesAccumulees,
                 (IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) AS TotalEntrees,
                 c.MontantTotalDepenses,
                 ((IFNULL(cmd.MontantRecu, 0) + IFNULL(c.DettesPayeesAujourdHui, 0)) - c.MontantTotalDepenses) AS Solde,
@@ -1411,10 +1632,26 @@ class DatabaseHelper:
                     SUM(NombreBacs) AS NombreTotalBacs,
                     SUM(MontantAPercevoir) AS MontantAttendu,
                     SUM(MontantRecu) AS MontantRecu,
-                    SUM(Dette) AS TotalDettes
+                    SUM({OUTSTANDING_DEBT_SQL}) AS TotalDettes
                 FROM Commandes
                 GROUP BY DateCommande
             ) cmd ON cmd.DateCommande = c.DateCaisse
+            LEFT JOIN (
+                SELECT
+                    base.DateCaisse,
+                    IFNULL(SUM(o.Dette), 0) AS TotalDettesPrecedentes
+                FROM CaisseJournaliere base
+                LEFT JOIN Commandes o ON o.DateCommande < base.DateCaisse
+                GROUP BY base.DateCaisse
+            ) prev ON prev.DateCaisse = c.DateCaisse
+            LEFT JOIN (
+                SELECT
+                    base.DateCaisse,
+                    IFNULL(SUM(previous_cash.DettesPayeesAujourdHui), 0) AS DettesPayeesAvantDate
+                FROM CaisseJournaliere base
+                LEFT JOIN CaisseJournaliere previous_cash ON previous_cash.DateCaisse < base.DateCaisse
+                GROUP BY base.DateCaisse
+            ) prev_pay ON prev_pay.DateCaisse = c.DateCaisse
             WHERE c.DateCaisse = ?
             ORDER BY c.Id DESC
             """,
@@ -1422,11 +1659,87 @@ class DatabaseHelper:
         )
 
     @classmethod
+    def list_cash_balance_by_period(cls, start_date: date, end_date: date) -> list[dict[str, Any]]:
+        if end_date < start_date:
+            raise ValueError("La date de fin doit être supérieure ou égale à la date de début.")
+
+        order_rows = cls._fetch_all(
+            f"""
+            SELECT
+                DateCommande,
+                IFNULL(SUM(NombreBacs), 0) AS NombreTotalBacs,
+                IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
+                IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
+                IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS TotalDettes
+            FROM Commandes
+            WHERE DateCommande BETWEEN ? AND ?
+            GROUP BY DateCommande
+            """,
+            (start_date.strftime(DB_DATE_FORMAT), end_date.strftime(DB_DATE_FORMAT)),
+        )
+        cash_rows = cls._fetch_all(
+            """
+            SELECT
+                DateCaisse,
+                IFNULL(DettesPayeesAujourdHui, 0) AS DettesPayeesAujourdHui,
+                IFNULL(MontantTotalDepenses, 0) AS MontantTotalDepenses,
+                IFNULL(DepensesEffectuees, '') AS DepensesEffectuees,
+                IFNULL(DettesPayeesDetails, '') AS DettesPayeesDetails
+            FROM CaisseJournaliere
+            WHERE DateCaisse BETWEEN ? AND ?
+            """,
+            (start_date.strftime(DB_DATE_FORMAT), end_date.strftime(DB_DATE_FORMAT)),
+        )
+        orders_by_date = {str(row["DateCommande"]): row for row in order_rows}
+        cash_by_date = {str(row["DateCaisse"]): row for row in cash_rows}
+
+        rows: list[dict[str, Any]] = []
+        running_balance = 0.0
+        current_date = start_date
+        while current_date <= end_date:
+            date_text = current_date.strftime(DB_DATE_FORMAT)
+            order_row = orders_by_date.get(date_text, {})
+            cash_row = cash_by_date.get(date_text, {})
+            received = float(order_row.get("MontantRecu", 0) or 0)
+            paid_debts = float(cash_row.get("DettesPayeesAujourdHui", 0) or 0)
+            expenses = float(cash_row.get("MontantTotalDepenses", 0) or 0)
+            entries = received + paid_debts
+            balance = entries - expenses
+            running_balance += balance
+            accumulated = cls.get_accumulated_debt_totals_for_date(current_date)
+            rows.append(
+                {
+                    "DateCaisse": date_text,
+                    "NombreTotalBacs": int(float(order_row.get("NombreTotalBacs", 0) or 0)),
+                    "MontantAttendu": float(order_row.get("MontantAttendu", 0) or 0),
+                    "MontantRecu": received,
+                    "TotalDettes": float(order_row.get("TotalDettes", 0) or 0),
+                    "TotalDettesAccumulees": float(accumulated.get("DettesAccumuleesAvantPaiement", 0) or 0),
+                    "DettesPayeesAujourdHui": paid_debts,
+                    "DettesAccumuleesRestantes": max(
+                        float(accumulated.get("DettesAccumuleesAvantPaiement", 0) or 0) - paid_debts,
+                        0.0,
+                    ),
+                    "TotalEntrees": entries,
+                    "MontantTotalDepenses": expenses,
+                    "Solde": balance,
+                    "SoldeCumule": running_balance,
+                    "DepensesEffectuees": str(cash_row.get("DepensesEffectuees", "") or ""),
+                    "DettesPayeesDetails": str(cash_row.get("DettesPayeesDetails", "") or ""),
+                }
+            )
+            current_date += timedelta(days=1)
+        return rows
+
+    @classmethod
     def delete_cash_day(cls, cash_id: int) -> int:
         original_date_text = cls._get_record_date_text("CaisseJournaliere", "DateCaisse", cash_id)
         if original_date_text:
             cls.ensure_day_open_for_write(original_date_text, "la caisse")
-        return cls._execute("DELETE FROM CaisseJournaliere WHERE Id = ?", (cash_id,))
+        deleted = cls._execute("DELETE FROM CaisseJournaliere WHERE Id = ?", (cash_id,))
+        if deleted:
+            cls.recalculate_debt_payments()
+        return deleted
 
     @classmethod
     def get_total_cash(cls) -> float:
@@ -1451,8 +1764,19 @@ class DatabaseHelper:
     @classmethod
     def list_orders(cls) -> list[dict[str, Any]]:
         return cls._fetch_all(
-            """
-            SELECT Id, DateCommande, Client, Statut, NombreBacs, MontantAPercevoir, MontantRecu, Dette
+            f"""
+            SELECT
+                Id,
+                DateCommande,
+                Client,
+                Statut,
+                NombreBacs,
+                MontantAPercevoir,
+                MontantRecu,
+                Dette AS DetteInitiale,
+                IFNULL(DettePayee, 0) AS DettePayee,
+                {OUTSTANDING_DEBT_SQL} AS Dette,
+                {DEBT_STATUS_SQL} AS StatutDette
             FROM Commandes
             ORDER BY DateCommande DESC, Id DESC
             """
@@ -1461,8 +1785,19 @@ class DatabaseHelper:
     @classmethod
     def list_orders_by_date(cls, target_date: date) -> list[dict[str, Any]]:
         return cls._fetch_all(
-            """
-            SELECT Id, DateCommande, Client, Statut, NombreBacs, MontantAPercevoir, MontantRecu, Dette
+            f"""
+            SELECT
+                Id,
+                DateCommande,
+                Client,
+                Statut,
+                NombreBacs,
+                MontantAPercevoir,
+                MontantRecu,
+                Dette AS DetteInitiale,
+                IFNULL(DettePayee, 0) AS DettePayee,
+                {OUTSTANDING_DEBT_SQL} AS Dette,
+                {DEBT_STATUS_SQL} AS StatutDette
             FROM Commandes
             WHERE DateCommande = ?
             ORDER BY Id DESC
@@ -1498,10 +1833,11 @@ class DatabaseHelper:
                 debt,
             ),
         )
+        cls.recalculate_debt_payments()
 
     @classmethod
     def count_orders_with_debt(cls) -> int:
-        return int(cls._fetch_value("SELECT COUNT(*) FROM Commandes WHERE Dette > 0"))
+        return int(cls._fetch_value(f"SELECT COUNT(*) FROM Commandes WHERE {OUTSTANDING_DEBT_SQL} > 0"))
 
     @classmethod
     def get_debt_alerts(cls, limit: int = 10) -> list[dict[str, Any]]:
@@ -1512,10 +1848,10 @@ class DatabaseHelper:
                 TRIM(Client) AS Client,
                 COUNT(*) AS NombreCommandes,
                 IFNULL(SUM(NombreBacs), 0) AS TotalBacs,
-                IFNULL(SUM(Dette), 0) AS DetteTotale,
+                IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS DetteTotale,
                 MAX(DateCommande) AS DerniereCommande
             FROM Commandes
-            WHERE IFNULL(Dette, 0) > 0
+            WHERE {OUTSTANDING_DEBT_SQL} > 0
             GROUP BY UPPER(TRIM(Client))
             ORDER BY DetteTotale DESC, DerniereCommande DESC, Client ASC
             LIMIT {row_limit}
@@ -1536,7 +1872,7 @@ class DatabaseHelper:
     ) -> int:
         original_date_text = cls._get_record_date_text("Commandes", "DateCommande", order_id)
         cls._ensure_update_dates_open("les commandes", original_date_text, target_date)
-        return cls._execute(
+        updated = cls._execute(
             """
             UPDATE Commandes
             SET
@@ -1560,13 +1896,19 @@ class DatabaseHelper:
                 order_id,
             ),
         )
+        if updated:
+            cls.recalculate_debt_payments()
+        return updated
 
     @classmethod
     def delete_order(cls, order_id: int) -> int:
         original_date_text = cls._get_record_date_text("Commandes", "DateCommande", order_id)
         if original_date_text:
             cls.ensure_day_open_for_write(original_date_text, "les commandes")
-        return cls._execute("DELETE FROM Commandes WHERE Id = ?", (order_id,))
+        deleted = cls._execute("DELETE FROM Commandes WHERE Id = ?", (order_id,))
+        if deleted:
+            cls.recalculate_debt_payments()
+        return deleted
 
     @classmethod
     def find_existing_order(
@@ -1625,13 +1967,67 @@ class DatabaseHelper:
         return [row["Client"] for row in rows]
 
     @classmethod
+    def _sync_commissions_for_date(cls, connection: sqlite3.Connection, date_text: str) -> None:
+        connection.execute("DELETE FROM Commissions WHERE DateCommission = ?", (date_text,))
+        connection.execute(
+            f"""
+            INSERT INTO Commissions
+                (DateCommission, Nom, Statut, NombreBacs, MontantPaye, Commissions, Dettes, NetAPayer)
+            SELECT
+                DateCommande,
+                TRIM(Client) AS Nom,
+                CASE
+                    WHEN COUNT(DISTINCT Statut) = 1 THEN MAX(Statut)
+                    ELSE 'Mixte'
+                END AS Statut,
+                IFNULL(SUM(NombreBacs), 0) AS NombreBacs,
+                IFNULL(SUM(MontantRecu), 0) AS MontantPaye,
+                IFNULL(SUM(
+                    CASE
+                        WHEN Statut = 'Maman' THEN NombreBacs * 1650
+                        ELSE 0
+                    END
+                ), 0) AS Commissions,
+                IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS Dettes,
+                (
+                    IFNULL(SUM(
+                        CASE
+                            WHEN Statut = 'Maman' THEN NombreBacs * 1650
+                            ELSE 0
+                        END
+                    ), 0) - IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0)
+                ) AS NetAPayer
+            FROM Commandes
+            WHERE DateCommande = ?
+            GROUP BY DateCommande, UPPER(TRIM(Client))
+            HAVING Commissions > 0
+            ORDER BY Nom
+            """,
+            (date_text,),
+        )
+
+    @classmethod
+    def _sync_all_commissions(cls, connection: sqlite3.Connection) -> None:
+        date_rows = connection.execute(
+            "SELECT DISTINCT DateCommande FROM Commandes ORDER BY DateCommande"
+        ).fetchall()
+        connection.execute("DELETE FROM Commissions")
+        for row in date_rows:
+            cls._sync_commissions_for_date(connection, str(row["DateCommande"]))
+
+    @classmethod
+    def sync_all_commissions(cls) -> None:
+        with cls.connect() as connection:
+            cls._sync_all_commissions(connection)
+
+    @classmethod
     def get_commission_synthesis_from_orders(
         cls,
         target_date: date,
         client: str,
     ) -> dict[str, Any]:
         row = cls._fetch_one(
-            """
+            f"""
             SELECT
                 CASE
                     WHEN COUNT(DISTINCT Statut) = 1 THEN MAX(Statut)
@@ -1653,7 +2049,7 @@ class DatabaseHelper:
                         ELSE 0
                     END
                 ), 0) AS Commissions,
-                IFNULL(SUM(Dette), 0) AS Dettes,
+                IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS Dettes,
                 (
                     IFNULL(SUM(
                         CASE
@@ -1668,7 +2064,7 @@ class DatabaseHelper:
                             WHEN Statut = 'Dépositaire 4.100Fc' THEN 0
                             ELSE 0
                         END
-                    ), 0) - IFNULL(SUM(Dette), 0)
+                    ), 0) - IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0)
                 ) AS NetAPayer
             FROM Commandes
             WHERE DateCommande = ? AND Client = ?
@@ -1710,23 +2106,9 @@ class DatabaseHelper:
         debts: float,
         net_to_pay: float,
     ) -> None:
-        cls.ensure_day_open_for_write(target_date, "les commissions")
-        cls._execute(
-            """
-            INSERT INTO Commissions
-                (DateCommission, Nom, Statut, NombreBacs, MontantPaye, Commissions, Dettes, NetAPayer)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                target_date.strftime(DB_DATE_FORMAT),
-                name,
-                status,
-                number_of_trays,
-                amount_paid,
-                commissions,
-                debts,
-                net_to_pay,
-            ),
+        raise ValueError(
+            "Les commissions sont calculées automatiquement à partir des commandes. "
+            "Modifiez la commande correspondante pour corriger une commission."
         )
 
     @classmethod
@@ -1742,41 +2124,17 @@ class DatabaseHelper:
         debts: float,
         net_to_pay: float,
     ) -> int:
-        original_date_text = cls._get_record_date_text("Commissions", "DateCommission", commission_id)
-        cls._ensure_update_dates_open("les commissions", original_date_text, target_date)
-        return cls._execute(
-            """
-            UPDATE Commissions
-            SET
-                DateCommission = ?,
-                Nom = ?,
-                Statut = ?,
-                NombreBacs = ?,
-                MontantPaye = ?,
-                Commissions = ?,
-                Dettes = ?,
-                NetAPayer = ?
-            WHERE Id = ?
-            """,
-            (
-                target_date.strftime(DB_DATE_FORMAT),
-                name,
-                status,
-                number_of_trays,
-                amount_paid,
-                commissions,
-                debts,
-                net_to_pay,
-                commission_id,
-            ),
+        raise ValueError(
+            "Les commissions sont calculées automatiquement à partir des commandes. "
+            "Modifiez la commande correspondante pour corriger une commission."
         )
 
     @classmethod
     def delete_commission(cls, commission_id: int) -> int:
-        original_date_text = cls._get_record_date_text("Commissions", "DateCommission", commission_id)
-        if original_date_text:
-            cls.ensure_day_open_for_write(original_date_text, "les commissions")
-        return cls._execute("DELETE FROM Commissions WHERE Id = ?", (commission_id,))
+        raise ValueError(
+            "Les commissions sont calculées automatiquement à partir des commandes. "
+            "Supprimez ou modifiez la commande correspondante pour corriger une commission."
+        )
 
     @classmethod
     def get_total_commissions(cls) -> float:

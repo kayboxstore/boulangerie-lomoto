@@ -64,9 +64,11 @@ REMOTE_DATABASE_METHODS = {
     "get_orders_summary_for_date",
     "get_global_orders_summary",
     "get_cash_for_date",
+    "get_accumulated_debt_totals_for_date",
     "save_cash_day",
     "list_cash_days",
     "list_cash_days_by_date",
+    "list_cash_balance_by_period",
     "delete_cash_day",
     "get_total_cash",
     "list_orders",
@@ -82,9 +84,6 @@ REMOTE_DATABASE_METHODS = {
     "list_clients_from_orders_by_date",
     "get_commission_synthesis_from_orders",
     "find_existing_commission",
-    "add_commission",
-    "update_commission",
-    "delete_commission",
     "get_total_commissions",
 }
 

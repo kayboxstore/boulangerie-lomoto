@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import os
 import sys
 import threading
@@ -14,6 +15,12 @@ from typing import Any, Callable
 
 from PIL import Image, ImageTk
 
+from .cash_reports import (
+    create_cash_balance_excel_report,
+    create_cash_balance_pdf_report,
+    month_bounds as cash_month_bounds,
+    week_bounds as cash_week_bounds,
+)
 from .connected_mode import (
     ConnectionSettings,
     DiscoveredServerInfo,
@@ -474,8 +481,10 @@ class DateField(ttk.Frame):
         self.var = tk.StringVar(value=initial or today_iso())
         self.entry = ttk.Entry(self, textvariable=self.var, width=14)
         self.entry.grid(row=0, column=0, sticky="ew")
+        self.pick_button = ttk.Button(self, text="Choisir", command=self.open_picker)
+        self.pick_button.grid(row=0, column=1, padx=(6, 0))
         self.button = ttk.Button(self, text="Aujourd'hui", command=self.set_today)
-        self.button.grid(row=0, column=1, padx=(6, 0))
+        self.button.grid(row=0, column=2, padx=(6, 0))
         self.columnconfigure(0, weight=1)
         self._callbacks: list[Callable[[], None]] = []
         self.entry.bind("<FocusOut>", lambda _event: self._notify())
@@ -492,6 +501,62 @@ class DateField(ttk.Frame):
         self.var.set(today_iso())
         self._notify()
 
+    def open_picker(self) -> None:
+        try:
+            selected_date = self.get_date()
+        except ValueError:
+            selected_date = date.today()
+
+        picker = tk.Toplevel(self)
+        picker.title("Choisir une date")
+        picker.resizable(False, False)
+        picker.transient(self.winfo_toplevel())
+        picker.grab_set()
+        apply_window_icon(picker)
+
+        year_var = tk.IntVar(value=selected_date.year)
+        month_var = tk.IntVar(value=selected_date.month)
+        header = ttk.Frame(picker, padding=10)
+        header.pack(fill="x")
+        ttk.Spinbox(header, from_=2000, to=2100, textvariable=year_var, width=7).grid(row=0, column=0, padx=4)
+        ttk.Combobox(
+            header,
+            textvariable=month_var,
+            values=list(range(1, 13)),
+            state="readonly",
+            width=5,
+        ).grid(row=0, column=1, padx=4)
+        days_frame = ttk.Frame(picker, padding=(10, 0, 10, 10))
+        days_frame.pack()
+
+        def select_day(day: int) -> None:
+            self.var.set(date(int(year_var.get()), int(month_var.get()), day).strftime("%Y-%m-%d"))
+            self._notify()
+            picker.destroy()
+
+        def render_days(*_args: Any) -> None:
+            for child in days_frame.winfo_children():
+                child.destroy()
+            for column, label in enumerate(("Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim")):
+                ttk.Label(days_frame, text=label, anchor="center").grid(row=0, column=column, padx=2, pady=2)
+            month_days = calendar.monthcalendar(int(year_var.get()), int(month_var.get()))
+            for row_index, week in enumerate(month_days, start=1):
+                for column, day_number in enumerate(week):
+                    if day_number == 0:
+                        ttk.Label(days_frame, text="").grid(row=row_index, column=column, padx=2, pady=2)
+                        continue
+                    ttk.Button(
+                        days_frame,
+                        text=str(day_number),
+                        width=4,
+                        command=lambda value=day_number: select_day(value),
+                    ).grid(row=row_index, column=column, padx=2, pady=2)
+
+        year_var.trace_add("write", render_days)
+        month_var.trace_add("write", render_days)
+        render_days()
+        center_window(picker)
+
     def get_date(self) -> date:
         return parse_date(self.var.get())
 
@@ -507,6 +572,7 @@ class DateField(ttk.Frame):
     def set_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         self.entry.configure(state=state)
+        self.pick_button.state(["!disabled"] if enabled else ["disabled"])
         self.button.state(["!disabled"] if enabled else ["disabled"])
 
 
@@ -1144,6 +1210,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.configure(bg=MODULE_BACKGROUND)
         self.resizable(True, True)
         apply_window_icon(self)
+        self.transient(parent)
+        self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
 
         settings = DatabaseHelper.get_connection_settings()
@@ -1688,6 +1756,8 @@ class ActivityHistoryWindow(tk.Toplevel):
         self.resizable(True, True)
         apply_window_icon(self)
         self.protocol("WM_DELETE_WINDOW", self.close_window)
+        self.transient(parent)
+        self.grab_set()
         self.scrollable_content = ScrollableContent(self, padding=(10, 4, 10, 10), background=MODULE_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         shell = self.scrollable_content.content
@@ -1809,6 +1879,7 @@ class DashboardWindow(tk.Toplevel):
         self.update_result_queue: Queue[UpdateCheckResult] = Queue()
         self.update_check_running = False
         self.live_refresh_after_id: str | None = None
+        self.critical_alerts_shown = False
         self.metric_cards: list[DashboardMetricCard] = []
         self.stock_alerts_var = tk.StringVar(value="Chargement des alertes de stock...")
         self.debt_alerts_var = tk.StringVar(value="Chargement des alertes de dettes...")
@@ -1829,6 +1900,7 @@ class DashboardWindow(tk.Toplevel):
         maximize_window(self, 980, 640)
         self.bind("<FocusIn>", lambda _event: self.refresh_summary())
         self.after(1000, self.start_weekly_update_check)
+        self.after(700, self.show_role_critical_alerts)
         if self.is_live_sync_enabled():
             self.schedule_live_refresh()
 
@@ -2279,6 +2351,38 @@ class DashboardWindow(tk.Toplevel):
         else:
             self.debt_alerts_var.set("Aucune dette en attente pour le moment.")
 
+    def show_role_critical_alerts(self) -> None:
+        if self.critical_alerts_shown or not self.winfo_exists():
+            return
+        self.critical_alerts_shown = True
+        messages: list[str] = []
+        try:
+            if self.user.role in {"Admin", "Gestionnaire de stock"}:
+                stock_alerts = DatabaseHelper.get_low_stock_alerts()
+                if stock_alerts:
+                    lines = ["Stock critique :"]
+                    for row in stock_alerts[:5]:
+                        lines.append(
+                            f"- {row['Article']} : restant {format_number(float(row['StockRestant']))} {row['Unite']}"
+                        )
+                    messages.append("\n".join(lines))
+            if self.user.role in {"Admin", "Caissier", "Gestionnaire des commandes"}:
+                debt_alerts = DatabaseHelper.get_debt_alerts(limit=5)
+                if debt_alerts:
+                    lines = ["Dettes critiques :"]
+                    for row in debt_alerts:
+                        lines.append(f"- {row['Client']} : {format_fc(float(row['DetteTotale'] or 0))}")
+                    messages.append("\n".join(lines))
+        except Exception:
+            return
+        if not messages:
+            return
+        messagebox.showwarning(
+            "Alertes critiques",
+            "\n\n".join(messages) + "\n\nCes alertes restent visibles sur le tableau de bord.",
+            parent=self,
+        )
+
     def refresh_recent_activity(self) -> None:
         if self.user.role != "Admin":
             return
@@ -2627,41 +2731,42 @@ class DashboardWindow(tk.Toplevel):
             return False
         return True
 
+    def open_large_module(self, window_factory: Callable[[DashboardWindow], BaseModuleWindow]) -> None:
+        self.withdraw()
+        try:
+            window = window_factory(self)
+            self.wait_window(window)
+        finally:
+            if self.winfo_exists():
+                self.deiconify()
+                self.lift()
+                self.refresh_summary()
+
     def open_cash(self) -> None:
         if not self.can_access("Caisse"):
             return
-        window = CashWindow(self)
-        self.wait_window(window)
-        self.refresh_summary()
+        self.open_large_module(CashWindow)
 
     def open_stock(self) -> None:
         if not self.can_access("Stock"):
             return
-        window = StockWindow(self)
-        self.wait_window(window)
-        self.refresh_summary()
+        self.open_large_module(StockWindow)
 
     def open_orders(self) -> None:
         if not self.can_access("Commandes"):
             return
-        window = OrdersWindow(self)
-        self.wait_window(window)
-        self.refresh_summary()
+        self.open_large_module(OrdersWindow)
 
     def open_commissions(self) -> None:
         if not self.can_access("Commissions"):
             return
-        window = CommissionsWindow(self)
-        self.wait_window(window)
-        self.refresh_summary()
+        self.open_large_module(CommissionsWindow)
 
     def open_users(self) -> None:
         if self.user.role != "Admin":
             messagebox.showwarning("Accès refusé", "Accès non autorisé.")
             return
-        window = UsersWindow(self)
-        self.wait_window(window)
-        self.refresh_summary()
+        self.open_large_module(UsersWindow)
 
     def logout(self) -> None:
         if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment vous déconnecter ?"):
@@ -2704,6 +2809,9 @@ class BaseModuleWindow(tk.Toplevel):
         self.resizable(True, True)
         apply_window_icon(self)
         self.protocol("WM_DELETE_WINDOW", self.close_window)
+        if not start_maximized:
+            self.transient(parent)
+            self.grab_set()
         self.scrollable_content = ScrollableContent(self, padding=(10, 4, 10, 10), background=MODULE_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         shell = self.scrollable_content.content
@@ -3169,6 +3277,10 @@ class PdfReportWindow(BaseModuleWindow):
         ttk.Radiobutton(mode_row, text="Mensuel", value="monthly", variable=self.report_mode_var).grid(row=0, column=1)
         ttk.Radiobutton(mode_row, text="Période", value="period", variable=self.report_mode_var).grid(row=0, column=2, padx=(10, 0))
 
+        if self.role in {"Admin", "Caissier"}:
+            ttk.Radiobutton(mode_row, text="Caisse hebdo", value="cash_weekly", variable=self.report_mode_var).grid(row=1, column=0, padx=(0, 10), pady=(6, 0))
+            ttk.Radiobutton(mode_row, text="Bilan caisse mensuel", value="cash_monthly", variable=self.report_mode_var).grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
+
         ttk.Label(form, text="Date de début / référence").grid(row=1, column=0, sticky="w", pady=6)
         self.date_field = DateField(form)
         self.date_field.grid(row=1, column=1, sticky="ew", pady=6)
@@ -3231,7 +3343,13 @@ class PdfReportWindow(BaseModuleWindow):
 
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         mode = self.report_mode_var.get().strip().lower()
-        if mode == "monthly":
+        if mode == "cash_weekly":
+            week_start, week_end = cash_week_bounds(target_date)
+            suggested_name = f"bilan-caisse-hebdomadaire-{week_start.strftime('%Y%m%d')}-{week_end.strftime('%Y%m%d')}.pdf"
+        elif mode == "cash_monthly":
+            month_start, _month_end = cash_month_bounds(target_date)
+            suggested_name = f"bilan-caisse-mensuel-{month_start.strftime('%Y%m')}.pdf"
+        elif mode == "monthly":
             suggested_name = f"rapport-mensuel-{target_date.strftime('%Y%m')}.pdf"
         elif mode == "period":
             suggested_name = f"rapport-periode-{target_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}.pdf"
@@ -3249,7 +3367,29 @@ class PdfReportWindow(BaseModuleWindow):
             return
 
         try:
-            if mode == "monthly":
+            if mode == "cash_weekly":
+                week_start, week_end = cash_week_bounds(target_date)
+                report_path = create_cash_balance_pdf_report(
+                    week_start,
+                    week_end,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                    title="BILAN HEBDOMADAIRE DE CAISSE",
+                )
+            elif mode == "cash_monthly":
+                month_start, month_end = cash_month_bounds(target_date)
+                report_path = create_cash_balance_pdf_report(
+                    month_start,
+                    month_end,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                    title="BALANCE MENSUELLE DE CAISSE",
+                )
+            elif mode == "monthly":
                 report_path = create_monthly_pdf_report(
                     target_date,
                     destination,
@@ -3347,6 +3487,10 @@ class ExcelReportWindow(BaseModuleWindow):
         ttk.Radiobutton(mode_row, text="Mensuel", value="monthly", variable=self.report_mode_var).grid(row=0, column=1)
         ttk.Radiobutton(mode_row, text="Période", value="period", variable=self.report_mode_var).grid(row=0, column=2, padx=(10, 0))
 
+        if self.role in {"Admin", "Caissier"}:
+            ttk.Radiobutton(mode_row, text="Caisse hebdo", value="cash_weekly", variable=self.report_mode_var).grid(row=1, column=0, padx=(0, 10), pady=(6, 0))
+            ttk.Radiobutton(mode_row, text="Bilan caisse mensuel", value="cash_monthly", variable=self.report_mode_var).grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
+
         ttk.Label(form, text="Date de début / référence").grid(row=1, column=0, sticky="w", pady=6)
         self.date_field = DateField(form)
         self.date_field.grid(row=1, column=1, sticky="ew", pady=6)
@@ -3412,7 +3556,13 @@ class ExcelReportWindow(BaseModuleWindow):
 
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         mode = self.report_mode_var.get().strip().lower()
-        if mode == "monthly":
+        if mode == "cash_weekly":
+            week_start, week_end = cash_week_bounds(target_date)
+            suggested_name = f"bilan-caisse-hebdomadaire-{week_start.strftime('%Y%m%d')}-{week_end.strftime('%Y%m%d')}.xlsx"
+        elif mode == "cash_monthly":
+            month_start, _month_end = cash_month_bounds(target_date)
+            suggested_name = f"bilan-caisse-mensuel-{month_start.strftime('%Y%m')}.xlsx"
+        elif mode == "monthly":
             suggested_name = f"rapport-excel-mensuel-{target_date.strftime('%Y%m')}.xlsx"
         elif mode == "period":
             suggested_name = (
@@ -3432,7 +3582,29 @@ class ExcelReportWindow(BaseModuleWindow):
             return
 
         try:
-            if mode == "monthly":
+            if mode == "cash_weekly":
+                week_start, week_end = cash_week_bounds(target_date)
+                report_path = create_cash_balance_excel_report(
+                    week_start,
+                    week_end,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                    title="BILAN HEBDOMADAIRE DE CAISSE",
+                )
+            elif mode == "cash_monthly":
+                month_start, month_end = cash_month_bounds(target_date)
+                report_path = create_cash_balance_excel_report(
+                    month_start,
+                    month_end,
+                    destination,
+                    role=self.role,
+                    generated_by=self.parent.user.display_name,
+                    generated_role=self.role,
+                    title="BALANCE MENSUELLE DE CAISSE",
+                )
+            elif mode == "monthly":
                 report_path = create_monthly_excel_report(
                     target_date,
                     destination,
@@ -4448,14 +4620,20 @@ class OrdersWindow(BaseModuleWindow):
                 "NombreBacs",
                 "MontantAPercevoir",
                 "MontantRecu",
+                "DetteInitiale",
+                "DettePayee",
                 "Dette",
+                "StatutDette",
             ],
             headings={
                 "DateCommande": "Date",
                 "NombreBacs": "Bacs",
                 "MontantAPercevoir": "À percevoir",
                 "MontantRecu": "Reçu",
-                "Dette": "Dette",
+                "DetteInitiale": "Dette initiale",
+                "DettePayee": "Dette payée",
+                "Dette": "Dette restante",
+                "StatutDette": "Statut dette",
             },
             hidden_columns=["Id"],
             formatters={
@@ -4463,6 +4641,8 @@ class OrdersWindow(BaseModuleWindow):
                 "NombreBacs": lambda value: f"{int(value)}",
                 "MontantAPercevoir": lambda value: format_fc(float(value)),
                 "MontantRecu": lambda value: format_fc(float(value)),
+                "DetteInitiale": lambda value: format_fc(float(value)),
+                "DettePayee": lambda value: format_fc(float(value)),
                 "Dette": lambda value: format_fc(float(value)),
             },
         )
@@ -4571,6 +4751,8 @@ class CashWindow(BaseModuleWindow):
         self.expected_today = 0.0
         self.received_today = 0.0
         self.debts_today = 0.0
+        self.accumulated_debts_before_payment = 0.0
+        self.remaining_accumulated_debts = 0.0
         self.total_entries_today = 0.0
         self.build_ui()
         self.reset_form()
@@ -4595,6 +4777,9 @@ class CashWindow(BaseModuleWindow):
         self.expected_var = tk.StringVar()
         self.received_var = tk.StringVar()
         self.debts_var = tk.StringVar()
+        self.accumulated_debts_var = tk.StringVar()
+        self.remaining_accumulated_debts_var = tk.StringVar()
+        self.accumulated_debts_status_var = tk.StringVar()
         self.paid_debts_var = tk.StringVar(value="0")
         self.total_entries_var = tk.StringVar()
         self.balance_var = tk.StringVar()
@@ -4602,31 +4787,34 @@ class CashWindow(BaseModuleWindow):
         self._make_label_value(form, "Nombre total de bacs", self.total_trays_var, 1)
         self._make_label_value(form, "Montant attendu", self.expected_var, 2, "#7a0000")
         self._make_label_value(form, "Montant reçu", self.received_var, 3, "#006400")
-        self._make_label_value(form, "Dettes", self.debts_var, 4, "#8b0000")
+        self._make_label_value(form, "Dettes du jour", self.debts_var, 4, "#8b0000")
+        self._make_label_value(form, "Total dettes accumulées", self.accumulated_debts_var, 5, "#8b0000")
 
-        ttk.Label(form, text="Dettes payées aujourd'hui").grid(row=5, column=0, sticky="w", pady=6)
-        ttk.Entry(form, textvariable=self.paid_debts_var, width=28).grid(row=5, column=1, sticky="ew", pady=6)
+        ttk.Label(form, text="Dettes payées aujourd'hui").grid(row=6, column=0, sticky="w", pady=6)
+        ttk.Entry(form, textvariable=self.paid_debts_var, width=28).grid(row=6, column=1, sticky="ew", pady=6)
 
-        ttk.Label(form, text="Ceux qui ont payé leurs dettes").grid(row=6, column=0, sticky="nw", pady=6)
+        ttk.Label(form, text="Ceux qui ont payé leurs dettes").grid(row=7, column=0, sticky="nw", pady=6)
         self.paid_debts_details_text = ScrolledText(form, width=28, height=6)
         self.paid_debts_details_text.configure(font=UI_FONT)
-        self.paid_debts_details_text.grid(row=6, column=1, sticky="ew", pady=6)
+        self.paid_debts_details_text.grid(row=7, column=1, sticky="ew", pady=6)
 
-        self._make_label_value(form, "Total des entrées", self.total_entries_var, 7, "#1f4e79")
+        self._make_label_value(form, "Dettes accumulées restantes", self.remaining_accumulated_debts_var, 8, "#8b0000")
+        self._make_label_value(form, "Statut dettes accumulées", self.accumulated_debts_status_var, 9, "#1f4e79")
+        self._make_label_value(form, "Total des entrées", self.total_entries_var, 10, "#1f4e79")
 
-        ttk.Label(form, text="Montant total des dépenses").grid(row=8, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Montant total des dépenses").grid(row=11, column=0, sticky="w", pady=6)
         self.expenses_var = tk.StringVar(value="0")
-        ttk.Entry(form, textvariable=self.expenses_var, width=28).grid(row=8, column=1, sticky="ew", pady=6)
+        ttk.Entry(form, textvariable=self.expenses_var, width=28).grid(row=11, column=1, sticky="ew", pady=6)
 
-        ttk.Label(form, text="Dépenses effectuées").grid(row=9, column=0, sticky="nw", pady=6)
+        ttk.Label(form, text="Dépenses effectuées").grid(row=12, column=0, sticky="nw", pady=6)
         self.expenses_text = ScrolledText(form, width=28, height=7)
         self.expenses_text.configure(font=UI_FONT)
-        self.expenses_text.grid(row=9, column=1, sticky="ew", pady=6)
+        self.expenses_text.grid(row=12, column=1, sticky="ew", pady=6)
 
-        self._make_label_value(form, "Solde", self.balance_var, 10, "#1b2d5d")
+        self._make_label_value(form, "Solde", self.balance_var, 13, "#1b2d5d")
 
         actions = ttk.Frame(form)
-        actions.grid(row=11, column=0, columnspan=2, pady=(14, 0))
+        actions.grid(row=14, column=0, columnspan=2, pady=(14, 0))
         self.save_button = ttk.Button(actions, text="Enregistrer", command=self.save_cash)
         self.save_button.grid(row=0, column=0, padx=4, pady=4)
         self.edit_button = ttk.Button(actions, text="Modifier", command=self.load_cash_for_edit)
@@ -4638,7 +4826,7 @@ class CashWindow(BaseModuleWindow):
 
         self.summary_var = tk.StringVar()
         ttk.Label(form, textvariable=self.summary_var, wraplength=420, justify="left").grid(
-            row=12, column=0, columnspan=2, sticky="ew", pady=(14, 0)
+            row=15, column=0, columnspan=2, sticky="ew", pady=(14, 0)
         )
 
         table_frame = ttk.LabelFrame(content, text="Historique de caisse", style="Card.TLabelframe")
@@ -4690,11 +4878,16 @@ class CashWindow(BaseModuleWindow):
         self.expected_today = float(summary.get("MontantAttendu", 0) or 0)
         self.received_today = float(summary.get("MontantRecu", 0) or 0)
         self.debts_today = float(summary.get("TotalDettes", 0) or 0)
+        accumulated = DatabaseHelper.get_accumulated_debt_totals_for_date(target_date)
+        self.accumulated_debts_before_payment = float(
+            accumulated.get("DettesAccumuleesAvantPaiement", 0) or 0
+        )
 
         self.total_trays_var.set(f"{int(self.trays_today)}")
         self.expected_var.set(format_fc(self.expected_today))
         self.received_var.set(format_fc(self.received_today))
         self.debts_var.set(format_fc(self.debts_today))
+        self.accumulated_debts_var.set(format_fc(self.accumulated_debts_before_payment))
 
         cash = DatabaseHelper.get_cash_for_date(target_date)
         if cash:
@@ -4723,8 +4916,19 @@ class CashWindow(BaseModuleWindow):
             expenses = parse_optional_float(self.expenses_var.get())
         except ValueError:
             expenses = 0
+        self.remaining_accumulated_debts = max(self.accumulated_debts_before_payment - paid_debts, 0.0)
+        if self.accumulated_debts_before_payment <= 0:
+            debt_status = "Aucune dette accumulée"
+        elif self.remaining_accumulated_debts <= 0:
+            debt_status = "Payées"
+        elif paid_debts > 0:
+            debt_status = "Partiellement payées"
+        else:
+            debt_status = "En attente"
         self.total_entries_today = self.received_today + paid_debts
         balance = self.total_entries_today - expenses
+        self.remaining_accumulated_debts_var.set(format_fc(self.remaining_accumulated_debts))
+        self.accumulated_debts_status_var.set(debt_status)
         self.total_entries_var.set(format_fc(self.total_entries_today))
         self.balance_var.set(format_fc(balance))
         self.update_summary()
@@ -4752,6 +4956,7 @@ class CashWindow(BaseModuleWindow):
             summary = DatabaseHelper.get_global_orders_summary()
             paid_debts_total = sum(float(row.get("DettesPayeesAujourdHui", 0) or 0) for row in self.table.rows_by_item.values())
             entries_total = sum(float(row.get("TotalEntrees", 0) or 0) for row in self.table.rows_by_item.values())
+            accumulated_remaining = sum(float(row.get("DettesAccumuleesRestantes", 0) or 0) for row in self.table.rows_by_item.values())
             text = (
                 "Affichage : toutes les dates\n"
                 f"Fiches caisse : {row_count}\n"
@@ -4759,7 +4964,8 @@ class CashWindow(BaseModuleWindow):
                 f"Attendu : {format_fc(float(summary.get('MontantAttendu', 0)))} | "
                 f"Reçu : {format_fc(float(summary.get('MontantRecu', 0)))}\n"
                 f"Dettes payées : {format_fc(paid_debts_total)} | Entrées : {format_fc(entries_total)}\n"
-                f"Dettes : {format_fc(float(summary.get('TotalDettes', 0)))} | "
+                f"Dettes du jour : {format_fc(float(summary.get('TotalDettes', 0)))} | "
+                f"Restant accumulé : {format_fc(accumulated_remaining)} | "
                 f"Solde global : {format_fc(total_global)}"
             )
         else:
@@ -4769,7 +4975,9 @@ class CashWindow(BaseModuleWindow):
                 f"Dettes payées : {format_fc(paid_debts)}\n"
                 f"Entrées : {format_fc(entries_today)} | "
                 f"Solde du jour : {format_fc(balance)}\n"
-                f"Dettes : {format_fc(self.debts_today)} | Total global : {format_fc(total_global)}"
+                f"Dettes du jour : {format_fc(self.debts_today)} | "
+                f"Dettes accumulées restantes : {format_fc(self.remaining_accumulated_debts)} | "
+                f"Total global : {format_fc(total_global)}"
             )
         self.summary_var.set(text)
 
@@ -4789,7 +4997,10 @@ class CashWindow(BaseModuleWindow):
                 "MontantAttendu",
                 "MontantRecu",
                 "TotalDettes",
+                "TotalDettesAccumulees",
                 "DettesPayeesAujourdHui",
+                "DettesAccumuleesRestantes",
+                "StatutDettesAccumulees",
                 "TotalEntrees",
                 "MontantTotalDepenses",
                 "Solde",
@@ -4801,8 +5012,11 @@ class CashWindow(BaseModuleWindow):
                 "NombreTotalBacs": "Bacs",
                 "MontantAttendu": "Attendu",
                 "MontantRecu": "Reçu",
-                "TotalDettes": "Dettes",
+                "TotalDettes": "Dettes du jour",
+                "TotalDettesAccumulees": "Dettes accumulées",
                 "DettesPayeesAujourdHui": "Dettes payées",
+                "DettesAccumuleesRestantes": "Dettes restantes",
+                "StatutDettesAccumulees": "Statut dettes",
                 "TotalEntrees": "Entrées",
                 "MontantTotalDepenses": "Dépenses",
                 "DepensesEffectuees": "Détails des dépenses",
@@ -4814,7 +5028,9 @@ class CashWindow(BaseModuleWindow):
                 "MontantAttendu": lambda value: format_fc(float(value)),
                 "MontantRecu": lambda value: format_fc(float(value)),
                 "TotalDettes": lambda value: format_fc(float(value)),
+                "TotalDettesAccumulees": lambda value: format_fc(float(value)),
                 "DettesPayeesAujourdHui": lambda value: format_fc(float(value)),
+                "DettesAccumuleesRestantes": lambda value: format_fc(float(value)),
                 "TotalEntrees": lambda value: format_fc(float(value)),
                 "MontantTotalDepenses": lambda value: format_fc(float(value)),
                 "Solde": lambda value: format_fc(float(value)),
@@ -4824,6 +5040,9 @@ class CashWindow(BaseModuleWindow):
         )
         self.table.tree.column("DepensesEffectuees", width=260, stretch=True)
         self.table.tree.column("DettesPayeesDetails", width=280, stretch=True)
+        self.table.tree.column("TotalDettesAccumulees", width=150, stretch=True)
+        self.table.tree.column("DettesAccumuleesRestantes", width=150, stretch=True)
+        self.table.tree.column("StatutDettesAccumulees", width=160, stretch=True)
         self.update_summary(len(rows))
         self.refresh_day_lock_state()
 
@@ -4855,6 +5074,15 @@ class CashWindow(BaseModuleWindow):
             messagebox.showwarning(
                 "Caisse",
                 "Veuillez renseigner la liste des personnes qui ont payé leurs dettes avant d'enregistrer la caisse.",
+            )
+            return
+        if paid_debts > self.accumulated_debts_before_payment:
+            messagebox.showwarning(
+                "Caisse",
+                (
+                    "Le montant des dettes payées aujourd'hui dépasse les dettes accumulées des jours précédents.\n\n"
+                    f"Dettes accumulées disponibles : {format_fc(self.accumulated_debts_before_payment)}"
+                ),
             )
             return
 
@@ -4941,18 +5169,28 @@ class CommissionsWindow(BaseModuleWindow):
         content.pack(fill="both", expand=True)
         self.create_day_lock_notice(container, "les commissions", before=content)
 
-        form = ttk.LabelFrame(content, text="Commission", style="Card.TLabelframe")
+        form = ttk.LabelFrame(content, text="Commission automatique", style="Card.TLabelframe")
         form.pack(side="left", fill="y", padx=(0, 12))
+        ttk.Label(
+            form,
+            text=(
+                "Les commissions sont calculées automatiquement à partir des commandes. "
+                "Pour corriger une commission, modifiez la commande correspondante."
+            ),
+            wraplength=360,
+            justify="left",
+            foreground="#4b5563",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
 
-        ttk.Label(form, text="Date").grid(row=0, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Date").grid(row=1, column=0, sticky="w", pady=6)
         self.date_field = DateField(form)
-        self.date_field.grid(row=0, column=1, sticky="ew", pady=6)
+        self.date_field.grid(row=1, column=1, sticky="ew", pady=6)
         self.date_field.bind_change(self._on_date_change)
 
-        ttk.Label(form, text="Nom").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Nom").grid(row=2, column=0, sticky="w", pady=6)
         self.name_var = tk.StringVar()
         self.name_combo = ttk.Combobox(form, textvariable=self.name_var, state="readonly", width=28)
-        self.name_combo.grid(row=1, column=1, sticky="ew", pady=6)
+        self.name_combo.grid(row=2, column=1, sticky="ew", pady=6)
         self.name_combo.bind("<<ComboboxSelected>>", lambda _event: self.load_synthesis())
 
         self.status_value = tk.StringVar()
@@ -4962,16 +5200,16 @@ class CommissionsWindow(BaseModuleWindow):
         self.debts_value = tk.StringVar(value=format_fc(0))
         self.net_value = tk.StringVar(value=format_fc(0))
 
-        self._make_label_value(form, "Statut", self.status_value, 2, "#7a0000")
-        self._make_label_value(form, "Nombre de bacs", self.trays_value, 3, "#1b2d5d")
-        self._make_label_value(form, "Montant payé", self.amount_paid_value, 4, "#006400")
-        self._make_label_value(form, "Commissions", self.commissions_value, 5, "#7a0000")
-        self._make_label_value(form, "Dettes", self.debts_value, 6, "#8b0000")
+        self._make_label_value(form, "Statut", self.status_value, 3, "#7a0000")
+        self._make_label_value(form, "Nombre de bacs", self.trays_value, 4, "#1b2d5d")
+        self._make_label_value(form, "Montant payé", self.amount_paid_value, 5, "#006400")
+        self._make_label_value(form, "Commissions", self.commissions_value, 6, "#7a0000")
+        self._make_label_value(form, "Dettes", self.debts_value, 7, "#8b0000")
         self.net_label = ttk.Label(form, textvariable=self.net_value, foreground="#1b2d5d")
-        ttk.Label(form, text="Net à payer").grid(row=7, column=0, sticky="w", pady=6)
-        self.net_label.grid(row=7, column=1, sticky="w", pady=6)
+        ttk.Label(form, text="Net à payer").grid(row=8, column=0, sticky="w", pady=6)
+        self.net_label.grid(row=8, column=1, sticky="w", pady=6)
 
-        ttk.Label(form, text="Filtre de statut").grid(row=8, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Filtre de statut").grid(row=9, column=0, sticky="w", pady=6)
         self.filter_var = tk.StringVar(value=COMMISSION_FILTERS[0])
         self.filter_combo = ttk.Combobox(
             form,
@@ -4980,23 +5218,18 @@ class CommissionsWindow(BaseModuleWindow):
             state="readonly",
             width=28,
         )
-        self.filter_combo.grid(row=8, column=1, sticky="ew", pady=6)
+        self.filter_combo.grid(row=9, column=1, sticky="ew", pady=6)
         self.filter_combo.bind("<<ComboboxSelected>>", lambda _event: self.apply_filter())
 
         actions = ttk.Frame(form)
-        actions.grid(row=9, column=0, columnspan=2, pady=(14, 0))
-        self.save_button = ttk.Button(actions, text="Enregistrer", command=self.save_commission)
-        self.save_button.grid(row=0, column=0, padx=4, pady=4)
-        self.edit_button = ttk.Button(actions, text="Modifier", command=self.load_commission_for_edit)
-        self.edit_button.grid(row=0, column=1, padx=4, pady=4)
-        self.delete_button = ttk.Button(actions, text="Supprimer", command=self.delete_commission)
-        self.delete_button.grid(row=0, column=2, padx=4, pady=4)
-        ttk.Button(actions, text="Tout afficher", command=self.show_all).grid(row=1, column=0, padx=4, pady=4)
-        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=1, column=1, padx=4, pady=4)
+        actions.grid(row=10, column=0, columnspan=2, pady=(14, 0))
+        ttk.Button(actions, text="Actualiser", command=self.refresh_commissions).grid(row=0, column=0, padx=4, pady=4)
+        ttk.Button(actions, text="Tout afficher", command=self.show_all).grid(row=0, column=1, padx=4, pady=4)
+        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=2, padx=4, pady=4)
 
         self.summary_var = tk.StringVar()
         ttk.Label(form, textvariable=self.summary_var, wraplength=400, justify="left").grid(
-            row=10, column=0, columnspan=2, sticky="ew", pady=(14, 0)
+            row=11, column=0, columnspan=2, sticky="ew", pady=(14, 0)
         )
 
         table_frame = ttk.LabelFrame(content, text="Historique des commissions", style="Card.TLabelframe")
@@ -5005,10 +5238,7 @@ class CommissionsWindow(BaseModuleWindow):
         self.table.pack(fill="both", expand=True)
 
         form.columnconfigure(1, weight=1)
-        self.configure_day_lock_controls(
-            self.date_field,
-            [self.save_button, self.edit_button, self.delete_button],
-        )
+        self.configure_day_lock_controls(self.date_field, [])
 
     def _make_label_value(
         self,

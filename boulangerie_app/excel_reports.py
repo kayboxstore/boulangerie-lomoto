@@ -311,9 +311,12 @@ def _build_report_context(
     orders = DatabaseHelper.list_orders_by_date(target_date)
     orders_summary = DatabaseHelper.get_orders_summary_for_date(target_date)
     cash = DatabaseHelper.get_cash_for_date(target_date)
+    accumulated_debts = DatabaseHelper.get_accumulated_debt_totals_for_date(target_date)
     commissions = DatabaseHelper.list_commissions_by_date(target_date)
     expense_details = _safe_text(cash.get("DepensesEffectuees")).strip()
     paid_debts_details = _safe_text(cash.get("DettesPayeesDetails")).strip()
+    accumulated_debts_before = float(accumulated_debts.get("DettesAccumuleesAvantPaiement", 0) or 0)
+    paid_debts_today = float(cash.get("DettesPayeesAujourdHui", 0) or 0)
 
     return {
         "target_date": target_date,
@@ -339,7 +342,9 @@ def _build_report_context(
         "total_debts": float(orders_summary.get("TotalDettes", 0) or 0),
         "total_trays": int(orders_summary.get("NombreTotalBacs", 0) or 0),
         "total_expenses": float(cash.get("MontantTotalDepenses", 0) or 0),
-        "paid_debts_today": float(cash.get("DettesPayeesAujourdHui", 0) or 0),
+        "paid_debts_today": paid_debts_today,
+        "accumulated_debts_before": accumulated_debts_before,
+        "accumulated_debts_remaining": max(accumulated_debts_before - paid_debts_today, 0.0),
         "total_commissions": sum(float(row.get("Commissions", 0) or 0) for row in commissions),
         "total_net_commissions": sum(float(row.get("NetAPayer", 0) or 0) for row in commissions),
         "total_entries": float(orders_summary.get("MontantRecu", 0) or 0)
@@ -398,7 +403,9 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     if "cash" in context["allowed_sections"]:
         rows.extend(
             [
+                ("Total dettes accumulées", context["accumulated_debts_before"], "monnaie"),
                 ("Dettes payées aujourd'hui", context["paid_debts_today"], "monnaie"),
+                ("Dettes accumulées restantes", context["accumulated_debts_remaining"], "monnaie"),
                 ("Total des entrées", context["total_entries"], "monnaie"),
                 ("Dépenses", context["total_expenses"], "monnaie"),
                 ("Solde du jour", context["balance"], "monnaie"),
@@ -594,7 +601,9 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         ("Montant attendu", context["total_expected"]),
         ("Montant reçu", context["total_received"]),
         ("Dettes", context["total_debts"]),
+        ("Total dettes accumulées", context["accumulated_debts_before"]),
         ("Dettes payées aujourd'hui", context["paid_debts_today"]),
+        ("Dettes accumulées restantes", context["accumulated_debts_remaining"]),
         ("Total des entrées", context["total_entries"]),
         ("Dépenses", context["total_expenses"]),
         ("Solde du jour", context["balance"]),
@@ -674,7 +683,8 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         f"additionné aux dettes payées aujourd'hui ({context['paid_debts_today']:,.0f} FC), "
         f"soit un total des entrées de {context['total_entries']:,.0f} FC. "
         f"Les sorties du jour correspondent aux dépenses enregistrées, soit {context['total_expenses']:,.0f} FC. "
-        f"Le solde du jour ressort donc à {context['balance']:,.0f} FC."
+        f"Le solde du jour ressort donc à {context['balance']:,.0f} FC. "
+        f"Les dettes accumulées restantes sont de {context['accumulated_debts_remaining']:,.0f} FC."
     ).replace(",", " ")
     sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 2, end_column=5)
     recap_cell = sheet.cell(current_row, 1, recap_text)
@@ -767,7 +777,7 @@ def _build_monthly_report_context(
             stock_journals.append(journal)
 
     orders = _filter_rows_for_month(DatabaseHelper.list_orders(), "DateCommande", target_date)
-    cash_days = _filter_rows_for_month(DatabaseHelper.list_cash_days(), "DateCaisse", target_date)
+    cash_days = DatabaseHelper.list_cash_balance_by_period(first_day, last_day)
     commissions = _filter_rows_for_month(DatabaseHelper.list_commissions(), "DateCommission", target_date)
 
     expense_items_by_day: list[tuple[str, str]] = []
@@ -790,6 +800,7 @@ def _build_monthly_report_context(
     balance = total_entries - total_expenses
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
+    remaining_accumulated_debts = float(cash_days[-1].get("DettesAccumuleesRestantes", 0) or 0) if cash_days else 0.0
 
     return {
         "target_date": target_date,
@@ -819,6 +830,7 @@ def _build_monthly_report_context(
         "paid_debts_month": paid_debts_month,
         "total_entries": total_entries,
         "balance": balance,
+        "remaining_accumulated_debts": remaining_accumulated_debts,
         "total_commissions": total_commissions,
         "total_net_commissions": total_net_commissions,
         "total_farine": sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits),
@@ -852,7 +864,7 @@ def _build_period_report_context(
             stock_journals.append(journal)
 
     orders = _filter_rows_for_period(DatabaseHelper.list_orders(), "DateCommande", start_date, end_date)
-    cash_days = _filter_rows_for_period(DatabaseHelper.list_cash_days(), "DateCaisse", start_date, end_date)
+    cash_days = DatabaseHelper.list_cash_balance_by_period(start_date, end_date)
     commissions = _filter_rows_for_period(DatabaseHelper.list_commissions(), "DateCommission", start_date, end_date)
 
     expense_items_by_day: list[tuple[str, str]] = []
@@ -875,6 +887,7 @@ def _build_period_report_context(
     balance = total_entries - total_expenses
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
+    remaining_accumulated_debts = float(cash_days[-1].get("DettesAccumuleesRestantes", 0) or 0) if cash_days else 0.0
 
     return {
         "start_date": start_date,
@@ -902,6 +915,7 @@ def _build_period_report_context(
         "paid_debts_period": paid_debts_period,
         "total_entries": total_entries,
         "balance": balance,
+        "remaining_accumulated_debts": remaining_accumulated_debts,
         "total_commissions": total_commissions,
         "total_net_commissions": total_net_commissions,
         "total_farine": sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits),
@@ -953,6 +967,7 @@ def _build_monthly_summary_sheet(workbook: Workbook, context: dict[str, Any]) ->
         rows.extend(
             [
                 ("Dettes payées du mois", context["paid_debts_month"], "monnaie"),
+                ("Dettes accumulées restantes", context["remaining_accumulated_debts"], "monnaie"),
                 ("Total des entrées", context["total_entries"], "monnaie"),
                 ("Dépenses du mois", context["total_expenses"], "monnaie"),
                 ("Solde du mois", context["balance"], "monnaie"),
@@ -1111,6 +1126,7 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
         ("Montant reçu", context["total_received"]),
         ("Dettes", context["total_debts"]),
         ("Dettes payées du mois", context["paid_debts_month"]),
+        ("Dettes accumulées restantes", context["remaining_accumulated_debts"]),
         ("Total des entrées", context["total_entries"]),
         ("Dépenses du mois", context["total_expenses"]),
         ("Solde du mois", context["balance"]),
@@ -1127,7 +1143,7 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
     sheet.cell(current_row, 1, "Synthèse journalière")
     _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
     current_row += 1
-    day_headers = ["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde"]
+    day_headers = ["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde", "Dettes restantes"]
     for col_index, header in enumerate(day_headers, start=1):
         _apply_cell_style(sheet.cell(current_row, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
     start_daily = current_row
@@ -1142,12 +1158,13 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
                 float(row.get("TotalEntrees", 0) or 0),
                 float(row.get("MontantTotalDepenses", 0) or 0),
                 float(row.get("Solde", 0) or 0),
+                float(row.get("DettesAccumuleesRestantes", 0) or 0),
             ]
             for col_index, value in enumerate(values, start=1):
                 _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
-            for col in range(2, 7):
+            for col in range(2, 8):
                 sheet.cell(current_row, col).number_format = MONEY_FORMAT
-        _add_table(sheet, start_daily, current_row, 6, "CaisseJoursMensuels")
+        _add_table(sheet, start_daily, current_row, 7, "CaisseJoursMensuels")
     else:
         current_row += 1
         _apply_cell_style(sheet.cell(current_row, 1, "Aucune fiche de caisse enregistrée pour ce mois."), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
@@ -1197,7 +1214,8 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
         f"Pour le mois {context['month_label']}, les entrées correspondent au montant reçu ({_format_fc(context['total_received'])}) "
         f"additionné aux dettes payées ({_format_fc(context['paid_debts_month'])}), soit un total des entrées de {_format_fc(context['total_entries'])}. "
         f"Les sorties correspondent aux dépenses du mois, soit {_format_fc(context['total_expenses'])}. "
-        f"Le solde mensuel ressort donc à {_format_fc(context['balance'])}."
+        f"Le solde mensuel ressort donc à {_format_fc(context['balance'])}. "
+        f"Les dettes accumulées restantes à la fin du mois sont de {_format_fc(context['remaining_accumulated_debts'])}."
     )
     sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 2, end_column=6)
     _apply_cell_style(sheet.cell(current_row, 1, recap_text), alignment=Alignment(horizontal="left", vertical="top", wrap_text=True))
@@ -1300,6 +1318,7 @@ def _build_period_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> 
         rows.extend(
             [
                 ("Dettes payées sur la période", context["paid_debts_period"], "monnaie"),
+                ("Dettes accumulées restantes", context["remaining_accumulated_debts"], "monnaie"),
                 ("Total des entrées", context["total_entries"], "monnaie"),
                 ("Dépenses sur la période", context["total_expenses"], "monnaie"),
                 ("Solde sur la période", context["balance"], "monnaie"),
@@ -1458,6 +1477,7 @@ def _build_period_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> Non
         ("Montant reçu", context["total_received"]),
         ("Dettes", context["total_debts"]),
         ("Dettes payées sur la période", context["paid_debts_period"]),
+        ("Dettes accumulées restantes", context["remaining_accumulated_debts"]),
         ("Total des entrées", context["total_entries"]),
         ("Dépenses sur la période", context["total_expenses"]),
         ("Solde sur la période", context["balance"]),
@@ -1474,7 +1494,7 @@ def _build_period_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> Non
     sheet.cell(current_row, 1, "Synthèse journalière")
     _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
     current_row += 1
-    day_headers = ["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde"]
+    day_headers = ["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde", "Dettes restantes"]
     for col_index, header in enumerate(day_headers, start=1):
         _apply_cell_style(sheet.cell(current_row, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
     start_daily = current_row
@@ -1489,12 +1509,13 @@ def _build_period_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> Non
                 float(row.get("TotalEntrees", 0) or 0),
                 float(row.get("MontantTotalDepenses", 0) or 0),
                 float(row.get("Solde", 0) or 0),
+                float(row.get("DettesAccumuleesRestantes", 0) or 0),
             ]
             for col_index, value in enumerate(values, start=1):
                 _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
-            for col in range(2, 7):
+            for col in range(2, 8):
                 sheet.cell(current_row, col).number_format = MONEY_FORMAT
-        _add_table(sheet, start_daily, current_row, 6, "CaisseJoursPeriode")
+        _add_table(sheet, start_daily, current_row, 7, "CaisseJoursPeriode")
     else:
         current_row += 1
         _apply_cell_style(sheet.cell(current_row, 1, "Aucune fiche de caisse enregistrée pour cette période."), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
@@ -1544,7 +1565,8 @@ def _build_period_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> Non
         f"Pour la période du {_format_date(context['start_date'])} au {_format_date(context['end_date'])}, les entrées correspondent au montant reçu "
         f"({_format_fc(context['total_received'])}) additionné aux dettes payées ({_format_fc(context['paid_debts_period'])}), soit un total des entrées "
         f"de {_format_fc(context['total_entries'])}. Les sorties correspondent aux dépenses enregistrées sur la période, soit "
-        f"{_format_fc(context['total_expenses'])}. Le solde ressort donc à {_format_fc(context['balance'])}."
+        f"{_format_fc(context['total_expenses'])}. Le solde ressort donc à {_format_fc(context['balance'])}. "
+        f"Les dettes accumulées restantes à la fin de la période sont de {_format_fc(context['remaining_accumulated_debts'])}."
     )
     sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 2, end_column=6)
     _apply_cell_style(sheet.cell(current_row, 1, recap_text), alignment=Alignment(horizontal="left", vertical="top", wrap_text=True))
