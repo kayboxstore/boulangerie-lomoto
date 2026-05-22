@@ -76,6 +76,8 @@ FORM_LOGO_SIZE = 68
 DASHBOARD_LOGO_SIZE = 80
 SETTINGS_LOGO_SIZE = 70
 STOCK_DIALOG_LOGO_SIZE = 60
+MOBILE_WEB_DEFAULT_PORT = 8780
+REMOTE_ACCESS_PROXY_PATH = "/central"
 
 _BRAND_IMAGE_CACHE: dict[tuple[str, int, int], ImageTk.PhotoImage] = {}
 
@@ -1285,6 +1287,32 @@ class ConnectionSettingsDialog(tk.Toplevel):
             row=0, column=3, padx=6, pady=4
         )
 
+        remote_access_frame = ttk.LabelFrame(frame, text="Accès distant", style="Card.TLabelframe")
+        remote_access_frame.pack(fill="x", pady=(0, 12))
+        ttk.Label(
+            remote_access_frame,
+            text=(
+                "Pour utiliser l'application hors du réseau local, exposez uniquement le portail web mobile "
+                f"sur le port {MOBILE_WEB_DEFAULT_PORT} avec Tailscale ou Cloudflare Tunnel. "
+                f"Dans la page web, l'adresse du serveur doit rester {REMOTE_ACCESS_PROXY_PATH}. "
+                f"Ne publiez jamais directement le port {REMOTE_DEFAULT_PORT} sur Internet."
+            ),
+            wraplength=620,
+            justify="center",
+        ).pack(fill="x", pady=(0, 10))
+        remote_access_buttons = ttk.Frame(remote_access_frame)
+        remote_access_buttons.pack()
+        ttk.Button(
+            remote_access_buttons,
+            text="Copier les adresses web locales",
+            command=self.copy_mobile_web_urls,
+        ).grid(row=0, column=0, padx=6, pady=4)
+        ttk.Button(
+            remote_access_buttons,
+            text="Afficher le guide d'accès distant",
+            command=self.show_remote_access_help,
+        ).grid(row=0, column=1, padx=6, pady=4)
+
         footer = ttk.Frame(self, padding=(12, 8, 12, 12))
         footer.grid(row=1, column=0, sticky="ew")
         footer.columnconfigure(0, weight=1)
@@ -1396,6 +1424,53 @@ class ConnectionSettingsDialog(tk.Toplevel):
         details.append(data_line)
         details.append(token_line)
         self.windows_service_status_var.set("\n".join(details))
+
+    def copy_mobile_web_urls(self) -> None:
+        addresses = build_local_server_addresses(MOBILE_WEB_DEFAULT_PORT)
+        if not addresses:
+            self.message_var.set("Aucune adresse web locale n'a pu être calculée pour ce poste.")
+            return
+
+        text = "\n".join(
+            [
+                "Portail web mobile Boulangerie Lomoto :",
+                *addresses,
+                "",
+                f"Adresse du serveur dans la page web : {REMOTE_ACCESS_PROXY_PATH}",
+                f"Ne pas exposer directement le port {REMOTE_DEFAULT_PORT}.",
+            ]
+        )
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.message_var.set(
+            "Les adresses du portail web mobile ont été copiées. "
+            "Pour un accès distant, utilisez Tailscale ou Cloudflare Tunnel vers le port 8780."
+        )
+
+    def show_remote_access_help(self) -> None:
+        help_text = (
+            "Accès distant recommandé :\n\n"
+            "1. Démarrez le service Windows du serveur central sur ce PC.\n"
+            "2. Démarrez le portail web mobile sur le port 8780.\n"
+            "3. Avec Tailscale : ouvrez http://ADRESSE_TAILSCALE_DU_PC:8780.\n"
+            "4. Avec Cloudflare Tunnel : pointez le tunnel vers http://localhost:8780.\n"
+            f"5. Dans la page web, laissez l'adresse serveur sur {REMOTE_ACCESS_PROXY_PATH}.\n\n"
+            f"Sécurité : n'exposez pas directement le port {REMOTE_DEFAULT_PORT} sur Internet."
+        )
+        guide_path = (
+            Path(__file__).resolve().parents[1].parent
+            / "Boulangerie Lomoto Web Mobile"
+            / "GUIDE_ACCES_DISTANCE.md"
+        )
+        if guide_path.exists():
+            webbrowser.open(guide_path.as_uri())
+            self.message_var.set(
+                f"Guide d'accès distant ouvert : {guide_path}\n\n{help_text}"
+            )
+            return
+
+        self.message_var.set(help_text)
+        messagebox.showinfo("Accès distant", help_text)
 
     def use_local_server_url(self) -> None:
         handle = get_embedded_server_status()
