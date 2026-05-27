@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "required": true,
+  "label": "Serveur Internet Boulangerie Lomoto",
+  "server_url": "https://boulangerie-lomoto-api-3lfz3zboha-ew.a.run.app",
+  "api_token": "",
+  "updated_at": "2026-05-27",
+  "notes": "Adresse publique du serveur central pour les postes qui utilisent une connexion Internet différente."
+}

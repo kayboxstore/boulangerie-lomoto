@@ -19,6 +19,10 @@ REMOTE_DISCOVERY_PORT = 8766
 REMOTE_DISCOVERY_TIMEOUT_SECONDS = 3.0
 REMOTE_REFRESH_INTERVAL_MS = 5000
 CONNECTION_CONFIG_FILENAME = "connection_settings.json"
+PUBLIC_SERVER_DIRECTORY_URL = (
+    "https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/server.json"
+)
+PUBLIC_SERVER_DIRECTORY_TIMEOUT_SECONDS = 4
 DISCOVERY_APP_ID = "boulangerie-lomoto-sync"
 DISCOVERY_REQUEST_ACTION = "discover_server"
 DISCOVERY_RESPONSE_ACTION = "server_available"
@@ -150,7 +154,7 @@ class ConnectionSettings:
                 parsed_port = parsed.port
             except ValueError:
                 parsed_port = None
-            if parsed.scheme in {"http", "https"} and parsed.hostname and parsed_port is None:
+            if parsed.scheme == "http" and parsed.hostname and parsed_port is None:
                 host = parsed.hostname
                 if ":" in host and not host.startswith("["):
                     host = f"[{host}]"
@@ -172,6 +176,25 @@ class ConnectionSettings:
             "server_url": self.normalized_url(),
             "api_token": self.api_token.strip(),
         }
+
+
+@dataclass
+class PublicServerDirectoryInfo:
+    enabled: bool = False
+    required: bool = False
+    server_url: str = ""
+    api_token: str = ""
+    label: str = "Serveur Internet"
+    notes: str = ""
+    updated_at: str = ""
+
+    def to_connection_settings(self) -> ConnectionSettings | None:
+        settings = ConnectionSettings(
+            mode="remote",
+            server_url=self.server_url,
+            api_token=self.api_token,
+        )
+        return settings if self.enabled and settings.is_remote() else None
 
 
 def connection_config_path(app_data_dir: Path) -> Path:
@@ -206,6 +229,43 @@ def save_connection_settings(app_data_dir: Path, settings: ConnectionSettings) -
         encoding="utf-8",
     )
     return config_path
+
+
+def fetch_public_server_directory(
+    directory_url: str = PUBLIC_SERVER_DIRECTORY_URL,
+    timeout_seconds: int = PUBLIC_SERVER_DIRECTORY_TIMEOUT_SECONDS,
+) -> PublicServerDirectoryInfo:
+    request = Request(
+        directory_url,
+        headers={
+            "Accept": "application/json",
+            "Cache-Control": "no-cache",
+            "User-Agent": "BoulangerieLomoto/remote-directory",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8-sig"))
+    except HTTPError as exc:
+        raise RemoteDatabaseError(f"Echec HTTP pendant la lecture du serveur Internet : {exc.code}") from exc
+    except URLError as exc:
+        raise RemoteDatabaseError("Impossible de lire l'adresse Internet du serveur central.") from exc
+    except json.JSONDecodeError as exc:
+        raise RemoteDatabaseError("Le fichier du serveur Internet n'est pas un JSON valide.") from exc
+
+    if not isinstance(payload, dict):
+        raise RemoteDatabaseError("Le fichier du serveur Internet doit être un objet JSON.")
+
+    return PublicServerDirectoryInfo(
+        enabled=bool(payload.get("enabled", False)),
+        required=bool(payload.get("required", False)),
+        server_url=str(payload.get("server_url", "")).strip(),
+        api_token=str(payload.get("api_token", "")).strip(),
+        label=str(payload.get("label", "Serveur Internet")).strip() or "Serveur Internet",
+        notes=str(payload.get("notes", "")).strip(),
+        updated_at=str(payload.get("updated_at", "")).strip(),
+    )
 
 
 def _local_ipv4_addresses() -> list[str]:
@@ -465,10 +525,17 @@ def deserialize_value(value: Any) -> Any:
 
 
 class RemoteDatabaseClient:
-    def __init__(self, server_url: str, api_token: str = "", timeout_seconds: int = 10) -> None:
+    def __init__(
+        self,
+        server_url: str,
+        api_token: str = "",
+        timeout_seconds: int = 10,
+        session_token: str = "",
+    ) -> None:
         self.server_url = server_url.strip().rstrip("/")
         self.api_token = api_token.strip()
         self.timeout_seconds = timeout_seconds
+        self.session_token = session_token.strip()
 
     @property
     def rpc_url(self) -> str:
@@ -492,6 +559,8 @@ class RemoteDatabaseClient:
         }
         if self.api_token:
             payload["token"] = self.api_token
+        if self.session_token:
+            payload["session_token"] = self.session_token
 
         response = self._request("POST", self.rpc_url, payload)
         if not isinstance(response, dict):
@@ -520,7 +589,7 @@ class RemoteDatabaseClient:
                 message = str(error_payload.get("error", {}).get("message", exc.reason))
             except Exception:
                 message = str(exc.reason)
-            raise RemoteDatabaseError(f"?chec HTTP vers le serveur central : {message}") from exc
+            raise RemoteDatabaseError(f"Échec HTTP vers le serveur central : {message}") from exc
         except URLError as exc:
             raise RemoteDatabaseError(
                 "Impossible de joindre le serveur central. Vérifiez l'adresse, le réseau et le port."

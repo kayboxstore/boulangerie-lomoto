@@ -31,6 +31,7 @@ from .connected_mode import (
     RemoteDatabaseClient,
     RemoteDatabaseError,
     discover_remote_servers,
+    fetch_public_server_directory,
     load_connection_settings,
 )
 from .connected_server import (
@@ -938,6 +939,11 @@ class LoginWindow(ttk.Frame):
         self.discovery_queue: Queue[tuple[str, Any, bool]] = Queue()
         self.discovery_in_progress = False
         self.discovered_servers: list[DiscoveredServerInfo] = []
+        self.public_server_checked = False
+        self.public_server_settings: ConnectionSettings | None = None
+        self.public_server_required = False
+        self.public_server_label = "Serveur Internet"
+        self.public_server_error = ""
         self.pack(fill="both", expand=True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
         self.build_ui()
@@ -1048,12 +1054,32 @@ class LoginWindow(ttk.Frame):
             return settings
         return None
 
+    def _get_public_server_settings(self, force_refresh: bool = False) -> ConnectionSettings | None:
+        if self.public_server_checked and not force_refresh:
+            return self.public_server_settings
+
+        self.public_server_checked = True
+        self.public_server_settings = None
+        self.public_server_required = False
+        self.public_server_label = "Serveur Internet"
+        self.public_server_error = ""
+        try:
+            directory = fetch_public_server_directory()
+        except Exception as exc:
+            self.public_server_error = str(exc)
+            return None
+
+        self.public_server_required = bool(directory.required)
+        self.public_server_label = directory.label
+        self.public_server_settings = directory.to_connection_settings()
+        return self.public_server_settings
+
     def _set_central_server_unreachable_notice(
         self,
         settings: ConnectionSettings | None = None,
         detail: str = "",
     ) -> None:
-        target_settings = settings or self._get_saved_remote_settings()
+        target_settings = settings or self._get_saved_remote_settings() or self._get_public_server_settings()
         if target_settings is not None:
             self._apply_session_connection_settings(target_settings)
 
@@ -1061,8 +1087,8 @@ class LoginWindow(ttk.Frame):
         suffix = f" ({server_url})" if server_url else ""
         detail_text = f" {detail.strip()}" if detail.strip() else ""
         self.connection_status_var.set(
-            "Serveur central introuvable : vérifiez que le serveur principal est allumé "
-            f"et que ce poste est sur le même réseau local{suffix}.{detail_text}"
+            "Serveur central introuvable : vérifiez que le serveur principal est allumé, "
+            f"ou que l'adresse Internet du serveur est disponible{suffix}.{detail_text}"
         )
 
     def _get_local_server_settings(self, start_service_if_needed: bool = False) -> ConnectionSettings | None:
@@ -1131,6 +1157,14 @@ class LoginWindow(ttk.Frame):
 
         if saved_remote_settings is not None and self._is_reachable_remote_settings(saved_remote_settings):
             self._apply_session_connection_settings(saved_remote_settings)
+            return
+
+        public_server_settings = self._get_public_server_settings()
+        if public_server_settings is not None and self._is_reachable_remote_settings(public_server_settings):
+            self._apply_session_connection_settings(public_server_settings)
+            self.connection_status_var.set(
+                f"Serveur Internet prêt : {self.public_server_label} - {public_server_settings.normalized_url()}"
+            )
             return
 
         self.start_server_discovery(auto_apply=True)
@@ -1236,7 +1270,8 @@ class LoginWindow(ttk.Frame):
         plan: list[ConnectionSettings] = []
         seen: set[tuple[str, str, str]] = set()
         saved_remote_settings = self._get_saved_remote_settings()
-        central_server_required = saved_remote_settings is not None
+        public_server_settings = self._get_public_server_settings()
+        central_server_required = saved_remote_settings is not None or self.public_server_required
 
         def add_setting(setting: ConnectionSettings | None) -> None:
             if setting is None:
@@ -1257,8 +1292,9 @@ class LoginWindow(ttk.Frame):
             plan.append(normalized)
 
         add_setting(self._get_local_server_settings(start_service_if_needed=True))
-        add_setting(self._discover_remote_settings(use_cached=True))
         add_setting(saved_remote_settings)
+        add_setting(public_server_settings)
+        add_setting(self._discover_remote_settings(use_cached=True))
         if not any(setting.is_remote() for setting in plan) and not central_server_required:
             add_setting(ConnectionSettings())
         return plan
@@ -1311,8 +1347,8 @@ class LoginWindow(ttk.Frame):
 
         remote_errors: list[str] = []
         user: AuthenticatedUser | None = None
-        central_server_required = self._get_saved_remote_settings() is not None
         connection_plan = self._build_login_connection_plan()
+        central_server_required = self._get_saved_remote_settings() is not None or self.public_server_required
 
         if central_server_required and not any(settings.is_remote() for settings in connection_plan):
             self._set_central_server_unreachable_notice()
@@ -1321,7 +1357,7 @@ class LoginWindow(ttk.Frame):
                 (
                     "Impossible de joindre le serveur central.\n\n"
                     "L'application ne va pas basculer en mode local pour éviter de créer des données séparées.\n\n"
-                    "Vérifiez que le serveur principal est allumé et que ce poste utilise le même réseau local."
+                    "Vérifiez que le serveur principal est allumé ou que l'adresse Internet du serveur est disponible."
                 ),
             )
             return
@@ -1485,6 +1521,9 @@ class ConnectionSettingsDialog(tk.Toplevel):
         ttk.Button(remote_actions, text="Utiliser l'adresse locale du serveur", command=self.use_local_server_url).grid(
             row=0, column=2, padx=6
         )
+        ttk.Button(remote_actions, text="Utiliser l'adresse Internet", command=self.use_public_server_url).grid(
+            row=1, column=0, columnspan=3, pady=(8, 0)
+        )
         remote_frame.columnconfigure(1, weight=1)
 
         server_frame = ttk.LabelFrame(frame, text="Serveur temporaire sur ce poste", style="Card.TLabelframe")
@@ -1616,6 +1655,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
 
     def auto_discover_if_needed(self) -> None:
         if self.mode_var.get().strip().lower() == "remote" and not self.server_url_var.get().strip():
+            if self.use_public_server_url(silent=True):
+                return
             self.discover_servers_automatically(silent=True)
 
     def refresh_server_status(self) -> None:
@@ -1684,6 +1725,51 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.message_var.set(
             "Demarrez d'abord le serveur temporaire ou le service Windows, ou saisissez l'adresse du serveur central."
         )
+
+    def use_public_server_url(self, silent: bool = False) -> bool:
+        try:
+            directory = fetch_public_server_directory()
+        except Exception as exc:
+            if not silent:
+                self.message_var.set(str(exc))
+            return False
+
+        settings = directory.to_connection_settings()
+        if settings is None:
+            if not silent:
+                self.message_var.set(
+                    "Aucune adresse Internet du serveur central n'est publiée pour le moment."
+                )
+            return False
+
+        self.mode_var.set("remote")
+        self.update_mode_fields()
+        self.server_url_var.set(settings.normalized_url())
+        if settings.api_token and not self.api_token_var.get().strip():
+            self.api_token_var.set(settings.api_token)
+
+        try:
+            health = RemoteDatabaseClient(
+                settings.normalized_url(),
+                api_token=settings.api_token or self.api_token_var.get(),
+                timeout_seconds=4,
+            ).ping()
+        except Exception as exc:
+            self.message_var.set(
+                f"Adresse Internet trouvée ({settings.normalized_url()}), mais le serveur ne répond pas : {exc}"
+            )
+            return False
+
+        version = str(health.get("app_version", "") or "").strip()
+        version_text = f" Version serveur : {version}." if version else ""
+        message = (
+            f"Adresse Internet appliquée : {directory.label} - {settings.normalized_url()}."
+            f"{version_text}"
+        )
+        self.message_var.set(message)
+        if not silent:
+            messagebox.showinfo("Serveur Internet", message)
+        return True
 
     def install_windows_service(self) -> None:
         if not self.ensure_admin_for_service_action():
@@ -1791,6 +1877,11 @@ class ConnectionSettingsDialog(tk.Toplevel):
 
     def discover_servers_automatically(self, silent: bool = False) -> None:
         self.message_var.set("Recherche automatique des serveurs centraux en cours...")
+        if self.use_public_server_url(silent=True):
+            if not silent:
+                messagebox.showinfo("Recherche automatique", self.message_var.get())
+            return
+
         servers = discover_remote_servers(timeout_seconds=REMOTE_DISCOVERY_TIMEOUT_SECONDS)
         if not servers:
             self.message_var.set("Aucun serveur central n'a été détecté automatiquement sur le réseau local.")

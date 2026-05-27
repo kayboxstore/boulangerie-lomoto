@@ -134,7 +134,23 @@ Si le serveur central est introuvable, l'application affiche un message clair et
 - le pare-feu Windows autorise le port `8765` en TCP ;
 - le bouton `Détecter le serveur` retrouve bien le serveur central.
 
-Si le poste client utilise une autre connexion Internet, une autre box, la 4G ou un autre site, l'adresse locale du serveur ne sera pas accessible directement. Dans ce cas, il faudra une configuration distante complémentaire comme Tailscale, ZeroTier, VPN ou hébergement en ligne.
+Si le poste client utilise une autre connexion Internet, une autre box, la 4G ou un autre site, l'adresse locale du serveur ne sera pas accessible directement.
+
+À partir de la version `1.3.7`, l'application peut récupérer automatiquement une adresse Internet publique du serveur central.
+
+Le fichier utilisé est :
+
+`https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/server.json`
+
+Ordre de connexion :
+
+1. L'application cherche d'abord un serveur local sur le poste serveur/admin.
+2. Elle réutilise ensuite l'adresse déjà enregistrée sur le poste client.
+3. Elle récupère l'adresse Internet publiée dans `server.json`.
+4. Elle cherche enfin un serveur sur le réseau local.
+5. Si aucun serveur central n'est joignable, elle refuse de basculer en local pour éviter les données séparées.
+
+Important : l'adresse publiée doit pointer vers le vrai serveur central. Si elle pointe vers Cloud Run, les données utilisées seront celles du serveur Cloud Run. Si vous voulez utiliser exactement les données du PC serveur local depuis Internet, il faut publier ce PC avec un tunnel sécurisé ou migrer la base centrale vers une base cloud persistante.
 
 ## Résumé pratique
 

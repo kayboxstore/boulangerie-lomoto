@@ -183,6 +183,13 @@ class DatabaseHelper:
         if method_name == "find_user_for_login" and result:
             if not isinstance(result, dict):
                 raise RuntimeError("La réponse du serveur central pour la connexion est invalide.")
+            session_token = str(
+                result.pop("sessionToken", "")
+                or result.pop("session_token", "")
+                or result.pop("__session_token__", "")
+            ).strip()
+            if session_token:
+                cls._remote_client.session_token = session_token
             result.pop("__remote_dataclass__", None)
             return AuthenticatedUser(
                 identifiant=str(result.get("identifiant", "")),

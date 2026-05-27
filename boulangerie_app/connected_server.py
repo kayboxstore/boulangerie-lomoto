@@ -153,13 +153,36 @@ def _database_helper():
 
 
 def _session_auth_required() -> bool:
-    value = os.environ.get("BOULANGERIE_REQUIRE_SESSION_AUTH", "")
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    value = os.environ.get("BOULANGERIE_REQUIRE_SESSION_AUTH", "1")
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _get_user_fields(user: Any) -> dict[str, Any]:
+    if isinstance(user, dict):
+        return user
+    return getattr(user, "__dict__", {})
+
+
+def _build_login_result(user: Any, session: dict[str, Any] | None = None) -> dict[str, Any]:
+    fields = _get_user_fields(user)
+    identifiant = str(fields.get("identifiant") or fields.get("Identifiant") or "")
+    role = str(fields.get("role") or fields.get("Role") or "Utilisateur")
+    full_name = str(fields.get("full_name") or fields.get("NomComplet") or "").strip()
+    session_token = str((session or {}).get("token") or "")
+    return {
+        "identifiant": identifiant,
+        "role": role,
+        "full_name": full_name,
+        "fullName": full_name or identifiant,
+        "sessionToken": session_token,
+        "session_token": session_token,
+        "__session_token__": session_token,
+    }
 
 
 def _create_web_session(user: Any) -> dict[str, Any]:
     token = secrets.token_urlsafe(32)
-    fields = user if isinstance(user, dict) else getattr(user, "__dict__", {})
+    fields = _get_user_fields(user)
     session = {
         "token": token,
         "identifiant": str(fields.get("identifiant") or fields.get("Identifiant") or ""),
@@ -257,7 +280,7 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
             return
 
         method_name = str(payload.get("method", "")).strip()
-        if method_name == "web_login":
+        if method_name in {"web_login", "find_user_for_login"}:
             try:
                 args = deserialize_value(payload.get("args", []))
                 if not isinstance(args, list) or len(args) < 2:
@@ -269,6 +292,9 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
                 if not user and identifiant.lower() != identifiant:
                     user = DatabaseHelper.invoke_local_method("find_user_for_login", identifiant.lower(), password)
                 if not user:
+                    if method_name == "find_user_for_login":
+                        self._send_json(200, {"ok": True, "result": None})
+                        return
                     self._send_json(403, {"ok": False, "error": {"message": "Identifiant ou mot de passe incorrect."}})
                     return
                 session = _create_web_session(user)
@@ -276,14 +302,7 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
                     200,
                     {
                         "ok": True,
-                        "result": serialize_value(
-                            {
-                                "sessionToken": session["token"],
-                                "identifiant": session["identifiant"],
-                                "role": session["role"],
-                                "fullName": session["full_name"],
-                            }
-                        ),
+                        "result": serialize_value(_build_login_result(user, session)),
                     },
                 )
                 return
