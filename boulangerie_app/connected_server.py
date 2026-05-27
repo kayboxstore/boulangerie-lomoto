@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import secrets
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -50,12 +53,165 @@ class EmbeddedServerHandle:
 
 
 _embedded_server_handle: EmbeddedServerHandle | None = None
+_web_sessions: dict[str, dict[str, Any]] = {}
+_web_sessions_lock = threading.Lock()
+_WEB_SESSION_TTL_SECONDS = 12 * 60 * 60
+
+_READ_METHODS = {
+    "get_stock_configuration",
+    "get_stock_summary",
+    "get_low_stock_alerts",
+    "get_stock_journal",
+    "count_stock_exits",
+    "list_stock_exits",
+    "list_stock_exits_by_date",
+    "get_stock_sacks_used_for_date",
+    "count_stock_supplies",
+    "list_stock_supplies",
+    "list_stock_supplies_by_date",
+    "get_production_for_date",
+    "get_production_summary_for_date",
+    "list_productions",
+    "list_productions_by_date",
+    "get_global_production_summary",
+    "get_orders_summary_for_date",
+    "get_global_orders_summary",
+    "get_cash_for_date",
+    "get_accumulated_debt_totals_for_date",
+    "list_cash_days",
+    "list_cash_days_by_date",
+    "list_cash_balance_by_period",
+    "get_total_cash",
+    "list_orders",
+    "list_orders_by_date",
+    "find_existing_order",
+    "find_similar_order",
+    "count_orders_with_debt",
+    "get_debt_alerts",
+    "list_commissions",
+    "list_commissions_by_date",
+    "list_clients_from_orders_by_date",
+    "get_commission_synthesis_from_orders",
+    "find_existing_commission",
+    "get_total_commissions",
+    "get_day_closure",
+    "is_day_closed",
+    "list_day_closures",
+}
+
+_STOCK_WRITE_METHODS = {
+    "initialize_stock_day",
+    "update_stock_closing",
+    "add_stock_exit",
+    "update_stock_exit",
+    "delete_stock_exit",
+    "add_stock_supply",
+    "update_stock_supply",
+    "delete_stock_supply",
+}
+
+_ORDER_WRITE_METHODS = {
+    "save_production_day",
+    "delete_production_day",
+    "add_order",
+    "update_order",
+    "delete_order",
+}
+
+_CASH_WRITE_METHODS = {
+    "save_cash_day",
+    "delete_cash_day",
+}
+
+_ADMIN_METHODS = {
+    "get_backups_directory",
+    "list_backup_files",
+    "backup_database",
+    "restore_database",
+    "add_user",
+    "update_user",
+    "search_users_by_identifiant",
+    "get_user_for_admin_edit",
+    "delete_user",
+    "list_users",
+    "count_admins",
+    "get_user_role",
+    "count_users",
+    "log_activity",
+    "list_activity_logs",
+    "get_recent_activity_summary",
+    "close_day",
+    "reopen_day",
+    "update_stock_configuration",
+}
 
 
 def _database_helper():
     from .database import DatabaseHelper
 
     return DatabaseHelper
+
+
+def _session_auth_required() -> bool:
+    value = os.environ.get("BOULANGERIE_REQUIRE_SESSION_AUTH", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _create_web_session(user: Any) -> dict[str, Any]:
+    token = secrets.token_urlsafe(32)
+    fields = user if isinstance(user, dict) else getattr(user, "__dict__", {})
+    session = {
+        "token": token,
+        "identifiant": str(fields.get("identifiant") or fields.get("Identifiant") or ""),
+        "role": str(fields.get("role") or fields.get("Role") or "Utilisateur"),
+        "full_name": str(fields.get("full_name") or fields.get("NomComplet") or ""),
+        "expires_at": time.time() + _WEB_SESSION_TTL_SECONDS,
+    }
+    with _web_sessions_lock:
+        _web_sessions[token] = session
+    return session
+
+
+def _get_web_session(token: str) -> dict[str, Any] | None:
+    if not token:
+        return None
+    now = time.time()
+    with _web_sessions_lock:
+        expired_tokens = [
+            session_token
+            for session_token, session in _web_sessions.items()
+            if float(session.get("expires_at", 0) or 0) < now
+        ]
+        for expired_token in expired_tokens:
+            _web_sessions.pop(expired_token, None)
+        session = _web_sessions.get(token)
+        if session is None:
+            return None
+        session["expires_at"] = now + _WEB_SESSION_TTL_SECONDS
+        return dict(session)
+
+
+def _is_method_allowed_for_session(method_name: str, args: list[Any], session: dict[str, Any]) -> bool:
+    role = str(session.get("role", ""))
+    if role == "Admin":
+        return True
+
+    if method_name == "change_user_password":
+        return bool(args) and str(args[0]) == str(session.get("identifiant", ""))
+
+    if method_name in _READ_METHODS:
+        if role == "Gestionnaire de stock":
+            method_text = method_name.lower()
+            return "stock" in method_text or method_name in {"get_day_closure", "is_day_closed", "list_day_closures"}
+        return True
+
+    if role == "Gestionnaire de stock":
+        return method_name in _STOCK_WRITE_METHODS
+    if role == "Gestionnaire des commandes":
+        return method_name in _ORDER_WRITE_METHODS
+    if role == "Caissier":
+        return method_name in _CASH_WRITE_METHODS
+    return False
 
 
 class SyncRequestHandler(BaseHTTPRequestHandler):
@@ -101,6 +257,42 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
             return
 
         method_name = str(payload.get("method", "")).strip()
+        if method_name == "web_login":
+            try:
+                args = deserialize_value(payload.get("args", []))
+                if not isinstance(args, list) or len(args) < 2:
+                    raise ValueError("Identifiant et mot de passe requis.")
+                identifiant = str(args[0]).strip()
+                password = str(args[1]).strip()
+                DatabaseHelper = _database_helper()
+                user = DatabaseHelper.invoke_local_method("find_user_for_login", identifiant, password)
+                if not user and identifiant.lower() != identifiant:
+                    user = DatabaseHelper.invoke_local_method("find_user_for_login", identifiant.lower(), password)
+                if not user:
+                    self._send_json(403, {"ok": False, "error": {"message": "Identifiant ou mot de passe incorrect."}})
+                    return
+                session = _create_web_session(user)
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "result": serialize_value(
+                            {
+                                "sessionToken": session["token"],
+                                "identifiant": session["identifiant"],
+                                "role": session["role"],
+                                "fullName": session["full_name"],
+                            }
+                        ),
+                    },
+                )
+                return
+            except ValueError as exc:
+                self._send_json(403, {"ok": False, "error": {"message": str(exc), "type": exc.__class__.__name__}})
+                return
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "error": {"message": str(exc), "type": exc.__class__.__name__}})
+                return
         if method_name not in REMOTE_DATABASE_METHODS:
             self._send_json(400, {"ok": False, "error": {"message": "Méthode distante non autorisée."}})
             return
@@ -112,6 +304,15 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("Liste d'arguments distante invalide.")
             if not isinstance(kwargs, dict):
                 raise ValueError("Dictionnaire d'arguments nommes invalide.")
+
+            if _session_auth_required():
+                session = _get_web_session(str(payload.get("session_token", "") or ""))
+                if session is None:
+                    self._send_json(401, {"ok": False, "error": {"message": "Session expiree. Veuillez vous reconnecter."}})
+                    return
+                if not _is_method_allowed_for_session(method_name, args, session):
+                    self._send_json(403, {"ok": False, "error": {"message": "Action non autorisee pour votre role."}})
+                    return
 
             DatabaseHelper = _database_helper()
             result = DatabaseHelper.invoke_local_method(method_name, *args, **kwargs)
@@ -333,11 +534,20 @@ def run_server(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Demarre le serveur central Boulangerie Lomoto.")
     parser.add_argument("--host", default="0.0.0.0", help="Adresse d'ecoute du serveur.")
-    parser.add_argument("--port", default=REMOTE_DEFAULT_PORT, type=int, help="Port TCP du serveur central.")
-    parser.add_argument("--token", default="", help="Jeton d'acces optionnel.")
+    parser.add_argument(
+        "--port",
+        default=int(os.environ.get("PORT", REMOTE_DEFAULT_PORT)),
+        type=int,
+        help="Port TCP du serveur central.",
+    )
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("BOULANGERIE_API_TOKEN", ""),
+        help="Jeton d'acces optionnel.",
+    )
     parser.add_argument(
         "--data-dir",
-        default="",
+        default=os.environ.get("BOULANGERIE_APPDATA_DIR", ""),
         help="Dossier qui contient la base centrale et les sauvegardes.",
     )
     args = parser.parse_args()

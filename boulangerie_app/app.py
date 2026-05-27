@@ -4,11 +4,12 @@ import calendar
 import os
 import sys
 import threading
+import unicodedata
 from pathlib import Path
 from queue import Empty, Queue
 import tkinter as tk
 import webbrowser
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, Callable
@@ -28,7 +29,9 @@ from .connected_mode import (
     REMOTE_DISCOVERY_TIMEOUT_SECONDS,
     REMOTE_REFRESH_INTERVAL_MS,
     RemoteDatabaseClient,
+    RemoteDatabaseError,
     discover_remote_servers,
+    load_connection_settings,
 )
 from .connected_server import (
     get_embedded_server_status,
@@ -72,7 +75,7 @@ from .status_labels import (
     normalize_status_label,
 )
 from .updater import SessionNotice, UpdateCheckResult, UpdateChecker, UpdateInfo
-from .version import APP_NAME, APP_VERSION
+from .version import APP_DEMO, APP_NAME, APP_VERSION
 
 UI_FONT_FAMILY = "Poppins"
 UI_FONT_SIZE = 11
@@ -83,6 +86,9 @@ FORM_LOGO_SIZE = 68
 DASHBOARD_LOGO_SIZE = 80
 SETTINGS_LOGO_SIZE = 70
 STOCK_DIALOG_LOGO_SIZE = 60
+AUTO_LOCK_TIMEOUT_MS = 10 * 60 * 1000
+AUTO_LOCK_EVENT_SEQUENCES = ("<KeyPress>", "<Button>", "<MouseWheel>")
+NO_DEBT_PAYMENT_MESSAGE = "Personne n'a payé aujourd'hui parce qu'il n'y a pas de dettes accumulées."
 
 _BRAND_IMAGE_CACHE: dict[tuple[str, int, int], ImageTk.PhotoImage] = {}
 
@@ -93,6 +99,15 @@ ROLES = [
     "Gestionnaire de stock",
     "Gestionnaire des commandes",
 ]
+ROLE_MODULE_ACCESS = {
+    "Admin": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Utilisateurs"},
+    "Caissier": {"Caisse", "Production", "Commandes", "Commissions"},
+    "Gestionnaire de stock": {"Stock"},
+    "Gestionnaire des commandes": {"Production", "Commandes", "Commissions"},
+}
+ROLE_READ_ONLY_MODULES = {
+    "Caissier": {"Production", "Commandes", "Commissions"},
+}
 
 
 def _package_root() -> Path:
@@ -277,6 +292,10 @@ def today_iso() -> str:
     return date.today().strftime("%Y-%m-%d")
 
 
+def tomorrow_iso() -> str:
+    return (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 def parse_date(value: str) -> date:
     text = value.strip()
     for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
@@ -368,6 +387,36 @@ def _measure_requested_content_size(window: tk.Misc) -> tuple[int, int]:
     return requested_width, requested_height
 
 
+def get_work_area_geometry(window: tk.Misc) -> tuple[int, int, int, int]:
+    """Return the visible desktop area, excluding the Windows taskbar when available."""
+    screen_width = window.winfo_screenwidth()
+    screen_height = window.winfo_screenheight()
+    if os.name != "nt":
+        return 0, 0, screen_width, screen_height
+
+    try:
+        import ctypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        rect = RECT()
+        spi_get_work_area = 0x0030
+        if ctypes.windll.user32.SystemParametersInfoW(spi_get_work_area, 0, ctypes.byref(rect), 0):
+            width = max(int(rect.right - rect.left), 320)
+            height = max(int(rect.bottom - rect.top), 240)
+            return int(rect.left), int(rect.top), width, height
+    except Exception:
+        pass
+
+    return 0, 0, screen_width, screen_height
+
+
 def center_window(window: tk.Misc) -> None:
     window.update_idletasks()
     width, height = _measure_window_size(window)
@@ -375,24 +424,54 @@ def center_window(window: tk.Misc) -> None:
     requested_width, requested_height = _measure_requested_content_size(window)
     required_width = requested_width + 24
     required_height = requested_height + 36
-    max_width = max(int(window.winfo_screenwidth() * 0.96), 320)
-    max_height = max(int(window.winfo_screenheight() * 0.92), 240)
+    work_x, work_y, work_width, work_height = get_work_area_geometry(window)
+    max_width = max(int(work_width * 0.96), 320)
+    max_height = max(int(work_height * 0.94), 240)
 
     width = min(max(width, required_width), max_width)
     height = min(max(height, required_height), max_height)
 
-    x = max((window.winfo_screenwidth() - width) // 2, 0)
-    y = max((window.winfo_screenheight() - height) // 2, 0)
+    x = work_x + max((work_width - width) // 2, 0)
+    y = work_y + max((work_height - height) // 2, 0)
     window.geometry(f"{width}x{height}+{x}+{y}")
     if hasattr(window, "minsize"):
         window.minsize(width, height)
 
 
+def fit_window_to_work_area(
+    window: tk.Misc,
+    preferred_width: int,
+    preferred_height: int,
+    *,
+    min_width: int = 640,
+    min_height: int = 420,
+    margin: int = 10,
+) -> None:
+    """Keep a dialog entirely inside the visible desktop, above the taskbar."""
+    window.update_idletasks()
+    work_x, work_y, work_width, work_height = get_work_area_geometry(window)
+    available_width = max(work_width - (margin * 2), 320)
+    available_height = max(work_height - (margin * 2), 240)
+    requested_width, requested_height = _measure_requested_content_size(window)
+
+    width = min(max(preferred_width, requested_width + 24, min_width), available_width)
+    height = min(max(preferred_height, min_height), available_height)
+    x = work_x + max((work_width - width) // 2, margin)
+    y = work_y + max((work_height - height) // 2, margin)
+
+    window.geometry(f"{width}x{height}+{x}+{y}")
+    if hasattr(window, "minsize"):
+        window.minsize(min(min_width, width), min(min_height, height))
+    if hasattr(window, "maxsize"):
+        window.maxsize(available_width, available_height)
+
+
 def maximize_window(window: tk.Misc, min_width: int = 760, min_height: int = 520) -> None:
     window.update_idletasks()
+    work_x, work_y, work_width, work_height = get_work_area_geometry(window)
     requested_width, requested_height = _measure_requested_content_size(window)
-    safe_min_width = max(min_width, min(requested_width + 24, window.winfo_screenwidth()))
-    safe_min_height = max(min_height, min(requested_height + 36, window.winfo_screenheight()))
+    safe_min_width = max(min_width, min(requested_width + 24, work_width))
+    safe_min_height = max(min_height, min(requested_height + 36, work_height))
     if hasattr(window, "minsize"):
         window.minsize(safe_min_width, safe_min_height)
 
@@ -405,7 +484,41 @@ def maximize_window(window: tk.Misc, min_width: int = 760, min_height: int = 520
     except tk.TclError:
         pass
 
-    window.geometry(f"{window.winfo_screenwidth()}x{window.winfo_screenheight()}+0+0")
+    window.geometry(f"{work_width}x{work_height}+{work_x}+{work_y}")
+
+
+def restore_maximized_window(window: tk.Misc, min_width: int = 760, min_height: int = 520) -> None:
+    if not window.winfo_exists():
+        return
+    try:
+        window.deiconify()
+        window.state("normal")
+    except tk.TclError:
+        pass
+    work_x, work_y, work_width, work_height = get_work_area_geometry(window)
+    try:
+        window.geometry(f"{work_width}x{work_height}+{work_x}+{work_y}")
+        window.update_idletasks()
+    except tk.TclError:
+        return
+    maximize_window(window, min_width, min_height)
+    window.lift()
+    try:
+        window.focus_force()
+    except tk.TclError:
+        pass
+
+
+def deferred_ui_command(widget: tk.Misc, callback: Callable[[], None], delay_ms: int = 0) -> Callable[[], None]:
+    def wrapper() -> None:
+        try:
+            widget.update_idletasks()
+        except tk.TclError:
+            return
+        widget.after(delay_ms, callback)
+
+    return wrapper
+
 
 
 def open_folder(target_path: str | Path) -> None:
@@ -450,6 +563,18 @@ def log_user_action(widget: tk.Misc, module: str, action: str, details: str = ""
         )
     except Exception:
         return
+
+
+def is_remote_method_not_authorized_error(exc: Exception) -> bool:
+    if not isinstance(exc, RemoteDatabaseError):
+        return False
+    message = str(exc).lower()
+    return (
+        "méthode distante non autorisée" in message
+        or "methode distante non autorisee" in message
+        or "non autorisée" in message
+        or "non autorisee" in message
+    )
 
 
 def format_activity_timestamp(value: Any) -> str:
@@ -914,10 +1039,31 @@ class LoginWindow(ttk.Frame):
         return True
 
     def _get_saved_remote_settings(self) -> ConnectionSettings | None:
+        settings = load_connection_settings(DatabaseHelper.app_data_dir)
+        if settings.is_remote():
+            return settings
+
         settings = DatabaseHelper.get_connection_settings()
         if settings.is_remote():
             return settings
         return None
+
+    def _set_central_server_unreachable_notice(
+        self,
+        settings: ConnectionSettings | None = None,
+        detail: str = "",
+    ) -> None:
+        target_settings = settings or self._get_saved_remote_settings()
+        if target_settings is not None:
+            self._apply_session_connection_settings(target_settings)
+
+        server_url = target_settings.normalized_url() if target_settings is not None else ""
+        suffix = f" ({server_url})" if server_url else ""
+        detail_text = f" {detail.strip()}" if detail.strip() else ""
+        self.connection_status_var.set(
+            "Serveur central introuvable : vérifiez que le serveur principal est allumé "
+            f"et que ce poste est sur le même réseau local{suffix}.{detail_text}"
+        )
 
     def _get_local_server_settings(self, start_service_if_needed: bool = False) -> ConnectionSettings | None:
         handle = get_embedded_server_status()
@@ -968,6 +1114,13 @@ class LoginWindow(ttk.Frame):
         )
 
     def auto_configure_connection(self) -> None:
+        if APP_DEMO:
+            self._apply_session_connection_settings(ConnectionSettings())
+            self.connection_status_var.set("Mode démo local - données séparées de la version officielle")
+            return
+
+        saved_remote_settings = self._get_saved_remote_settings()
+
         local_server_settings = self._get_local_server_settings(start_service_if_needed=True)
         if local_server_settings is not None:
             self._apply_session_connection_settings(local_server_settings)
@@ -976,7 +1129,6 @@ class LoginWindow(ttk.Frame):
             )
             return
 
-        saved_remote_settings = self._get_saved_remote_settings()
         if saved_remote_settings is not None and self._is_reachable_remote_settings(saved_remote_settings):
             self._apply_session_connection_settings(saved_remote_settings)
             return
@@ -1016,7 +1168,11 @@ class LoginWindow(ttk.Frame):
         auto_apply = bool(item[2])
 
         if status == "error":
-            self.refresh_connection_status()
+            saved_remote_settings = self._get_saved_remote_settings()
+            if saved_remote_settings is not None:
+                self._set_central_server_unreachable_notice(saved_remote_settings, str(item[1][0]))
+            else:
+                self.refresh_connection_status()
             if not auto_apply:
                 messagebox.showwarning("Recherche automatique", str(item[1][0]))
             return
@@ -1027,7 +1183,15 @@ class LoginWindow(ttk.Frame):
         self.discovered_servers = servers
 
         if not servers:
-            self._apply_session_connection_settings(ConnectionSettings())
+            saved_remote_settings = self._get_saved_remote_settings()
+            if saved_remote_settings is not None:
+                self._set_central_server_unreachable_notice(saved_remote_settings)
+            else:
+                current_settings = DatabaseHelper.get_connection_settings()
+                if not current_settings.is_remote():
+                    self.refresh_connection_status()
+                else:
+                    self.refresh_connection_status()
             if not auto_apply:
                 messagebox.showinfo(
                     "Recherche automatique",
@@ -1066,8 +1230,13 @@ class LoginWindow(ttk.Frame):
         )
 
     def _build_login_connection_plan(self) -> list[ConnectionSettings]:
+        if APP_DEMO:
+            return [ConnectionSettings()]
+
         plan: list[ConnectionSettings] = []
         seen: set[tuple[str, str, str]] = set()
+        saved_remote_settings = self._get_saved_remote_settings()
+        central_server_required = saved_remote_settings is not None
 
         def add_setting(setting: ConnectionSettings | None) -> None:
             if setting is None:
@@ -1089,8 +1258,9 @@ class LoginWindow(ttk.Frame):
 
         add_setting(self._get_local_server_settings(start_service_if_needed=True))
         add_setting(self._discover_remote_settings(use_cached=True))
-        add_setting(self._get_saved_remote_settings())
-        add_setting(ConnectionSettings())
+        add_setting(saved_remote_settings)
+        if not any(setting.is_remote() for setting in plan) and not central_server_required:
+            add_setting(ConnectionSettings())
         return plan
 
     def _try_login_with_settings(
@@ -1141,8 +1311,22 @@ class LoginWindow(ttk.Frame):
 
         remote_errors: list[str] = []
         user: AuthenticatedUser | None = None
+        central_server_required = self._get_saved_remote_settings() is not None
+        connection_plan = self._build_login_connection_plan()
 
-        for settings in self._build_login_connection_plan():
+        if central_server_required and not any(settings.is_remote() for settings in connection_plan):
+            self._set_central_server_unreachable_notice()
+            messagebox.showerror(
+                "Serveur central introuvable",
+                (
+                    "Impossible de joindre le serveur central.\n\n"
+                    "L'application ne va pas basculer en mode local pour éviter de créer des données séparées.\n\n"
+                    "Vérifiez que le serveur principal est allumé et que ce poste utilise le même réseau local."
+                ),
+            )
+            return
+
+        for settings in connection_plan:
             candidate_user, error_message = self._try_login_with_settings(settings, identifiant, mot_de_passe)
             if error_message is not None:
                 if settings.is_remote():
@@ -1161,7 +1345,15 @@ class LoginWindow(ttk.Frame):
 
         if user is None:
             if remote_errors:
-                messagebox.showerror("Connexion", remote_errors[0])
+                self._set_central_server_unreachable_notice(detail=remote_errors[0])
+                messagebox.showerror(
+                    "Serveur central introuvable",
+                    (
+                        "Impossible de joindre le serveur central.\n\n"
+                        "L'application ne va pas basculer en mode local pour éviter de créer des données séparées.\n\n"
+                        f"Détail : {remote_errors[0]}"
+                    ),
+                )
             else:
                 messagebox.showwarning("Connexion", "Identifiants incorrects.")
             self.password_var.set("")
@@ -1205,8 +1397,8 @@ class ConnectionSettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.parent = parent
         self.title("Paramètres réseau")
-        self.geometry("900x760")
-        self.minsize(820, 700)
+        self.geometry("900x680")
+        self.minsize(760, 460)
         self.configure(bg=MODULE_BACKGROUND)
         self.resizable(True, True)
         apply_window_icon(self)
@@ -1233,7 +1425,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
         self.refresh_windows_service_status()
         self.update_mode_fields()
         self.after(250, self.auto_discover_if_needed)
-        maximize_window(self, 820, 700)
+        fit_window_to_work_area(self, 900, 680, min_width=760, min_height=460)
 
     def build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -1863,6 +2055,8 @@ class ActivityHistoryWindow(tk.Toplevel):
 
 
 class DashboardWindow(tk.Toplevel):
+    active_auto_lock_owner: "DashboardWindow | None" = None
+
     def __init__(
         self,
         root: tk.Tk,
@@ -1879,6 +2073,10 @@ class DashboardWindow(tk.Toplevel):
         self.update_result_queue: Queue[UpdateCheckResult] = Queue()
         self.update_check_running = False
         self.live_refresh_after_id: str | None = None
+        self.summary_refresh_after_id: str | None = None
+        self.auto_lock_after_id: str | None = None
+        self.module_opening = False
+        self.module_opening_overlay: tk.Toplevel | None = None
         self.critical_alerts_shown = False
         self.metric_cards: list[DashboardMetricCard] = []
         self.stock_alerts_var = tk.StringVar(value="Chargement des alertes de stock...")
@@ -1896,13 +2094,14 @@ class DashboardWindow(tk.Toplevel):
         self.scrollable_content.pack(fill="both", expand=True)
         self.body = self.scrollable_content.content
         self.build_ui()
-        self.refresh_summary()
         maximize_window(self, 980, 640)
-        self.bind("<FocusIn>", lambda _event: self.refresh_summary())
+        self.request_refresh_summary(50)
+        self.bind("<FocusIn>", lambda _event: self.request_refresh_summary(150))
         self.after(1000, self.start_weekly_update_check)
         self.after(700, self.show_role_critical_alerts)
         if self.is_live_sync_enabled():
             self.schedule_live_refresh()
+        self.install_auto_lock()
 
     def build_ui(self) -> None:
         container = self.body
@@ -1945,18 +2144,19 @@ class DashboardWindow(tk.Toplevel):
         buttons = [
             ("Caisse", self.open_cash),
             ("Stock", self.open_stock),
+            ("Production", self.open_production),
             ("Commandes", self.open_orders),
             ("Commissions", self.open_commissions),
         ]
-        for index, (label, callback) in enumerate(buttons):
-            button = ttk.Button(grid, text=label, command=callback)
-            button.grid(row=index // 2, column=index % 2, padx=8, pady=8, sticky="ew")
-            setattr(self, f"{label.lower()}_button", button)
+        if self.user.role == "Admin":
+            buttons.append(("Utilisateurs", self.open_users))
 
-        self.users_button = ttk.Button(grid, text="Utilisateurs", command=self.open_users)
-        self.users_button.grid(row=2, column=0, columnspan=2, padx=8, pady=(12, 8), sticky="ew")
-        if self.user.role != "Admin":
-            self.users_button.state(["disabled"])
+        self.module_buttons: dict[str, ttk.Button] = {}
+        visible_buttons = [(label, callback) for label, callback in buttons if self.can_access(label, show_warning=False)]
+        for index, (label, callback) in enumerate(visible_buttons):
+            button = ttk.Button(grid, text=label, command=deferred_ui_command(self, callback))
+            button.grid(row=index // 2, column=index % 2, padx=8, pady=8, sticky="ew")
+            self.module_buttons[label] = button
 
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
@@ -1971,10 +2171,20 @@ class DashboardWindow(tk.Toplevel):
         cards_grid = ttk.Frame(visual_frame)
         cards_grid.pack(fill="x")
         self.metric_cards = []
-        for index, color in enumerate(("#b22222", "#1f4e78", "#0a7d53", "#6b3fa0")):
+        metric_colors = (
+            "#b22222",
+            "#1f4e78",
+            "#0a7d53",
+            "#6b3fa0",
+            "#b36b00",
+            "#6d4c41",
+            "#00796b",
+            "#455a64",
+        )
+        for index, color in enumerate(metric_colors):
             card = DashboardMetricCard(cards_grid, color)
-            card.grid(row=0, column=index, sticky="nsew", padx=6, pady=4)
-            cards_grid.columnconfigure(index, weight=1)
+            card.grid(row=index // 4, column=index % 4, sticky="nsew", padx=6, pady=4)
+            cards_grid.columnconfigure(index % 4, weight=1)
             self.metric_cards.append(card)
 
         alerts_frame = ttk.LabelFrame(container, text="Alertes prioritaires", style="Card.TLabelframe")
@@ -2002,7 +2212,7 @@ class DashboardWindow(tk.Toplevel):
             ttk.Button(
                 admin_frame,
                 text="Ouvrir l'historique complet",
-                command=self.open_activity_history,
+                command=deferred_ui_command(self, self.open_activity_history),
             ).pack(anchor="center")
 
             closure_frame = ttk.LabelFrame(container, text="Clôture journalière", style="Card.TLabelframe")
@@ -2027,17 +2237,17 @@ class DashboardWindow(tk.Toplevel):
             ttk.Button(
                 closure_buttons,
                 text="Clôturer la journée",
-                command=self.close_selected_day,
+                command=deferred_ui_command(self, self.close_selected_day),
             ).grid(row=0, column=0, padx=6, pady=4)
             ttk.Button(
                 closure_buttons,
                 text="Réouvrir la journée",
-                command=self.reopen_selected_day,
+                command=deferred_ui_command(self, self.reopen_selected_day),
             ).grid(row=0, column=1, padx=6, pady=4)
             ttk.Button(
                 closure_buttons,
                 text="Historique des clôtures",
-                command=self.open_closure_history,
+                command=deferred_ui_command(self, self.open_closure_history),
             ).grid(row=0, column=2, padx=6, pady=4)
             ttk.Label(
                 closure_frame,
@@ -2059,7 +2269,7 @@ class DashboardWindow(tk.Toplevel):
         ttk.Button(
             security_frame,
             text="Changer mon mot de passe",
-            command=self.open_change_password,
+            command=deferred_ui_command(self, self.open_change_password),
         ).pack(anchor="center")
         self.refresh_security_notice()
 
@@ -2076,45 +2286,46 @@ class DashboardWindow(tk.Toplevel):
         ).pack(fill="x", pady=(0, 12))
         report_buttons = ttk.Frame(reports_frame)
         report_buttons.pack(anchor="center")
-        ttk.Button(report_buttons, text="Générer un rapport PDF", command=self.open_pdf_report).grid(
+        ttk.Button(report_buttons, text="Générer un rapport PDF", command=deferred_ui_command(self, self.open_pdf_report)).grid(
             row=0, column=0, padx=6, pady=4
         )
-        ttk.Button(report_buttons, text="Générer un rapport Excel", command=self.open_excel_report).grid(
+        ttk.Button(report_buttons, text="Générer un rapport Excel", command=deferred_ui_command(self, self.open_excel_report)).grid(
             row=0, column=1, padx=6, pady=4
         )
-        ttk.Button(report_buttons, text="Ouvrir le dossier des rapports", command=self.open_reports_folder).grid(
+        ttk.Button(report_buttons, text="Ouvrir le dossier des rapports", command=deferred_ui_command(self, self.open_reports_folder)).grid(
             row=0, column=2, padx=6, pady=4
         )
 
-        maintenance_frame = ttk.LabelFrame(container, text="Sauvegarde et restauration", style="Card.TLabelframe")
-        maintenance_frame.pack(fill="x", pady=(0, 18))
-        ttk.Label(
-            maintenance_frame,
-            text=self.get_maintenance_text(),
-            wraplength=640,
-            justify="center",
-        ).pack(fill="x", pady=(0, 12))
+        if self.user.role == "Admin":
+            maintenance_frame = ttk.LabelFrame(container, text="Sauvegarde et restauration", style="Card.TLabelframe")
+            maintenance_frame.pack(fill="x", pady=(0, 18))
+            ttk.Label(
+                maintenance_frame,
+                text=self.get_maintenance_text(),
+                wraplength=640,
+                justify="center",
+            ).pack(fill="x", pady=(0, 12))
 
-        maintenance_buttons = ttk.Frame(maintenance_frame)
-        maintenance_buttons.pack(anchor="center")
-        self.backup_button = ttk.Button(
-            maintenance_buttons,
-            text="Sauvegarder la base",
-            command=self.backup_database,
-        )
-        self.backup_button.grid(row=0, column=0, padx=6, pady=4)
-        self.restore_button = ttk.Button(
-            maintenance_buttons,
-            text="Restaurer une sauvegarde",
-            command=self.restore_database,
-        )
-        self.restore_button.grid(row=0, column=1, padx=6, pady=4)
-        self.backup_folder_button = ttk.Button(
-            maintenance_buttons,
-            text="Ouvrir le dossier des sauvegardes",
-            command=self.open_backups_folder,
-        )
-        self.backup_folder_button.grid(row=0, column=2, padx=6, pady=4)
+            maintenance_buttons = ttk.Frame(maintenance_frame)
+            maintenance_buttons.pack(anchor="center")
+            self.backup_button = ttk.Button(
+                maintenance_buttons,
+                text="Sauvegarder la base",
+                command=deferred_ui_command(self, self.backup_database),
+            )
+            self.backup_button.grid(row=0, column=0, padx=6, pady=4)
+            self.restore_button = ttk.Button(
+                maintenance_buttons,
+                text="Restaurer une sauvegarde",
+                command=deferred_ui_command(self, self.restore_database),
+            )
+            self.restore_button.grid(row=0, column=1, padx=6, pady=4)
+            self.backup_folder_button = ttk.Button(
+                maintenance_buttons,
+                text="Ouvrir le dossier des sauvegardes",
+                command=deferred_ui_command(self, self.open_backups_folder),
+            )
+            self.backup_folder_button.grid(row=0, column=2, padx=6, pady=4)
 
         actions = ttk.Frame(container)
         actions.pack(anchor="center", pady=(8, 0))
@@ -2122,6 +2333,57 @@ class DashboardWindow(tk.Toplevel):
         ttk.Button(actions, text="Quitter", command=self.on_close_app).grid(row=0, column=1, padx=8)
 
         self.apply_permissions()
+
+    def install_auto_lock(self) -> None:
+        DashboardWindow.active_auto_lock_owner = self
+        for sequence in AUTO_LOCK_EVENT_SEQUENCES:
+            self.bind_all(sequence, self.reset_auto_lock_timer, add="+")
+        self.reset_auto_lock_timer()
+
+    def reset_auto_lock_timer(self, _event: tk.Event | None = None) -> None:
+        if DashboardWindow.active_auto_lock_owner is not self:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self.auto_lock_after_id is not None:
+            try:
+                self.after_cancel(self.auto_lock_after_id)
+            except tk.TclError:
+                pass
+        self.auto_lock_after_id = self.after(AUTO_LOCK_TIMEOUT_MS, self.lock_due_to_inactivity)
+
+    def cancel_dashboard_timers(self) -> None:
+        for attribute_name in ("summary_refresh_after_id", "live_refresh_after_id", "auto_lock_after_id"):
+            after_id = getattr(self, attribute_name, None)
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+                setattr(self, attribute_name, None)
+        if DashboardWindow.active_auto_lock_owner is self:
+            DashboardWindow.active_auto_lock_owner = None
+
+    def lock_due_to_inactivity(self) -> None:
+        if DashboardWindow.active_auto_lock_owner is not self:
+            return
+        self.auto_lock_after_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        messagebox.showinfo(
+            "Verrouillage automatique",
+            "L'application a été verrouillée après 10 minutes d'inactivité. Veuillez vous reconnecter pour continuer.",
+            parent=self,
+        )
+        self.cancel_dashboard_timers()
+        self.destroy()
+        self.on_logout_callback()
 
     def is_live_sync_enabled(self) -> bool:
         return DatabaseHelper.is_remote_mode() or is_embedded_server_running()
@@ -2140,6 +2402,23 @@ class DashboardWindow(tk.Toplevel):
         if self.is_live_sync_enabled():
             self.schedule_live_refresh()
 
+    def request_refresh_summary(self, delay_ms: int = 50) -> None:
+        if not self.winfo_exists():
+            return
+        if self.summary_refresh_after_id is not None:
+            try:
+                self.after_cancel(self.summary_refresh_after_id)
+            except tk.TclError:
+                pass
+        self.summary_refresh_after_id = self.after(delay_ms, self._run_requested_summary_refresh)
+
+    def _run_requested_summary_refresh(self) -> None:
+        self.summary_refresh_after_id = None
+        if not self.winfo_exists():
+            return
+        self.refresh_summary()
+        self.refresh_security_notice()
+
     def get_maintenance_text(self) -> str:
         if DatabaseHelper.is_remote_mode():
             return (
@@ -2155,43 +2434,30 @@ class DashboardWindow(tk.Toplevel):
         self.notice_label = None
 
     def apply_permissions(self) -> None:
-        self.backup_button.state(["!disabled"])
-        self.restore_button.state(["!disabled"])
-        self.backup_folder_button.state(["!disabled"])
-        if DatabaseHelper.is_remote_mode():
-            self.backup_folder_button.configure(text="Voir les sauvegardes du serveur")
-        else:
-            self.backup_folder_button.configure(text="Ouvrir le dossier des sauvegardes")
-
-        if self.user.role == "Admin":
+        backup_folder_button = getattr(self, "backup_folder_button", None)
+        if backup_folder_button is None:
             return
-        allowed = {
-            "Caissier": {"Caisse"},
-            "Gestionnaire de stock": {"Stock"},
-            "Gestionnaire des commandes": {"Commandes", "Commissions"},
-        }.get(self.user.role, set())
-        if "Caisse" not in allowed:
-            self.caisse_button.state(["disabled"])
-        if "Stock" not in allowed:
-            self.stock_button.state(["disabled"])
-        if "Commandes" not in allowed:
-            self.commandes_button.state(["disabled"])
-        if "Commissions" not in allowed:
-            self.commissions_button.state(["disabled"])
-        self.backup_button.state(["disabled"])
-        self.restore_button.state(["disabled"])
-        self.backup_folder_button.state(["disabled"])
+        if DatabaseHelper.is_remote_mode():
+            backup_folder_button.configure(text="Voir les sauvegardes du serveur")
+        else:
+            backup_folder_button.configure(text="Ouvrir le dossier des sauvegardes")
 
     def refresh_summary(self) -> None:
         try:
             summary = self.build_dashboard_summary()
-        except Exception:
+        except Exception as exc:
             summary = "Statistiques indisponibles pour le moment."
         self.summary_var.set(summary)
-        self.refresh_metric_cards()
-        self.refresh_alerts()
-        self.refresh_recent_activity()
-        self.refresh_closure_status()
+        for refresher in (
+            self.refresh_metric_cards,
+            self.refresh_alerts,
+            self.refresh_recent_activity,
+            self.refresh_closure_status,
+        ):
+            try:
+                refresher()
+            except Exception:
+                continue
 
     def build_dashboard_summary(self) -> str:
         role = self.user.role
@@ -2205,6 +2471,7 @@ class DashboardWindow(tk.Toplevel):
 
     def build_admin_summary(self) -> str:
         orders_summary = DatabaseHelper.get_global_orders_summary()
+        production_summary = DatabaseHelper.get_global_production_summary()
         today = date.today()
         stock_journal = DatabaseHelper.get_stock_journal(today)
         stock_line = "Journal stock du jour indisponible."
@@ -2215,11 +2482,14 @@ class DashboardWindow(tk.Toplevel):
                 f"Clôture farine : {format_number(float(stock_journal.get('FarineCloture', 0) or 0))}"
             )
         return (
-            f"Utilisateurs : {DatabaseHelper.count_users()} | Sorties stock : {DatabaseHelper.count_stock_exits()} | "
+            f"Utilisateurs : {DatabaseHelper.count_users()} | Approvisionnements : {DatabaseHelper.count_stock_supplies()} | "
+            f"Sorties stock : {DatabaseHelper.count_stock_exits()} | "
             f"Commandes avec dette : {DatabaseHelper.count_orders_with_debt()}\n"
             f"Commandes : {int(orders_summary.get('NombreCommandes', 0) or 0)} | "
             f"Total bacs : {int(orders_summary.get('TotalBacs', 0) or 0)} | "
             f"Montant attendu : {format_fc(float(orders_summary.get('MontantAttendu', 0) or 0))}\n"
+            f"Production : {int(production_summary.get('TotalBacsProduits', 0) or 0)} bacs produits | "
+            f"Écart avec commandes : {int(production_summary.get('EcartCommandes', 0) or 0)}\n"
             f"Total caisse : {format_fc(DatabaseHelper.get_total_cash())} | "
             f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())}\n"
             f"{stock_line}"
@@ -2229,6 +2499,7 @@ class DashboardWindow(tk.Toplevel):
         today = date.today()
         stock_journal = DatabaseHelper.get_stock_journal(today)
         stock_exits = DatabaseHelper.list_stock_exits_by_date(today)
+        stock_supplies = DatabaseHelper.list_stock_supplies_by_date(today)
         if not stock_journal:
             return (
                 f"Stock du jour - {today.strftime('%d/%m/%Y')}\n"
@@ -2236,7 +2507,7 @@ class DashboardWindow(tk.Toplevel):
             )
         return (
             f"Stock du jour - {today.strftime('%d/%m/%Y')}\n"
-            f"Sorties du jour : {len(stock_exits)}\n"
+            f"Approvisionnements : {len(stock_supplies)} | Sorties du jour : {len(stock_exits)}\n"
             f"Ouverture | Farine : {format_number(float(stock_journal.get('FarineOuverture', 0) or 0))} | "
             f"Levure : {format_number(float(stock_journal.get('LevureOuverture', 0) or 0))} | "
             f"Sel : {format_number(float(stock_journal.get('SelOuverture', 0) or 0))} | "
@@ -2265,6 +2536,12 @@ class DashboardWindow(tk.Toplevel):
             ),
             f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())}",
         ]
+        production_today = DatabaseHelper.get_production_summary_for_date(date.today())
+        lines.append(
+            "Production du jour : "
+            f"{int(production_today.get('NombreBacsProduits', 0) or 0)} bacs produits | "
+            f"Écart : {int(production_today.get('EcartCommandes', 0) or 0)}"
+        )
         if include_cash:
             cash_today = DatabaseHelper.get_cash_for_date(date.today())
             expenses_today = float(cash_today.get("MontantTotalDepenses", 0) or 0)
@@ -2291,6 +2568,7 @@ class DashboardWindow(tk.Toplevel):
         debt_alerts = DatabaseHelper.get_debt_alerts(limit=5)
         commission_total = DatabaseHelper.get_total_commissions()
         cash_total = DatabaseHelper.get_total_cash()
+        production_today = DatabaseHelper.get_production_summary_for_date(today)
 
         if self.user.role == "Gestionnaire de stock":
             configuration = DatabaseHelper.get_stock_configuration()
@@ -2298,14 +2576,14 @@ class DashboardWindow(tk.Toplevel):
             return [
                 ("Farine restante", format_number(float(summary.get("FarineRestante", 0) or 0)), f"Seuil : {format_number(float(configuration.get('FarineAlerteMin', 0) or 0))}"),
                 ("Levure restante", format_number(float(summary.get("LevureRestante", 0) or 0)), f"Seuil : {format_number(float(configuration.get('LevureAlerteMin', 0) or 0))}"),
-                ("Sorties du jour", str(len(DatabaseHelper.list_stock_exits_by_date(today))), "Mouvements enregistrés aujourd'hui"),
-                ("Alertes stock", str(len(low_stock)), "Articles à surveiller"),
+                ("Sel restant", format_number(float(summary.get("SelRestant", 0) or 0)), f"Seuil : {format_number(float(configuration.get('SelAlerteMin', 0) or 0))}"),
+                ("Huile restante", format_number(float(summary.get("HuileRestante", 0) or 0)), f"Seuil : {format_number(float(configuration.get('HuileAlerteMin', 0) or 0))}"),
             ]
         if self.user.role == "Gestionnaire des commandes":
             return [
                 ("Commandes", str(int(orders_summary.get("NombreCommandes", 0) or 0)), "Nombre total enregistré"),
                 ("Total bacs", str(int(orders_summary.get("TotalBacs", 0) or 0)), "Toutes commandes confondues"),
-                ("Dettes ouvertes", format_fc(float(orders_summary.get("TotalDettes", 0) or 0)), f"{int(orders_summary.get('NombreAvecDette', 0) or 0)} commande(s) avec dette"),
+                ("Production", str(int(production_today.get("NombreBacsProduits", 0) or 0)), f"Écart : {int(production_today.get('EcartCommandes', 0) or 0)} bacs"),
                 ("Commissions", format_fc(commission_total), "Total cumulé"),
             ]
         if self.user.role == "Caissier":
@@ -2315,11 +2593,17 @@ class DashboardWindow(tk.Toplevel):
                 ("Caisse globale", format_fc(cash_total), "Entrées moins dépenses"),
                 ("Dettes ouvertes", format_fc(float(orders_summary.get("TotalDettes", 0) or 0)), f"{len(debt_alerts)} client(s) prioritaire(s)"),
             ]
+        stock_summary = DatabaseHelper.get_stock_summary()
+        production_global = DatabaseHelper.get_global_production_summary()
         return [
-            ("Utilisateurs", str(DatabaseHelper.count_users()), "Comptes enregistrés"),
-            ("Commandes", str(int(orders_summary.get("NombreCommandes", 0) or 0)), f"{int(orders_summary.get('TotalBacs', 0) or 0)} bacs"),
-            ("Caisse globale", format_fc(cash_total), "Après dépenses"),
-            ("Alertes", str(len(low_stock) + len(debt_alerts)), "Stock faible et dettes"),
+            ("Stock", format_number(float(stock_summary.get("FarineRestante", 0) or 0)), "Farine restante"),
+            ("Approvisionnements", str(DatabaseHelper.count_stock_supplies()), "Entrées de stock"),
+            ("Commandes", str(int(orders_summary.get("NombreCommandes", 0) or 0)), f"{int(orders_summary.get('TotalBacs', 0) or 0)} bacs cumulés"),
+            ("Production", str(int(production_global.get("TotalBacsProduits", 0) or 0)), f"Écart global : {int(production_global.get('EcartCommandes', 0) or 0)} bacs"),
+            ("Caisse", format_fc(cash_total), "Solde global"),
+            ("Commissions", format_fc(commission_total), "Total à payer"),
+            ("Dettes ouvertes", format_fc(float(orders_summary.get("TotalDettes", 0) or 0)), f"{len(debt_alerts)} alerte(s) prioritaires"),
+            ("Utilisateurs", str(DatabaseHelper.count_users()), f"{len(low_stock)} stock faible"),
         ]
 
     def refresh_alerts(self) -> None:
@@ -2718,59 +3002,123 @@ class DashboardWindow(tk.Toplevel):
         if messagebox.askyesno("Mise à jour disponible", message):
             webbrowser.open(update_info.download_url)
 
-    def can_access(self, module_name: str) -> bool:
-        if self.user.role == "Admin":
-            return True
-        allowed = {
-            "Caissier": {"Caisse"},
-            "Gestionnaire de stock": {"Stock"},
-            "Gestionnaire des commandes": {"Commandes", "Commissions"},
-        }.get(self.user.role, set())
+    def can_access(self, module_name: str, *, show_warning: bool = True) -> bool:
+        allowed = ROLE_MODULE_ACCESS.get(self.user.role, set())
         if module_name not in allowed:
-            messagebox.showwarning("Accès refusé", "Accès non autorisé.")
+            if show_warning:
+                messagebox.showwarning("Accès refusé", "Accès non autorisé.")
             return False
         return True
 
-    def open_large_module(self, window_factory: Callable[[DashboardWindow], BaseModuleWindow]) -> None:
-        self.withdraw()
+    def is_module_read_only(self, module_name: str) -> bool:
+        return module_name in ROLE_READ_ONLY_MODULES.get(self.user.role, set())
+
+    def show_module_opening_overlay(self, module_label: str) -> None:
+        self.destroy_module_opening_overlay()
+        overlay = tk.Toplevel(self)
+        overlay.overrideredirect(True)
+        overlay.configure(bg="#fff8ed")
+        overlay.resizable(False, False)
+        frame = ttk.Frame(overlay, padding=(24, 18, 24, 18))
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame,
+            text=f"Ouverture de {module_label}...",
+            font=(UI_FONT_FAMILY, 15, "bold"),
+            foreground="#8b0000",
+            justify="center",
+        ).pack(fill="x")
+        ttk.Label(
+            frame,
+            text="Préparation de la fenêtre, un instant.",
+            foreground="#4b5563",
+            justify="center",
+        ).pack(fill="x", pady=(8, 0))
+
+        overlay.update_idletasks()
+        width = max(overlay.winfo_reqwidth(), 380)
+        height = max(overlay.winfo_reqheight(), 112)
+        work_x, work_y, work_width, work_height = get_work_area_geometry(self)
+        x = work_x + max((work_width - width) // 2, 0)
+        y = work_y + max((work_height - height) // 2, 0)
+        overlay.geometry(f"{width}x{height}+{x}+{y}")
+        try:
+            overlay.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        overlay.lift()
+        overlay.update()
+        self.module_opening_overlay = overlay
+
+    def destroy_module_opening_overlay(self) -> None:
+        overlay = self.module_opening_overlay
+        self.module_opening_overlay = None
+        if overlay is not None and overlay.winfo_exists():
+            overlay.destroy()
+
+    def open_large_module(self, window_factory: Callable[[DashboardWindow], BaseModuleWindow], module_label: str) -> None:
+        if self.module_opening:
+            return
+        self.module_opening = True
+        self.configure(cursor="watch")
+        self.show_module_opening_overlay(module_label)
+        self.after(10, lambda: self._open_large_module_now(window_factory))
+
+    def _open_large_module_now(self, window_factory: Callable[[DashboardWindow], BaseModuleWindow]) -> None:
+        window: BaseModuleWindow | None = None
         try:
             window = window_factory(self)
+            window.update_idletasks()
+            window.lift()
+            self.destroy_module_opening_overlay()
+            self.withdraw()
             self.wait_window(window)
+        except Exception as exc:
+            self.destroy_module_opening_overlay()
+            messagebox.showerror("Ouverture du module", str(exc), parent=self)
         finally:
+            self.module_opening = False
+            self.configure(cursor="")
             if self.winfo_exists():
-                self.deiconify()
-                self.lift()
-                self.refresh_summary()
+                restore_maximized_window(self, 980, 640)
+                self.after(120, lambda: restore_maximized_window(self, 980, 640))
+                self.request_refresh_summary(50)
 
     def open_cash(self) -> None:
         if not self.can_access("Caisse"):
             return
-        self.open_large_module(CashWindow)
+        self.open_large_module(CashWindow, "la caisse")
 
     def open_stock(self) -> None:
         if not self.can_access("Stock"):
             return
-        self.open_large_module(StockWindow)
+        self.open_large_module(StockWindow, "le stock")
+
+    def open_production(self) -> None:
+        if not self.can_access("Production"):
+            return
+        self.open_large_module(ProductionWindow, "la production")
 
     def open_orders(self) -> None:
         if not self.can_access("Commandes"):
             return
-        self.open_large_module(OrdersWindow)
+        self.open_large_module(OrdersWindow, "les commandes")
 
     def open_commissions(self) -> None:
         if not self.can_access("Commissions"):
             return
-        self.open_large_module(CommissionsWindow)
+        self.open_large_module(CommissionsWindow, "les commissions")
 
     def open_users(self) -> None:
         if self.user.role != "Admin":
             messagebox.showwarning("Accès refusé", "Accès non autorisé.")
             return
-        self.open_large_module(UsersWindow)
+        self.open_large_module(UsersWindow, "les utilisateurs")
 
     def logout(self) -> None:
         if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment vous déconnecter ?"):
             return
+        self.cancel_dashboard_timers()
         self.destroy()
         self.on_logout_callback()
 
@@ -2782,9 +3130,7 @@ class DashboardWindow(tk.Toplevel):
     def on_close_app(self) -> None:
         if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment quitter l'application ?"):
             return
-        if self.live_refresh_after_id is not None:
-            self.after_cancel(self.live_refresh_after_id)
-            self.live_refresh_after_id = None
+        self.cancel_dashboard_timers()
         self.root.destroy()
 
 
@@ -2868,6 +3214,21 @@ class BaseModuleWindow(tk.Toplevel):
 
     def refresh_live_view(self) -> None:
         return
+
+    def is_read_only_module(self, module_name: str) -> bool:
+        return self.parent.is_module_read_only(module_name)
+
+    def hide_read_only_buttons(self, module_name: str, buttons: list[tk.Misc]) -> None:
+        if not self.is_read_only_module(module_name):
+            return
+        for button in buttons:
+            try:
+                button.grid_remove()
+            except tk.TclError:
+                try:
+                    button.pack_forget()
+                except tk.TclError:
+                    pass
 
     def create_day_lock_notice(
         self,
@@ -3775,7 +4136,7 @@ class UsersWindow(BaseModuleWindow):
         self.edit_mode = False
         self.original_identifiant = ""
         self.build_ui()
-        self.refresh_users()
+        self.after_idle(self.refresh_users)
 
     def build_ui(self) -> None:
         container = self.body
@@ -3915,19 +4276,29 @@ class UsersWindow(BaseModuleWindow):
         if row is None:
             messagebox.showwarning("Utilisateurs", "Veuillez d'abord sélectionner un utilisateur.")
             return
-        self.name_var.set(str(row["NomComplet"]))
-        self.identifiant_var.set(str(row["Identifiant"]))
-        self.password_var.set("")
+        user = DatabaseHelper.get_user_for_admin_edit(str(row["Identifiant"]))
+        if not user:
+            messagebox.showwarning("Utilisateurs", "Utilisateur introuvable.")
+            return
+        self.name_var.set(str(user.get("NomComplet", "")))
+        self.identifiant_var.set(str(user.get("Identifiant", "")))
+        visible_password = str(user.get("MotDePasse", "") or "")
+        self.password_var.set(visible_password)
         self.show_password_var.set(False)
         self.toggle_password_visibility()
-        self.role_var.set(str(row["Role"]))
-        self.original_identifiant = str(row["Identifiant"])
+        self.role_var.set(str(user.get("Role", "")))
+        self.original_identifiant = str(user.get("Identifiant", ""))
         self.edit_mode = True
         self.identifiant_entry.state(["disabled"])
-        self.message_var.set(
-            "Le mot de passe actuel ne peut pas etre affiche. "
-            "Laissez ce champ vide pour le conserver, ou saisissez-en un nouveau pour le reinitialiser."
-        )
+        if visible_password:
+            self.message_var.set(
+                "Toutes les informations ont été chargées. Cochez Afficher pour lire le mot de passe."
+            )
+        else:
+            self.message_var.set(
+                "Ce mot de passe appartient à un ancien compte sécurisé et ne peut pas être récupéré. "
+                "Laissez le champ vide pour le conserver, ou saisissez un nouveau mot de passe."
+            )
 
     def delete_user(self) -> None:
         identifiant = self.identifiant_var.get().strip()
@@ -3971,9 +4342,15 @@ class StockWindow(BaseModuleWindow):
         super().__init__(parent, "Gestion du stock", "1160x780")
         self.edit_mode = False
         self.selected_exit_id = 0
-        self.first_open_of_day = DatabaseHelper.initialize_stock_day(date.today())
+        self.first_open_of_day = False
         self.closing_message_shown = False
         self.build_ui()
+        self.opening_var.set("Chargement du stock du jour...")
+        self.closing_var.set("")
+        self.after_idle(self.finish_initial_load)
+
+    def finish_initial_load(self) -> None:
+        self.first_open_of_day = DatabaseHelper.initialize_stock_day(date.today())
         self.refresh_data()
         if self.first_open_of_day:
             self.show_opening_message()
@@ -4020,7 +4397,10 @@ class StockWindow(BaseModuleWindow):
         ttk.Button(button_bar, text="Paramètres", command=self.edit_stock_parameters).grid(
             row=1, column=0, padx=4, pady=4
         )
-        ttk.Button(button_bar, text="Fermer", command=self.close_window).grid(row=1, column=1, padx=4, pady=4)
+        ttk.Button(button_bar, text="Approvisionner", command=self.open_stock_supply_window).grid(
+            row=1, column=1, padx=4, pady=4
+        )
+        ttk.Button(button_bar, text="Fermer", command=self.close_window).grid(row=1, column=2, padx=4, pady=4)
 
         form.columnconfigure(1, weight=1)
 
@@ -4299,6 +4679,11 @@ class StockWindow(BaseModuleWindow):
         frame.columnconfigure(3, weight=1)
         center_window(dialog)
 
+    def open_stock_supply_window(self) -> None:
+        dialog = StockSupplyDialog(self)
+        self.wait_window(dialog)
+        self.refresh_data()
+
     def reset_form(self) -> None:
         self.date_field.set_date(today_iso())
         self.sacs_var.set("")
@@ -4326,6 +4711,1275 @@ class StockWindow(BaseModuleWindow):
         super().close_window()
 
 
+class StockSupplyDialog(tk.Toplevel):
+    def __init__(self, parent: StockWindow) -> None:
+        super().__init__(parent)
+        self.parent_window = parent
+        self.selected_supply_id = 0
+        self.edit_mode = False
+        self.title("Approvisionnement du stock")
+        self.geometry("980x680")
+        self.minsize(860, 560)
+        self.configure(bg=MODULE_BACKGROUND)
+        self.resizable(True, True)
+        self.transient(parent)
+        self.grab_set()
+        apply_window_icon(self)
+        self.protocol("WM_DELETE_WINDOW", self.close_dialog)
+        self.build_ui()
+        self.refresh_table()
+        center_window(self)
+
+    def build_ui(self) -> None:
+        container = ttk.Frame(self, padding=16)
+        container.pack(fill="both", expand=True)
+        header = create_branded_header(
+            container,
+            "Approvisionnement du stock",
+            logo_size=STOCK_DIALOG_LOGO_SIZE,
+            wraplength=760,
+        )
+        setattr(self, "_header_logo", getattr(header, "_header_logo", None))
+
+        content = ttk.Frame(container)
+        content.pack(fill="both", expand=True, pady=(8, 0))
+
+        form = ttk.LabelFrame(content, text="Nouvel approvisionnement", style="Card.TLabelframe")
+        form.pack(side="left", fill="y", padx=(0, 12))
+
+        ttk.Label(form, text="Date").grid(row=0, column=0, sticky="w", pady=6)
+        self.date_field = DateField(form)
+        self.date_field.grid(row=0, column=1, sticky="ew", pady=6)
+
+        self.sacs_var = tk.StringVar()
+        self.paquets_var = tk.StringVar()
+        self.sel_var = tk.StringVar()
+        self.huile_var = tk.StringVar()
+
+        self._make_entry(form, "Farine ajoutée (sacs)", self.sacs_var, 1)
+        self._make_entry(form, "Levure ajoutée (paquets)", self.paquets_var, 2)
+        self._make_entry(form, "Sel ajouté (kg)", self.sel_var, 3)
+        self._make_entry(form, "Huile ajoutée (litres)", self.huile_var, 4)
+
+        ttk.Label(form, text="Observations").grid(row=5, column=0, sticky="nw", pady=6)
+        self.observations_text = ScrolledText(form, width=30, height=5)
+        self.observations_text.configure(font=UI_FONT)
+        self.observations_text.grid(row=5, column=1, sticky="ew", pady=6)
+
+        actions = ttk.Frame(form)
+        actions.grid(row=6, column=0, columnspan=2, pady=(14, 0))
+        self.save_button = ttk.Button(actions, text="Enregistrer", command=self.save_supply)
+        self.save_button.grid(row=0, column=0, padx=4, pady=4)
+        ttk.Button(actions, text="Modifier", command=self.load_selected_supply).grid(row=0, column=1, padx=4, pady=4)
+        ttk.Button(actions, text="Supprimer", command=self.delete_supply).grid(row=0, column=2, padx=4, pady=4)
+        ttk.Button(actions, text="Nouveau", command=self.reset_form).grid(row=1, column=0, padx=4, pady=4)
+        ttk.Button(actions, text="Fermer", command=self.close_dialog).grid(row=1, column=1, padx=4, pady=4)
+
+        form.columnconfigure(1, weight=1)
+
+        table_frame = ttk.LabelFrame(content, text="Historique des approvisionnements", style="Card.TLabelframe")
+        table_frame.pack(side="left", fill="both", expand=True)
+        self.table = DataTable(table_frame, height=18)
+        self.table.pack(fill="both", expand=True)
+
+    def _make_entry(self, parent: ttk.LabelFrame, label: str, variable: tk.StringVar, row: int) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
+        ttk.Entry(parent, textvariable=variable, width=20).grid(row=row, column=1, sticky="ew", pady=6)
+
+    def validate_supply(self) -> tuple[date, float, float, float, float, str] | None:
+        try:
+            target_date = self.date_field.get_date()
+            sacs = parse_optional_float(self.sacs_var.get())
+            paquets = parse_optional_float(self.paquets_var.get())
+            sel = parse_optional_float(self.sel_var.get())
+            huile = parse_optional_float(self.huile_var.get())
+        except Exception as exc:
+            messagebox.showwarning("Approvisionnement", str(exc), parent=self)
+            return None
+        observations = self.observations_text.get("1.0", "end").strip()
+        return target_date, sacs, paquets, sel, huile, observations
+
+    def save_supply(self) -> None:
+        validated = self.validate_supply()
+        if validated is None:
+            return
+        target_date, sacs, paquets, sel, huile, observations = validated
+        try:
+            if self.edit_mode:
+                updated = DatabaseHelper.update_stock_supply(
+                    self.selected_supply_id,
+                    target_date,
+                    sacs,
+                    paquets,
+                    sel,
+                    huile,
+                    observations,
+                )
+                if updated:
+                    action = "Approvisionnement modifié"
+                else:
+                    messagebox.showwarning("Approvisionnement", "Aucune modification n'a été enregistrée.", parent=self)
+                    return
+            else:
+                DatabaseHelper.add_stock_supply(target_date, sacs, paquets, sel, huile, observations)
+                action = "Approvisionnement ajouté"
+            DatabaseHelper.update_stock_closing(target_date)
+            log_user_action(
+                self.parent_window,
+                "Stock",
+                action,
+                (
+                    f"{target_date.strftime('%d/%m/%Y')} | Farine {format_number(sacs)} | "
+                    f"Levure {format_number(paquets)} | Sel {format_number(sel)} | Huile {format_number(huile)}"
+                ),
+            )
+            self.reset_form()
+            self.refresh_table()
+            self.parent_window.refresh_data()
+            messagebox.showinfo("Approvisionnement", "L'approvisionnement a été enregistré avec succès.", parent=self)
+        except ValueError as exc:
+            messagebox.showwarning("Approvisionnement", str(exc), parent=self)
+        except Exception as exc:
+            messagebox.showerror("Approvisionnement", str(exc), parent=self)
+
+    def refresh_table(self) -> None:
+        rows = DatabaseHelper.list_stock_supplies()
+        self.table.set_data(
+            rows,
+            columns=[
+                "Id",
+                "DateApprovisionnement",
+                "SacsAjoutes",
+                "PaquetsAjoutes",
+                "KgSelAjoutes",
+                "LitresHuileAjoutes",
+                "Observations",
+            ],
+            headings={
+                "DateApprovisionnement": "Date",
+                "SacsAjoutes": "Farine",
+                "PaquetsAjoutes": "Levure",
+                "KgSelAjoutes": "Sel",
+                "LitresHuileAjoutes": "Huile",
+                "Observations": "Observations",
+            },
+            hidden_columns=["Id"],
+            formatters={
+                "SacsAjoutes": lambda value: format_number(float(value)),
+                "PaquetsAjoutes": lambda value: format_number(float(value)),
+                "KgSelAjoutes": lambda value: format_number(float(value)),
+                "LitresHuileAjoutes": lambda value: format_number(float(value)),
+                "Observations": compact_multiline_text,
+            },
+        )
+
+    def load_selected_supply(self) -> None:
+        row = self.selected_order_row()
+        if row is None:
+            messagebox.showwarning("Approvisionnement", "Veuillez sélectionner un approvisionnement.", parent=self)
+            return
+        self.selected_supply_id = int(row["Id"])
+        self.edit_mode = True
+        self.date_field.set_date(str(row["DateApprovisionnement"]))
+        self.sacs_var.set(format_number(float(row["SacsAjoutes"])))
+        self.paquets_var.set(format_number(float(row["PaquetsAjoutes"])))
+        self.sel_var.set(format_number(float(row["KgSelAjoutes"])))
+        self.huile_var.set(format_number(float(row["LitresHuileAjoutes"])))
+        self.observations_text.delete("1.0", "end")
+        self.observations_text.insert("1.0", str(row.get("Observations", "") or ""))
+        messagebox.showinfo("Approvisionnement", "L'approvisionnement a été chargé. Modifiez-le puis enregistrez.", parent=self)
+
+    def delete_supply(self) -> None:
+        row = self.selected_order_row()
+        if row is None:
+            messagebox.showwarning("Approvisionnement", "Veuillez sélectionner un approvisionnement.", parent=self)
+            return
+        if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment supprimer cet approvisionnement ?", parent=self):
+            return
+        try:
+            deleted = DatabaseHelper.delete_stock_supply(int(row["Id"]))
+            if deleted:
+                log_user_action(
+                    self.parent_window,
+                    "Stock",
+                    "Approvisionnement supprimé",
+                    f"Id {row['Id']} | Date {row['DateApprovisionnement']}",
+                )
+                DatabaseHelper.update_stock_closing(date.today())
+                self.reset_form()
+                self.refresh_table()
+                self.parent_window.refresh_data()
+                messagebox.showinfo("Approvisionnement", "L'approvisionnement a été supprimé avec succès.", parent=self)
+            else:
+                messagebox.showwarning("Approvisionnement", "Aucun approvisionnement n'a été supprimé.", parent=self)
+        except ValueError as exc:
+            messagebox.showwarning("Approvisionnement", str(exc), parent=self)
+        except Exception as exc:
+            messagebox.showerror("Approvisionnement", str(exc), parent=self)
+
+    def reset_form(self) -> None:
+        self.selected_supply_id = 0
+        self.edit_mode = False
+        self.date_field.set_date(today_iso())
+        self.sacs_var.set("")
+        self.paquets_var.set("")
+        self.sel_var.set("")
+        self.huile_var.set("")
+        self.observations_text.delete("1.0", "end")
+
+    def close_dialog(self) -> None:
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+
+class PrevisionWindow(BaseModuleWindow):
+    def __init__(self, parent: DashboardWindow) -> None:
+        super().__init__(parent, "Gestion des prévisions", "1320x860")
+        self.selected_prevision_id = 0
+        self.edit_mode = False
+        self.show_all_dates = False
+        self.active_prevision_table: DataTable | None = None
+        self.build_ui()
+        self.reset_form()
+        self.summary_var.set("Chargement des prévisions...")
+        self.after_idle(self.refresh_previsions)
+
+    def build_ui(self) -> None:
+        container = self.body
+
+        content = ttk.Frame(container)
+        content.pack(fill="both", expand=True)
+        self.create_day_lock_notice(container, "la prévision", before=content)
+
+        form = ttk.LabelFrame(content, text="Prévision de production", style="Card.TLabelframe")
+        form.pack(side="left", fill="y", padx=(0, 12))
+
+        ttk.Label(form, text="Date prévue").grid(row=0, column=0, sticky="w", pady=6)
+        self.date_field = DateField(form, tomorrow_iso())
+        self.date_field.grid(row=0, column=1, sticky="ew", pady=6)
+        self.date_field.bind_change(self._on_date_change)
+
+        self.location_var = tk.StringVar(value=PREVISION_LOCATIONS[0])
+        self.client_var = tk.StringVar()
+        self.status_var = tk.StringVar(value=DEPOSITARY_STATUS)
+        self.square_1500_var = tk.StringVar(value="0")
+        self.square_1000_var = tk.StringVar(value="0")
+        self.baguette_500_var = tk.StringVar(value="0")
+        self.baguette_1000_var = tk.StringVar(value="0")
+        self.line_total_var = tk.StringVar(value="0 article | 0 FC")
+
+        ttk.Label(form, text="Localisation").grid(row=1, column=0, sticky="w", pady=6)
+        self.location_combo = ttk.Combobox(
+            form,
+            textvariable=self.location_var,
+            values=PREVISION_LOCATIONS,
+            state="readonly",
+            width=24,
+        )
+        self.location_combo.grid(row=1, column=1, sticky="ew", pady=6)
+
+        ttk.Label(form, text="Nom du client").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Entry(form, textvariable=self.client_var, width=28).grid(row=2, column=1, sticky="ew", pady=6)
+
+        ttk.Label(form, text="Statut").grid(row=3, column=0, sticky="w", pady=6)
+        self.status_combo = ttk.Combobox(
+            form,
+            textvariable=self.status_var,
+            values=PREVISION_STATUSES,
+            state="readonly",
+            width=20,
+        )
+        self.status_combo.grid(row=3, column=1, sticky="ew", pady=6)
+
+        ttk.Label(form, text="Commande", foreground="#1b2d5d").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(14, 6)
+        )
+
+        ttk.Label(form, text="Carré 1.500 FC").grid(row=5, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.square_1500_var, width=12).grid(
+            row=5, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Carré 1.000 FC").grid(row=6, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.square_1000_var, width=12).grid(
+            row=6, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Bgtte 500 FC").grid(row=7, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.baguette_500_var, width=12).grid(
+            row=7, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Bgtte 1.000 FC").grid(row=8, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.baguette_1000_var, width=12).grid(
+            row=8, column=1, sticky="w", pady=6
+        )
+
+        self._make_label_value(form, "Total ligne", self.line_total_var, 9, "#006400")
+
+        actions = ttk.Frame(form)
+        actions.grid(row=10, column=0, columnspan=2, pady=(14, 0))
+        self.save_button = ttk.Button(actions, text="Enregistrer", command=self.save_prevision)
+        self.save_button.grid(row=0, column=0, padx=4, pady=4)
+        self.edit_button = ttk.Button(actions, text="Modifier", command=self.load_prevision_for_edit)
+        self.edit_button.grid(row=0, column=1, padx=4, pady=4)
+        self.delete_button = ttk.Button(actions, text="Supprimer", command=self.delete_prevision)
+        self.delete_button.grid(row=0, column=2, padx=4, pady=4)
+        ttk.Button(actions, text="Tout afficher", command=self.show_all).grid(row=1, column=0, padx=4, pady=4)
+        ttk.Button(actions, text="Imprimer les fiches", command=self.export_prevision_excel).grid(
+            row=1, column=1, padx=4, pady=4
+        )
+        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=1, column=2, padx=4, pady=4)
+
+        self.summary_var = tk.StringVar()
+        ttk.Label(form, textvariable=self.summary_var, wraplength=390, justify="left").grid(
+            row=11, column=0, columnspan=2, sticky="ew", pady=(14, 0)
+        )
+
+        grids_frame = ttk.Frame(content)
+        grids_frame.pack(side="left", fill="both", expand=True)
+        grids_frame.columnconfigure(0, weight=1)
+        grids_frame.columnconfigure(1, weight=1)
+        grids_frame.rowconfigure(0, weight=3)
+        grids_frame.rowconfigure(1, weight=2)
+
+        depositary_frame = ttk.LabelFrame(
+            grids_frame,
+            text="FICHE DE COMMANDE DES DEPOSITAIRES",
+            style="Card.TLabelframe",
+        )
+        depositary_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
+        self.depositary_table = DataTable(depositary_frame, height=16)
+        self.depositary_table.pack(fill="both", expand=True)
+
+        mama_frame = ttk.LabelFrame(
+            grids_frame,
+            text="FICHE DE COMMANDE DES MAMANS",
+            style="Card.TLabelframe",
+        )
+        mama_frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 8))
+        self.mama_table = DataTable(mama_frame, height=16)
+        self.mama_table.pack(fill="both", expand=True)
+
+        bottom_frame = ttk.LabelFrame(grids_frame, text="Résumé de la fiche Mamans", style="Card.TLabelframe")
+        bottom_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        self.production_summary_table = DataTable(bottom_frame, height=8)
+        self.production_summary_table.pack(fill="both", expand=True)
+
+        for variable in (
+            self.square_1500_var,
+            self.square_1000_var,
+            self.baguette_500_var,
+            self.baguette_1000_var,
+        ):
+            variable.trace_add("write", lambda *_args: self.calculate_line_total())
+        self.status_var.trace_add("write", lambda *_args: self._on_status_change())
+        self.depositary_table.tree.bind("<<TreeviewSelect>>", lambda _event: self._activate_table(self.depositary_table))
+        self.mama_table.tree.bind("<<TreeviewSelect>>", lambda _event: self._activate_table(self.mama_table))
+
+        form.columnconfigure(1, weight=1)
+        self.configure_day_lock_controls(
+            self.date_field,
+            [self.save_button, self.edit_button, self.delete_button],
+        )
+        self.hide_read_only_buttons("Commandes", [self.save_button, self.edit_button, self.delete_button])
+        self._on_status_change()
+
+    def _make_label_value(
+        self,
+        parent: ttk.LabelFrame,
+        label: str,
+        variable: tk.StringVar,
+        row: int,
+        foreground: str,
+    ) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
+        ttk.Label(parent, textvariable=variable, foreground=foreground).grid(row=row, column=1, sticky="w", pady=6)
+
+    def _parse_quantity(self, value: str, field_name: str) -> int:
+        text = value.strip().replace(" ", "").replace(",", ".")
+        if not text:
+            return 0
+        try:
+            number = int(float(text))
+        except ValueError as exc:
+            raise ValueError(f"Le champ « {field_name} » doit être numérique.") from exc
+        if number < 0:
+            raise ValueError(f"Le champ « {field_name} » ne peut pas être négatif.")
+        return number
+
+    def _on_date_change(self) -> None:
+        self.show_all_dates = False
+        self.refresh_previsions()
+
+    def _on_status_change(self) -> None:
+        if self.status_var.get().strip() == "Maman":
+            self.location_combo.configure(state="disabled")
+            return
+        self.location_combo.configure(state="readonly")
+        if not self.location_var.get().strip():
+            self.location_var.set(PREVISION_LOCATIONS[0])
+
+    def calculate_line_total(self) -> None:
+        try:
+            square_1500 = self._parse_quantity(self.square_1500_var.get(), "Carré 1.500 FC")
+            square_1000 = self._parse_quantity(self.square_1000_var.get(), "Carré 1.000 FC")
+            baguette_500 = self._parse_quantity(self.baguette_500_var.get(), "Bgtte 500 FC")
+            baguette_1000 = self._parse_quantity(self.baguette_1000_var.get(), "Bgtte 1.000 FC")
+        except ValueError:
+            self.line_total_var.set("Quantités invalides")
+            return
+        total_articles = square_1500 + square_1000 + baguette_500 + baguette_1000
+        total_amount = (square_1500 * 1500) + (square_1000 * 1000) + (baguette_500 * 500) + (baguette_1000 * 1000)
+        article_label = "article" if total_articles <= 1 else "articles"
+        self.line_total_var.set(f"{total_articles} {article_label} | {format_fc(total_amount)}")
+
+    def validate_prevision(self) -> tuple[date, str, str, str, int, int, int, int] | None:
+        try:
+            target_date = self.date_field.get_date()
+            localisation = self.location_var.get().strip()
+            client = self.client_var.get().strip()
+            status = self.status_var.get().strip()
+            square_1500 = self._parse_quantity(self.square_1500_var.get(), "Carré 1.500 FC")
+            square_1000 = self._parse_quantity(self.square_1000_var.get(), "Carré 1.000 FC")
+            baguette_500 = self._parse_quantity(self.baguette_500_var.get(), "Bgtte 500 FC")
+            baguette_1000 = self._parse_quantity(self.baguette_1000_var.get(), "Bgtte 1.000 FC")
+        except Exception as exc:
+            messagebox.showwarning("Prévision", str(exc))
+            return None
+        if status == "Maman":
+            localisation = ""
+        elif not localisation:
+            messagebox.showwarning("Prévision", "Veuillez renseigner la localisation.")
+            return None
+        if not client:
+            messagebox.showwarning("Prévision", "Veuillez renseigner le nom du client.")
+            return None
+        if status not in PREVISION_STATUSES:
+            messagebox.showwarning("Prévision", "Le statut doit être Dépositaire ou Maman.")
+            return None
+        if square_1500 + square_1000 + baguette_500 + baguette_1000 <= 0:
+            messagebox.showwarning("Prévision", "Veuillez saisir au moins une quantité dans la commande.")
+            return None
+        return target_date, localisation, client, status, square_1500, square_1000, baguette_500, baguette_1000
+
+    def save_prevision(self) -> None:
+        validated = self.validate_prevision()
+        if validated is None:
+            return
+        target_date, localisation, client, status, square_1500, square_1000, baguette_500, baguette_1000 = validated
+
+        try:
+            if self.edit_mode and self.selected_prevision_id > 0:
+                DatabaseHelper.update_prevision_order(
+                    self.selected_prevision_id,
+                    target_date,
+                    localisation,
+                    client,
+                    status,
+                    square_1500,
+                    square_1000,
+                    baguette_500,
+                    baguette_1000,
+                )
+                action = "Prévision modifiée"
+            else:
+                DatabaseHelper.add_prevision_order(
+                    target_date,
+                    localisation,
+                    client,
+                    status,
+                    square_1500,
+                    square_1000,
+                    baguette_500,
+                    baguette_1000,
+                )
+                action = "Prévision enregistrée"
+            log_user_action(
+                self,
+                "Prévision",
+                action,
+                (
+                    f"{target_date.strftime('%d/%m/%Y')} | {localisation} | {client} | {status} | "
+                    f"Carré 1.500 FC : {square_1500} | Carré 1.000 FC : {square_1000} | "
+                    f"Bgtte 500 FC : {baguette_500} | Bgtte 1.000 FC : {baguette_1000}"
+                ),
+            )
+            self.reset_form()
+            self.refresh_previsions()
+            messagebox.showinfo("Prévision", "La prévision a été enregistrée avec succès.")
+        except ValueError as exc:
+            messagebox.showwarning("Prévision", str(exc))
+        except Exception as exc:
+            messagebox.showerror("Prévision", str(exc))
+
+    def refresh_previsions(self) -> None:
+        try:
+            target_date = self.date_field.get_date()
+        except ValueError:
+            target_date = date.today() + timedelta(days=1)
+        rows = DatabaseHelper.list_previsions() if self.show_all_dates else DatabaseHelper.list_previsions_by_date(target_date)
+        depositary_rows = [row for row in rows if str(row.get("Statut") or "").strip() == DEPOSITARY_STATUS]
+        mama_rows = [row for row in rows if str(row.get("Statut") or "").strip() == "Maman"]
+
+        common_headings = {
+            "DatePrevision": "Date prévue",
+            "Carre1500": "Carré 1.500 FC",
+            "Carre1000": "Carré 1.000 FC",
+            "Baguette500": "Bgtte 500 FC",
+            "Baguette1000": "Bgtte 1.000 FC",
+            "TotalArticles": "Total",
+            "MontantPrevu": "Montant prévu",
+        }
+        common_formatters = {
+            "DatePrevision": self._format_grid_date,
+            "MontantPrevu": lambda value: format_fc(float(value or 0)),
+        }
+        self.depositary_table.set_data(
+            self._decorate_depositary_rows(depositary_rows),
+            columns=[
+                "RowKind",
+                "Id",
+                "DatePrevision",
+                "Localisation",
+                "Client",
+                "Carre1500",
+                "Carre1000",
+                "Baguette500",
+                "Baguette1000",
+                "TotalArticles",
+                "MontantPrevu",
+            ],
+            headings=common_headings,
+            hidden_columns=["RowKind", "Id"],
+            formatters=common_formatters,
+        )
+        self.mama_table.set_data(
+            self._decorate_mama_rows(mama_rows),
+            columns=[
+                "RowKind",
+                "Id",
+                "DatePrevision",
+                "Client",
+                "Carre1500",
+                "Carre1000",
+                "Baguette500",
+                "Baguette1000",
+                "TotalArticles",
+                "MontantPrevu",
+            ],
+            headings=common_headings,
+            hidden_columns=["RowKind", "Id"],
+            formatters=common_formatters,
+        )
+        self._configure_prevision_table_widths()
+        self.update_summary()
+        self.refresh_day_lock_state()
+
+    def _format_grid_date(self, value: Any) -> str:
+        text = str(value or "")
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            return text
+
+    def _sum_rows(self, rows: list[dict[str, Any]], key: str) -> int:
+        total = 0
+        for row in rows:
+            try:
+                total += int(float(row.get(key, 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        return total
+
+    def _sum_amount(self, rows: list[dict[str, Any]]) -> float:
+        total = 0.0
+        for row in rows:
+            try:
+                total += float(row.get("MontantPrevu", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+        return total
+
+    def _make_total_row(self, label: str, rows: list[dict[str, Any]], kind: str = "subtotal") -> dict[str, Any]:
+        return {
+            "RowKind": kind,
+            "Id": "",
+            "DatePrevision": "",
+            "Localisation": label,
+            "Client": "",
+            "Carre1500": self._sum_rows(rows, "Carre1500"),
+            "Carre1000": self._sum_rows(rows, "Carre1000"),
+            "Baguette500": self._sum_rows(rows, "Baguette500"),
+            "Baguette1000": self._sum_rows(rows, "Baguette1000"),
+            "TotalArticles": self._sum_rows(rows, "TotalArticles"),
+            "MontantPrevu": self._sum_amount(rows),
+        }
+
+    def _decorate_depositary_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        decorated: list[dict[str, Any]] = []
+        rows_by_location = {location: [] for location in PREVISION_LOCATIONS}
+        extra_rows: list[dict[str, Any]] = []
+        for row in rows:
+            location = str(row.get("Localisation") or "").strip()
+            if location in rows_by_location:
+                rows_by_location[location].append({**row, "RowKind": "detail"})
+            else:
+                extra_rows.append({**row, "RowKind": "detail"})
+        if extra_rows:
+            rows_by_location["Autres"] = extra_rows
+
+        for location, location_rows in rows_by_location.items():
+            if not location_rows:
+                continue
+            decorated.append(
+                {
+                    "RowKind": "section",
+                    "Id": "",
+                    "DatePrevision": "",
+                    "Localisation": location.upper(),
+                    "Client": "",
+                }
+            )
+            decorated.extend(location_rows)
+            decorated.append(self._make_total_row(f"Total {location}", location_rows))
+        if rows:
+            decorated.append(self._make_total_row("TOTAL GÉNÉRAL DÉPOSITAIRES", rows, "total"))
+        return decorated
+
+    def _decorate_mama_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        decorated = [{**row, "RowKind": "detail"} for row in rows]
+        if rows:
+            total_row = self._make_total_row("TOTAL MAMANS", rows, "total")
+            total_row["Client"] = total_row["Localisation"]
+            decorated.append(total_row)
+        return decorated
+
+    def _configure_prevision_table_widths(self) -> None:
+        for table in (self.depositary_table, self.mama_table):
+            for column_name, width in {
+                "DatePrevision": 105,
+                "Localisation": 165,
+                "Client": 190,
+                "Carre1500": 110,
+                "Carre1000": 110,
+                "Baguette500": 110,
+                "Baguette1000": 115,
+                "TotalArticles": 85,
+                "MontantPrevu": 120,
+            }.items():
+                try:
+                    table.tree.column(column_name, width=width, stretch=True)
+                except tk.TclError:
+                    continue
+
+    def _activate_table(self, active_table: DataTable) -> None:
+        self.active_prevision_table = active_table
+        for table in (self.depositary_table, self.mama_table):
+            if table is active_table:
+                continue
+            table.tree.selection_remove(table.tree.selection())
+
+    def selected_prevision_row(self) -> dict[str, Any] | None:
+        table_order: list[DataTable] = []
+        if self.active_prevision_table is not None:
+            table_order.append(self.active_prevision_table)
+        for table in (self.depositary_table, self.mama_table):
+            if table not in table_order:
+                table_order.append(table)
+        for table in table_order:
+            row = table.selected_row()
+            if row is not None:
+                return row
+        return None
+
+    def update_summary(self) -> None:
+        if self.show_all_dates:
+            summary = DatabaseHelper.get_global_prevision_summary()
+            self.summary_var.set(
+                "Prévisions globales\n"
+                f"Jours préparés : {int(summary.get('JoursPrevision', 0) or 0)} | "
+                f"Clients : {int(summary.get('NombreClients', 0) or 0)}\n"
+                f"Dépositaires : {int(summary.get('TotalDepositaires', 0) or 0)} | "
+                f"Mamans : {int(summary.get('TotalMamans', 0) or 0)}\n"
+                f"Total bacs : {int(summary.get('TotalArticlesPrevus', 0) or 0)} | "
+                f"Sacs à produire : {format_number(float(summary.get('NombreSacsAProduire', 0) or 0))}"
+            )
+            self.update_bottom_summary(summary)
+            return
+
+        try:
+            target_date = self.date_field.get_date()
+        except ValueError:
+            target_date = date.today() + timedelta(days=1)
+        summary = DatabaseHelper.get_prevision_summary_for_date(target_date)
+        self.summary_var.set(
+            f"Prévision du {target_date.strftime('%d/%m/%Y')}\n"
+            f"Clients : {int(summary.get('NombreClients', 0) or 0)} | "
+            f"Dépositaires : {int(summary.get('NombreDepositaires', 0) or 0)} | "
+            f"Mamans : {int(summary.get('NombreMamans', 0) or 0)}\n"
+            f"Total bacs : {int(summary.get('TotalArticlesPrevus', 0) or 0)}\n"
+            f"Carré 1.500 FC : {int(summary.get('TotalCarre1500', 0) or 0)} | "
+            f"Carré 1.000 FC : {int(summary.get('TotalCarre1000', 0) or 0)} | "
+            f"Bgtte 500 FC : {int(summary.get('TotalBaguette500', 0) or 0)} | "
+            f"Bgtte 1.000 FC : {int(summary.get('TotalBaguette1000', 0) or 0)}\n"
+            f"Sacs à produire : {format_number(float(summary.get('NombreSacsAProduire', 0) or 0))} | "
+            f"Montant prévu : {format_fc(float(summary.get('MontantPrevu', 0) or 0))}"
+        )
+        self.update_bottom_summary(summary)
+
+    def update_bottom_summary(self, summary: dict[str, Any]) -> None:
+        total_depositaries = int(summary.get("TotalDepositaires", 0) or 0)
+        total_mamas = int(summary.get("TotalMamans", 0) or 0)
+        total_general = int(summary.get("TotalArticlesPrevus", 0) or 0)
+        rows = [
+            {"Libelle": "Total général", "Depots": total_depositaries, "Mamans": total_mamas, "Total": total_general},
+            {
+                "Libelle": "Nombre de sacs à produire",
+                "Depots": "",
+                "Mamans": "",
+                "Total": format_number(float(summary.get("NombreSacsAProduire", 0) or 0)),
+            },
+            {"Libelle": "Nbre sacs produits", "Depots": "", "Mamans": "", "Total": ""},
+            {"Libelle": "Bacs livrés", "Depots": "", "Mamans": "", "Total": ""},
+            {"Libelle": "Bacs restants", "Depots": "", "Mamans": "", "Total": ""},
+            {"Libelle": "Foutus", "Depots": "", "Mamans": "", "Total": ""},
+            {"Libelle": "Baraka", "Depots": "", "Mamans": "", "Total": ""},
+            {"Libelle": "Police", "Depots": "", "Mamans": "", "Total": ""},
+        ]
+        self.production_summary_table.set_data(
+            rows,
+            columns=["Libelle", "Depots", "Mamans", "Total"],
+            headings={"Libelle": "Rubrique", "Depots": "Dépôts", "Mamans": "Mamans", "Total": "Total"},
+        )
+
+    def load_prevision_for_edit(self) -> None:
+        row = self.selected_prevision_row()
+        if row is None or row.get("RowKind") != "detail":
+            messagebox.showwarning("Prévision", "Veuillez sélectionner une ligne client dans une des grilles.")
+            return
+        self.selected_prevision_id = int(row["Id"])
+        self.edit_mode = True
+        self.date_field.set_date(str(row["DatePrevision"]))
+        self.location_var.set(str(row.get("Localisation", "") or PREVISION_LOCATIONS[0]))
+        self.client_var.set(str(row.get("Client", "") or ""))
+        self.status_var.set(str(row.get("Statut", "") or DEPOSITARY_STATUS))
+        self.square_1500_var.set(str(int(row.get("Carre1500", 0) or 0)))
+        self.square_1000_var.set(str(int(row.get("Carre1000", 0) or 0)))
+        self.baguette_500_var.set(str(int(row.get("Baguette500", 0) or 0)))
+        self.baguette_1000_var.set(str(int(row.get("Baguette1000", 0) or 0)))
+        self.show_all_dates = False
+        self.calculate_line_total()
+        self._on_status_change()
+        self.refresh_day_lock_state()
+        messagebox.showinfo("Prévision", "La prévision a été chargée. Modifiez-la puis enregistrez.")
+
+    def delete_prevision(self) -> None:
+        row = self.selected_prevision_row()
+        if row is None or row.get("RowKind") != "detail":
+            messagebox.showwarning("Prévision", "Veuillez sélectionner une ligne client dans une des grilles.")
+            return
+        if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment supprimer cette prévision ?"):
+            return
+        try:
+            deleted = DatabaseHelper.delete_prevision_day(int(row["Id"]))
+            if deleted:
+                log_user_action(
+                    self,
+                    "Prévision",
+                    "Prévision supprimée",
+                    f"Id {row['Id']} | Date {row['DatePrevision']}",
+                )
+                self.reset_form()
+                self.refresh_previsions()
+                messagebox.showinfo("Prévision", "La prévision a été supprimée avec succès.")
+            else:
+                messagebox.showwarning("Prévision", "Aucune prévision n'a été supprimée.")
+        except ValueError as exc:
+            messagebox.showwarning("Prévision", str(exc))
+        except Exception as exc:
+            messagebox.showerror("Prévision", str(exc))
+
+    def export_prevision_excel(self) -> None:
+        try:
+            target_date = self.date_field.get_date()
+        except ValueError as exc:
+            messagebox.showwarning("Prévision", str(exc))
+            return
+        try:
+            reports_dir = DatabaseHelper.get_reports_dir_for_user(self.parent.user.identifiant)
+            timestamp = datetime.now().strftime("%H%M%S")
+            output_path = reports_dir / f"fiches-prevision-production-{target_date.strftime('%Y%m%d')}-{timestamp}.xlsx"
+            created_path = create_prevision_excel_workbook(target_date, output_path)
+            log_user_action(
+                self,
+                "Prévision",
+                "Fiches de prévision générées",
+                f"{target_date.strftime('%d/%m/%Y')} | {created_path}",
+            )
+            open_file(created_path)
+        except Exception as exc:
+            messagebox.showerror("Prévision", str(exc))
+
+    def show_all(self) -> None:
+        self.show_all_dates = True
+        self.refresh_previsions()
+
+    def refresh_live_view(self) -> None:
+        self.refresh_previsions()
+
+    def reset_form(self) -> None:
+        self.selected_prevision_id = 0
+        self.edit_mode = False
+        self.show_all_dates = False
+        self.active_prevision_table = None
+        self.date_field.set_date(tomorrow_iso())
+        self.location_var.set(PREVISION_LOCATIONS[0])
+        self.client_var.set("")
+        self.status_var.set(DEPOSITARY_STATUS)
+        self.square_1500_var.set("0")
+        self.square_1000_var.set("0")
+        self.baguette_500_var.set("0")
+        self.baguette_1000_var.set("0")
+        self.calculate_line_total()
+        self._on_status_change()
+        self.refresh_day_lock_state()
+
+
+class ProductionWindow(BaseModuleWindow):
+    def __init__(self, parent: DashboardWindow) -> None:
+        super().__init__(parent, "Gestion de la production", "1320x860")
+        self.selected_production_id = 0
+        self.edit_mode = False
+        self.show_all_dates = False
+        self.build_ui()
+        self.reset_form()
+        self.summary_var.set("Chargement de la production...")
+        self.after_idle(self.refresh_production)
+
+    def build_ui(self) -> None:
+        container = self.body
+
+        content = ttk.Frame(container)
+        content.pack(fill="both", expand=True)
+        self.create_day_lock_notice(container, "la production", before=content)
+
+        form = ttk.LabelFrame(content, text="Production journalière", style="Card.TLabelframe")
+        form.pack(side="left", fill="y", padx=(0, 12))
+
+        ttk.Label(form, text="Date").grid(row=0, column=0, sticky="w", pady=6)
+        self.date_field = DateField(form)
+        self.date_field.grid(row=0, column=1, sticky="ew", pady=6)
+        self.date_field.bind_change(self._on_date_change)
+
+        self.ordered_trays_var = tk.StringVar(value="0")
+        self.available_trays_var = tk.StringVar(value="0")
+        self.gap_var = tk.StringVar(value="0")
+        self.coverage_var = tk.StringVar(value="0 %")
+        self.total_produced_var = tk.StringVar(value="0")
+        self.sacks_used_var = tk.StringVar(value="0")
+        self.delivered_depositaries_var = tk.StringVar(value="0")
+        self.delivered_mamas_var = tk.StringVar(value="0")
+        self.given_trays_var = tk.StringVar(value="0")
+        self.sample_trays_var = tk.StringVar(value="0")
+        self.remaining_trays_var = tk.StringVar(value="0")
+        self.wasted_trays_var = tk.StringVar(value="0")
+
+        ttk.Label(form, text="Bacs commandés").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.ordered_trays_var, width=12).grid(
+            row=1, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Bacs livrés dépositaires").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.delivered_depositaries_var, width=12).grid(
+            row=2, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Bacs livrés mamans").grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.delivered_mamas_var, width=12).grid(
+            row=3, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Bacs donnés").grid(row=4, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.given_trays_var, width=12).grid(
+            row=4, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Échantillons (Agent commercial)").grid(row=5, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.sample_trays_var, width=12).grid(
+            row=5, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Bacs restants / disponibles").grid(row=6, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.remaining_trays_var, width=12).grid(
+            row=6, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Bacs foutus").grid(row=7, column=0, sticky="w", pady=6)
+        ttk.Spinbox(form, from_=0, to=100000, textvariable=self.wasted_trays_var, width=12).grid(
+            row=7, column=1, sticky="w", pady=6
+        )
+
+        self._make_label_value(form, "Total bacs produits", self.total_produced_var, 8, "#006400")
+        self._make_label_value(form, "Bacs disponibles", self.available_trays_var, 9, "#006400")
+        ttk.Label(form, text="Écart avec commandes").grid(row=10, column=0, sticky="w", pady=6)
+        self.gap_label = ttk.Label(form, textvariable=self.gap_var, foreground="#1b2d5d")
+        self.gap_label.grid(row=10, column=1, sticky="w", pady=6)
+        self._make_label_value(form, "Taux de couverture", self.coverage_var, 11, "#1f4e78")
+        ttk.Label(form, text="Nombre de sacs utilisés").grid(row=12, column=0, sticky="w", pady=6)
+        self.sacks_used_entry = ttk.Entry(form, textvariable=self.sacks_used_var, width=12)
+        self.sacks_used_entry.grid(row=12, column=1, sticky="w", pady=6)
+
+        ttk.Label(form, text="Observations").grid(row=13, column=0, sticky="nw", pady=6)
+        self.observations_text = ScrolledText(form, width=34, height=7)
+        self.observations_text.configure(font=UI_FONT)
+        self.observations_text.grid(row=13, column=1, sticky="ew", pady=6)
+
+        actions = ttk.Frame(form)
+        actions.grid(row=14, column=0, columnspan=2, pady=(14, 0))
+        self.save_button = ttk.Button(actions, text="Enregistrer", command=self.save_production)
+        self.save_button.grid(row=0, column=0, padx=4, pady=4)
+        self.edit_button = ttk.Button(actions, text="Modifier", command=self.load_production_for_edit)
+        self.edit_button.grid(row=0, column=1, padx=4, pady=4)
+        self.delete_button = ttk.Button(actions, text="Supprimer", command=self.delete_production)
+        self.delete_button.grid(row=0, column=2, padx=4, pady=4)
+        ttk.Button(actions, text="Tout afficher", command=self.show_all).grid(row=1, column=0, padx=4, pady=4)
+        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=1, column=1, padx=4, pady=4)
+
+        self.summary_var = tk.StringVar()
+        ttk.Label(form, textvariable=self.summary_var, wraplength=390, justify="left").grid(
+            row=15, column=0, columnspan=2, sticky="ew", pady=(14, 0)
+        )
+
+        table_frame = ttk.LabelFrame(content, text="Historique de production", style="Card.TLabelframe")
+        table_frame.pack(side="left", fill="both", expand=True)
+        self.table = DataTable(table_frame, height=22)
+        self.table.pack(fill="both", expand=True)
+
+        for variable in (
+            self.ordered_trays_var,
+            self.delivered_depositaries_var,
+            self.delivered_mamas_var,
+            self.given_trays_var,
+            self.sample_trays_var,
+            self.remaining_trays_var,
+            self.wasted_trays_var,
+        ):
+            variable.trace_add("write", lambda *_args: self.calculate_current_totals())
+
+        form.columnconfigure(1, weight=1)
+        self.configure_day_lock_controls(
+            self.date_field,
+            [self.save_button, self.edit_button, self.delete_button],
+        )
+        self.hide_read_only_buttons("Production", [self.save_button, self.edit_button, self.delete_button])
+
+    def _make_label_value(
+        self,
+        parent: ttk.LabelFrame,
+        label: str,
+        variable: tk.StringVar,
+        row: int,
+        foreground: str,
+    ) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
+        ttk.Label(parent, textvariable=variable, foreground=foreground).grid(row=row, column=1, sticky="w", pady=6)
+
+    def _parse_tray_count(self, value: str, field_name: str) -> int:
+        text = value.strip().replace(" ", "").replace(",", ".")
+        if not text:
+            return 0
+        try:
+            number = int(float(text))
+        except ValueError as exc:
+            raise ValueError(f"Le champ « {field_name} » doit être numérique.") from exc
+        if number < 0:
+            raise ValueError(f"Le champ « {field_name} » ne peut pas être négatif.")
+        return number
+
+    def _on_date_change(self) -> None:
+        self.show_all_dates = False
+        self.load_day_summary()
+        self.refresh_production()
+
+    def calculate_current_totals(self) -> None:
+        try:
+            delivered_depositaries = self._parse_tray_count(
+                self.delivered_depositaries_var.get(),
+                "Bacs livrés dépositaires",
+            )
+            delivered_mamas = self._parse_tray_count(self.delivered_mamas_var.get(), "Bacs livrés mamans")
+            given = self._parse_tray_count(self.given_trays_var.get(), "Bacs donnés")
+            samples = self._parse_tray_count(self.sample_trays_var.get(), "Échantillons")
+            remaining = self._parse_tray_count(self.remaining_trays_var.get(), "Bacs restants")
+            wasted = self._parse_tray_count(self.wasted_trays_var.get(), "Bacs foutus")
+        except ValueError:
+            delivered_depositaries = delivered_mamas = given = samples = remaining = wasted = 0
+        try:
+            ordered = self._parse_tray_count(self.ordered_trays_var.get(), "Bacs commandés")
+        except ValueError:
+            ordered = 0
+        produced = delivered_depositaries + delivered_mamas + given + samples + remaining + wasted
+        gap = produced - ordered
+        coverage = round((produced * 100.0 / ordered), 2) if ordered > 0 else 0.0
+        self.total_produced_var.set(str(produced))
+        self.available_trays_var.set(str(remaining))
+        self.gap_var.set(str(gap))
+        self.coverage_var.set(f"{format_number(coverage)} %")
+        self.gap_label.configure(foreground="#8b0000" if gap < 0 else "#006400")
+
+    def load_day_summary(self) -> None:
+        try:
+            target_date = self.date_field.get_date()
+        except ValueError:
+            target_date = date.today()
+        summary = DatabaseHelper.get_production_summary_for_date(target_date)
+        self.ordered_trays_var.set(str(int(summary.get("NombreBacsCommandes", 0) or 0)))
+        if not self.edit_mode and int(summary.get("Id", 0) or 0) > 0:
+            self.selected_production_id = int(summary.get("Id", 0) or 0)
+            self.delivered_depositaries_var.set(str(int(summary.get("NombreBacsLivresDepositaires", 0) or 0)))
+            self.delivered_mamas_var.set(str(int(summary.get("NombreBacsLivresMamans", 0) or 0)))
+            self.given_trays_var.set(str(int(summary.get("NombreBacsDonnes", 0) or 0)))
+            self.sample_trays_var.set(str(int(summary.get("NombreEchantillons", 0) or 0)))
+            self.remaining_trays_var.set(str(int(summary.get("NombreBacsRestants", 0) or 0)))
+            self.wasted_trays_var.set(str(int(summary.get("NombreBacsFoutus", 0) or 0)))
+            self.sacks_used_var.set(format_number(float(summary.get("NombreSacsUtilises", 0) or 0)))
+            self.observations_text.delete("1.0", "end")
+            self.observations_text.insert("1.0", str(summary.get("Observations", "") or ""))
+        elif not self.edit_mode:
+            self.selected_production_id = 0
+            self.delivered_depositaries_var.set("0")
+            self.delivered_mamas_var.set("0")
+            self.given_trays_var.set("0")
+            self.sample_trays_var.set("0")
+            self.remaining_trays_var.set("0")
+            self.wasted_trays_var.set("0")
+            self.sacks_used_var.set("0")
+            self.observations_text.delete("1.0", "end")
+        self.calculate_current_totals()
+
+    def validate_production(self) -> tuple[date, int, int, int, int, int, int, int, float, str] | None:
+        try:
+            target_date = self.date_field.get_date()
+            ordered = self._parse_tray_count(self.ordered_trays_var.get(), "Bacs commandés")
+            delivered_depositaries = self._parse_tray_count(
+                self.delivered_depositaries_var.get(),
+                "Bacs livrés dépositaires",
+            )
+            delivered_mamas = self._parse_tray_count(self.delivered_mamas_var.get(), "Bacs livrés mamans")
+            given = self._parse_tray_count(self.given_trays_var.get(), "Bacs donnés")
+            samples = self._parse_tray_count(self.sample_trays_var.get(), "Échantillons")
+            remaining = self._parse_tray_count(self.remaining_trays_var.get(), "Bacs restants")
+            wasted = self._parse_tray_count(self.wasted_trays_var.get(), "Bacs foutus")
+            sacks_used = parse_float(self.sacks_used_var.get(), "Nombre de sacs utilisés")
+            if sacks_used < 0:
+                raise ValueError("Le nombre de sacs utilisés ne peut pas être négatif.")
+        except Exception as exc:
+            messagebox.showwarning("Production", str(exc))
+            return None
+
+        observations = self.observations_text.get("1.0", "end").strip()
+        return target_date, ordered, delivered_depositaries, delivered_mamas, given, samples, remaining, wasted, sacks_used, observations
+
+    def save_production(self) -> None:
+        if self.is_read_only_module("Production"):
+            messagebox.showwarning("Production", "Ce module est en lecture seule pour votre profil.")
+            return
+        validated = self.validate_production()
+        if validated is None:
+            return
+        target_date, ordered, delivered_depositaries, delivered_mamas, given, samples, remaining, wasted, sacks_used, observations = validated
+
+        try:
+            DatabaseHelper.save_production_day(
+                target_date,
+                ordered,
+                delivered_depositaries,
+                delivered_mamas,
+                given,
+                samples,
+                remaining,
+                wasted,
+                sacks_used,
+                observations,
+            )
+            log_user_action(
+                self,
+                "Production",
+                "Production enregistrée",
+                (
+                    f"{target_date.strftime('%d/%m/%Y')} | Dépositaires {delivered_depositaries} | "
+                    f"Mamans {delivered_mamas} | Donnés {given} | Échantillons {samples} | "
+                    f"Restants {remaining} | Foutus {wasted}"
+                ),
+            )
+            self.reset_form()
+            self.refresh_production()
+            messagebox.showinfo("Production", "La production a été enregistrée avec succès.")
+        except ValueError as exc:
+            messagebox.showwarning("Production", str(exc))
+        except Exception as exc:
+            messagebox.showerror("Production", str(exc))
+
+    def refresh_production(self) -> None:
+        try:
+            target_date = self.date_field.get_date()
+        except ValueError:
+            target_date = date.today()
+        rows = DatabaseHelper.list_productions() if self.show_all_dates else DatabaseHelper.list_productions_by_date(target_date)
+        self.table.set_data(
+            rows,
+            columns=[
+                "Id",
+                "DateProduction",
+                "NombreBacsCommandes",
+                "NombreBacsLivresDepositaires",
+                "NombreBacsLivresMamans",
+                "NombreBacsDonnes",
+                "NombreEchantillons",
+                "NombreBacsRestants",
+                "NombreBacsFoutus",
+                "NombreBacsProduits",
+                "NombreSacsUtilises",
+                "EcartCommandes",
+                "TauxCouverture",
+                "Observations",
+            ],
+            headings={
+                "DateProduction": "Date",
+                "NombreBacsCommandes": "Commandés",
+                "NombreBacsLivresDepositaires": "Livrés dépositaires",
+                "NombreBacsLivresMamans": "Livrés mamans",
+                "NombreBacsDonnes": "Donnés",
+                "NombreEchantillons": "Échantillons",
+                "NombreBacsRestants": "Restants",
+                "NombreBacsFoutus": "Foutus",
+                "NombreBacsProduits": "Produits",
+                "NombreSacsUtilises": "Sacs utilisés",
+                "EcartCommandes": "Écart",
+                "TauxCouverture": "Couverture",
+                "Observations": "Observations",
+            },
+            hidden_columns=["Id"],
+            formatters={
+                "TauxCouverture": lambda value: f"{format_number(float(value or 0))} %",
+                "Observations": compact_multiline_text,
+            },
+        )
+        self.update_summary(len(rows))
+        self.refresh_day_lock_state()
+
+    def update_summary(self, row_count: int | None = None) -> None:
+        if self.show_all_dates:
+            summary = DatabaseHelper.get_global_production_summary()
+            self.summary_var.set(
+                "Production globale\n"
+                f"Jours saisis : {int(summary.get('JoursProduction', 0) or 0)} | "
+                f"Bacs produits : {int(summary.get('TotalBacsProduits', 0) or 0)}\n"
+                f"Bacs restants : {int(summary.get('TotalBacsRestants', 0) or 0)} | "
+                f"Sacs utilisés : {format_number(float(summary.get('TotalSacsUtilises', 0) or 0))} | "
+                f"Écart : {int(summary.get('EcartCommandes', 0) or 0)}"
+            )
+            return
+
+        try:
+            target_date = self.date_field.get_date()
+        except ValueError:
+            target_date = date.today()
+        summary = DatabaseHelper.get_production_summary_for_date(target_date)
+        self.summary_var.set(
+            f"Production du {target_date.strftime('%d/%m/%Y')}\n"
+            f"Commandés : {int(summary.get('NombreBacsCommandes', 0) or 0)} | "
+            f"Produits : {int(summary.get('NombreBacsProduits', 0) or 0)} | "
+            f"Restants : {int(summary.get('NombreBacsRestants', 0) or 0)}\n"
+            f"Livrés dépositaires : {int(summary.get('NombreBacsLivresDepositaires', 0) or 0)} | "
+            f"Livrés mamans : {int(summary.get('NombreBacsLivresMamans', 0) or 0)} | "
+            f"Écart : {int(summary.get('EcartCommandes', 0) or 0)} | "
+            f"Sacs utilisés : {format_number(float(summary.get('NombreSacsUtilises', 0) or 0))}"
+        )
+
+    def load_production_for_edit(self) -> None:
+        if self.is_read_only_module("Production"):
+            messagebox.showwarning("Production", "Ce module est en lecture seule pour votre profil.")
+            return
+        row = self.selected_order_row()
+        if row is None:
+            messagebox.showwarning("Production", "Veuillez sélectionner une production dans la grille.")
+            return
+        self.selected_production_id = int(row["Id"])
+        self.edit_mode = True
+        self.date_field.set_date(str(row["DateProduction"]))
+        self.ordered_trays_var.set(str(int(row.get("NombreBacsCommandes", 0) or 0)))
+        self.delivered_depositaries_var.set(str(int(row.get("NombreBacsLivresDepositaires", 0) or 0)))
+        self.delivered_mamas_var.set(str(int(row.get("NombreBacsLivresMamans", 0) or 0)))
+        self.given_trays_var.set(str(int(row.get("NombreBacsDonnes", 0) or 0)))
+        self.sample_trays_var.set(str(int(row.get("NombreEchantillons", 0) or 0)))
+        self.remaining_trays_var.set(str(int(row.get("NombreBacsRestants", 0) or 0)))
+        self.wasted_trays_var.set(str(int(row.get("NombreBacsFoutus", 0) or 0)))
+        self.sacks_used_var.set(format_number(float(row.get("NombreSacsUtilises", 0) or 0)))
+        self.observations_text.delete("1.0", "end")
+        self.observations_text.insert("1.0", str(row.get("Observations", "") or ""))
+        self.show_all_dates = False
+        self.calculate_current_totals()
+        self.refresh_day_lock_state()
+        messagebox.showinfo("Production", "La production a été chargée. Modifiez-la puis enregistrez.")
+
+    def delete_production(self) -> None:
+        if self.is_read_only_module("Production"):
+            messagebox.showwarning("Production", "Ce module est en lecture seule pour votre profil.")
+            return
+        row = self.table.selected_row()
+        if row is None:
+            messagebox.showwarning("Production", "Veuillez sélectionner une production dans la grille.")
+            return
+        if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment supprimer cette production ?"):
+            return
+        try:
+            deleted = DatabaseHelper.delete_production_day(int(row["Id"]))
+            if deleted:
+                log_user_action(
+                    self,
+                    "Production",
+                    "Production supprimée",
+                    f"Id {row['Id']} | Date {row['DateProduction']}",
+                )
+                self.reset_form()
+                self.refresh_production()
+                messagebox.showinfo("Production", "La production a été supprimée avec succès.")
+            else:
+                messagebox.showwarning("Production", "Aucune production n'a été supprimée.")
+        except ValueError as exc:
+            messagebox.showwarning("Production", str(exc))
+        except Exception as exc:
+            messagebox.showerror("Production", str(exc))
+
+    def show_all(self) -> None:
+        self.show_all_dates = True
+        self.refresh_production()
+
+    def refresh_live_view(self) -> None:
+        self.load_day_summary()
+        self.refresh_production()
+
+    def reset_form(self) -> None:
+        self.selected_production_id = 0
+        self.edit_mode = False
+        self.show_all_dates = False
+        self.date_field.set_date(today_iso())
+        self.delivered_depositaries_var.set("0")
+        self.delivered_mamas_var.set("0")
+        self.given_trays_var.set("0")
+        self.sample_trays_var.set("0")
+        self.remaining_trays_var.set("0")
+        self.wasted_trays_var.set("0")
+        self.observations_text.delete("1.0", "end")
+        self.load_day_summary()
+        self.refresh_day_lock_state()
+
+
 class OrdersWindow(BaseModuleWindow):
     def __init__(self, parent: DashboardWindow) -> None:
         super().__init__(parent, "Gestion des commandes", "1240x840")
@@ -4333,9 +5987,11 @@ class OrdersWindow(BaseModuleWindow):
         self.selected_order_id = 0
         self.show_all_dates = False
         self.loaded_amount_due_rate: float | None = None
+        self._clearing_order_selection = False
         self.build_ui()
         self.reset_form()
-        self.refresh_orders()
+        self.summary_var.set("Chargement des commandes...")
+        self.after_idle(self.refresh_orders)
 
     def build_ui(self) -> None:
         container = self.body
@@ -4404,10 +6060,37 @@ class OrdersWindow(BaseModuleWindow):
             row=8, column=0, columnspan=2, sticky="ew", pady=(14, 0)
         )
 
-        table_frame = ttk.LabelFrame(content, text="Historique des commandes", style="Card.TLabelframe")
-        table_frame.pack(side="left", fill="both", expand=True)
-        self.table = DataTable(table_frame, height=20)
-        self.table.pack(fill="both", expand=True)
+        tables_container = ttk.Frame(content)
+        tables_container.pack(side="left", fill="both", expand=True)
+
+        depositary_frame = ttk.LabelFrame(
+            tables_container,
+            text="Commandes des dépositaires",
+            style="Card.TLabelframe",
+        )
+        depositary_frame.pack(fill="both", expand=True, pady=(0, 8))
+        self.depositary_table = DataTable(depositary_frame, height=10)
+        self.depositary_table.pack(fill="both", expand=True)
+
+        customer_frame = ttk.LabelFrame(
+            tables_container,
+            text="Commandes des mamans et vente cash",
+            style="Card.TLabelframe",
+        )
+        customer_frame.pack(fill="both", expand=True)
+        self.customer_table = DataTable(customer_frame, height=10)
+        self.customer_table.pack(fill="both", expand=True)
+        self.table = self.customer_table
+        self.depositary_table.tree.bind(
+            "<<TreeviewSelect>>",
+            lambda _event: self.clear_other_order_table_selection(self.depositary_table),
+            add="+",
+        )
+        self.customer_table.tree.bind(
+            "<<TreeviewSelect>>",
+            lambda _event: self.clear_other_order_table_selection(self.customer_table),
+            add="+",
+        )
 
         self.status_combo.bind("<<ComboboxSelected>>", self._on_status_change)
         self.amount_received_var.trace_add("write", lambda *_args: self.recalculate_amounts())
@@ -4416,6 +6099,57 @@ class OrdersWindow(BaseModuleWindow):
         self.configure_day_lock_controls(
             self.date_field,
             [self.save_button, self.edit_button, self.delete_button],
+        )
+
+    def clear_other_order_table_selection(self, source_table: DataTable) -> None:
+        if self._clearing_order_selection:
+            return
+        self._clearing_order_selection = True
+        try:
+            other_table = self.customer_table if source_table is self.depositary_table else self.depositary_table
+            other_table.tree.selection_remove(other_table.tree.selection())
+        finally:
+            self._clearing_order_selection = False
+
+    def selected_order_row(self) -> dict[str, Any] | None:
+        return self.depositary_table.selected_row() or self.customer_table.selected_row()
+
+    def set_orders_table_data(self, table: DataTable, rows: list[dict[str, Any]]) -> None:
+        table.set_data(
+            rows,
+            columns=[
+                "Id",
+                "DateCommande",
+                "Client",
+                "Statut",
+                "NombreBacs",
+                "MontantAPercevoir",
+                "MontantRecu",
+                "DetteInitiale",
+                "DettePayee",
+                "Dette",
+                "StatutDette",
+            ],
+            headings={
+                "DateCommande": "Date",
+                "NombreBacs": "Bacs",
+                "MontantAPercevoir": "À percevoir",
+                "MontantRecu": "Reçu",
+                "DetteInitiale": "Dette initiale",
+                "DettePayee": "Dette payée",
+                "Dette": "Dette restante",
+                "StatutDette": "Statut dette",
+            },
+            hidden_columns=["Id"],
+            formatters={
+                "Statut": normalize_status_label,
+                "NombreBacs": lambda value: f"{int(value)}",
+                "MontantAPercevoir": lambda value: format_fc(float(value)),
+                "MontantRecu": lambda value: format_fc(float(value)),
+                "DetteInitiale": lambda value: format_fc(float(value)),
+                "DettePayee": lambda value: format_fc(float(value)),
+                "Dette": lambda value: format_fc(float(value)),
+            },
         )
 
     def _on_date_change(self) -> None:
@@ -4445,6 +6179,10 @@ class OrdersWindow(BaseModuleWindow):
             amount_received = 0
         debt = amount_due - amount_received
         self.amount_due_var.set(format_fc(amount_due))
+        if amount_received > amount_due:
+            self.debt_var.set("Paiement trop élevé")
+            self.debt_label.configure(foreground="#8b0000")
+            return
         self.debt_var.set(format_fc(debt))
         self.debt_label.configure(foreground="#8b0000" if debt > 0 else "#006400")
 
@@ -4483,6 +6221,12 @@ class OrdersWindow(BaseModuleWindow):
             return None
 
         amount_due = trays * self.get_status_rate(status)
+        if amount_received > amount_due:
+            messagebox.showwarning(
+                "Commandes",
+                "Le montant reçu ne peut pas dépasser le montant à percevoir.",
+            )
+            return None
         debt = amount_due - amount_received
         return target_date, client, status, trays, amount_due, amount_received, debt
 
@@ -4508,6 +6252,24 @@ class OrdersWindow(BaseModuleWindow):
 
         existing_id = DatabaseHelper.find_existing_order(target_date, client)
         if existing_id == 0:
+            similar_order = DatabaseHelper.find_similar_order(target_date, client)
+            if similar_order is None:
+                return True
+            existing_client = str(similar_order.get("Client", ""))
+            choice = messagebox.askyesnocancel(
+                "Client similaire détecté",
+                (
+                    f"Il y a déjà une commande enregistrée au nom de : {existing_client}.\n\n"
+                    "Oui : charger cette commande pour la modifier.\n"
+                    "Non : continuer parce qu'il s'agit d'un client différent.\n"
+                    "Annuler : revenir au formulaire."
+                ),
+            )
+            if choice is None:
+                return False
+            if choice:
+                self.load_order_row_for_edit(similar_order)
+                return False
             return True
 
         if not messagebox.askyesno(
@@ -4542,6 +6304,9 @@ class OrdersWindow(BaseModuleWindow):
         return False
 
     def save_order(self) -> None:
+        if self.is_read_only_module("Commandes"):
+            messagebox.showwarning("Commandes", "Ce module est en lecture seule pour votre profil.")
+            return
         validated = self.validate_order()
         if validated is None:
             return
@@ -4610,6 +6375,13 @@ class OrdersWindow(BaseModuleWindow):
         except ValueError:
             target_date = date.today()
         rows = DatabaseHelper.list_orders() if self.show_all_dates else DatabaseHelper.list_orders_by_date(target_date)
+        depositary_rows = [row for row in rows if is_depositary_status(row.get("Statut"))]
+        customer_rows = [row for row in rows if not is_depositary_status(row.get("Statut"))]
+        self.set_orders_table_data(self.depositary_table, depositary_rows)
+        self.set_orders_table_data(self.customer_table, customer_rows)
+        self.update_summary(rows)
+        self.refresh_day_lock_state()
+        return
         self.table.set_data(
             rows,
             columns=[
@@ -4680,7 +6452,28 @@ class OrdersWindow(BaseModuleWindow):
             )
         self.summary_var.set(text)
 
+    def load_order_row_for_edit(self, row: dict[str, Any]) -> None:
+        self.selected_order_id = int(row["Id"])
+        self.edit_mode = True
+        self.date_field.set_date(str(row["DateCommande"]))
+        self.client_var.set(str(row["Client"]))
+        self.status_var.set(normalize_status_form_label(row["Statut"]))
+        self.trays_var.set(str(int(row["NombreBacs"])))
+        self.amount_received_var.set(format_number(float(row["MontantRecu"])))
+        if is_legacy_depositary_6000_status(row["Statut"]) and int(row["NombreBacs"]) > 0:
+            self.loaded_amount_due_rate = float(row["MontantAPercevoir"]) / int(row["NombreBacs"])
+        elif normalize_status_form_label(row["Statut"]) == DEPOSITARY_STATUS and int(row["NombreBacs"]) > 0:
+            self.loaded_amount_due_rate = float(row["MontantAPercevoir"]) / int(row["NombreBacs"])
+        else:
+            self.loaded_amount_due_rate = None
+        self.recalculate_amounts()
+        self.refresh_day_lock_state()
+        messagebox.showinfo("Commandes", "La commande a été chargée. Modifiez-la puis enregistrez.")
+
     def load_order_for_edit(self) -> None:
+        if self.is_read_only_module("Commandes"):
+            messagebox.showwarning("Commandes", "Ce module est en lecture seule pour votre profil.")
+            return
         row = self.table.selected_row()
         if row is None:
             messagebox.showwarning("Commandes", "Veuillez sélectionner une commande dans la grille.")
@@ -4702,8 +6495,50 @@ class OrdersWindow(BaseModuleWindow):
         self.refresh_day_lock_state()
         messagebox.showinfo("Commandes", "La commande a été chargée. Modifiez-la puis enregistrez.")
 
+    def load_order_for_edit(self) -> None:
+        if self.is_read_only_module("Commandes"):
+            messagebox.showwarning("Commandes", "Ce module est en lecture seule pour votre profil.")
+            return
+        row = self.selected_order_row()
+        if row is None:
+            messagebox.showwarning("Commandes", "Veuillez sélectionner une commande dans la grille.")
+            return
+        self.load_order_row_for_edit(row)
+
     def delete_order(self) -> None:
+        if self.is_read_only_module("Commandes"):
+            messagebox.showwarning("Commandes", "Ce module est en lecture seule pour votre profil.")
+            return
         row = self.table.selected_row()
+        if row is None:
+            messagebox.showwarning("Commandes", "Veuillez sélectionner une commande dans la grille.")
+            return
+        if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment supprimer cette commande ?"):
+            return
+        try:
+            deleted = DatabaseHelper.delete_order(int(row["Id"]))
+            if deleted:
+                log_user_action(
+                    self,
+                    "Commandes",
+                    "Commande supprimée",
+                    f"Id {row['Id']} | Client {row['Client']} | Date {row['DateCommande']}",
+                )
+                messagebox.showinfo("Commandes", "La commande a été supprimée avec succès.")
+                self.reset_form()
+                self.refresh_orders()
+            else:
+                messagebox.showwarning("Commandes", "Aucune commande n'a été supprimée.")
+        except ValueError as exc:
+            messagebox.showwarning("Commandes", str(exc))
+        except Exception as exc:
+            messagebox.showerror("Commandes", str(exc))
+
+    def delete_order(self) -> None:
+        if self.is_read_only_module("Commandes"):
+            messagebox.showwarning("Commandes", "Ce module est en lecture seule pour votre profil.")
+            return
+        row = self.selected_order_row()
         if row is None:
             messagebox.showwarning("Commandes", "Veuillez sélectionner une commande dans la grille.")
             return
@@ -4755,6 +6590,19 @@ class CashWindow(BaseModuleWindow):
         self.remaining_accumulated_debts = 0.0
         self.total_entries_today = 0.0
         self.build_ui()
+        self.total_trays_var.set("...")
+        self.expected_var.set("Chargement...")
+        self.received_var.set("Chargement...")
+        self.debts_var.set("Chargement...")
+        self.accumulated_debts_var.set("Chargement...")
+        self.remaining_accumulated_debts_var.set("Chargement...")
+        self.accumulated_debts_status_var.set("Chargement...")
+        self.total_entries_var.set("Chargement...")
+        self.balance_var.set("Chargement...")
+        self.summary_var.set("Chargement de la caisse...")
+        self.after_idle(self.finish_initial_load)
+
+    def finish_initial_load(self) -> None:
         self.reset_form()
         self.refresh_data()
 
@@ -4853,6 +6701,15 @@ class CashWindow(BaseModuleWindow):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
         ttk.Label(parent, textvariable=variable, foreground=foreground).grid(row=row, column=1, sticky="w", pady=6)
 
+    def refresh_paid_debts_details_message(self, paid_debts: float) -> None:
+        current_text = self.paid_debts_details_text.get("1.0", "end").strip()
+        should_show_message = paid_debts <= 0 and self.accumulated_debts_before_payment <= 0
+        if should_show_message and current_text in {"", NO_DEBT_PAYMENT_MESSAGE}:
+            self.paid_debts_details_text.delete("1.0", "end")
+            self.paid_debts_details_text.insert("1.0", NO_DEBT_PAYMENT_MESSAGE)
+        elif not should_show_message and current_text == NO_DEBT_PAYMENT_MESSAGE:
+            self.paid_debts_details_text.delete("1.0", "end")
+
     def _on_date_change(self) -> None:
         self.show_all_dates = False
         self.refresh_data()
@@ -4931,6 +6788,7 @@ class CashWindow(BaseModuleWindow):
         self.accumulated_debts_status_var.set(debt_status)
         self.total_entries_var.set(format_fc(self.total_entries_today))
         self.balance_var.set(format_fc(balance))
+        self.refresh_paid_debts_details_message(paid_debts)
         self.update_summary()
 
     def update_summary(self, row_count: int | None = None) -> None:
@@ -5064,6 +6922,8 @@ class CashWindow(BaseModuleWindow):
 
         details = self.expenses_text.get("1.0", "end").strip()
         paid_debts_details = self.paid_debts_details_text.get("1.0", "end").strip()
+        if paid_debts_details == NO_DEBT_PAYMENT_MESSAGE:
+            paid_debts_details = ""
         if expenses > 0 and not details:
             messagebox.showwarning(
                 "Caisse",
@@ -5159,6 +7019,10 @@ class CommissionsWindow(BaseModuleWindow):
         self.current_net = 0.0
         self.all_rows: list[dict[str, Any]] = []
         self.build_ui()
+        self.summary_var.set("Chargement des commissions...")
+        self.after_idle(self.finish_initial_load)
+
+    def finish_initial_load(self) -> None:
         self.reset_form()
         self.refresh_commissions()
 

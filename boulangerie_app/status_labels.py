@@ -7,9 +7,9 @@ DEPOSITARY_STATUS = "Dépositaire"
 LEGACY_DEPOSITARY_6000_STATUS = "Dépositaire 6.000Fc"
 
 ORDER_STATUSES = [
-    "Maman",
-    "Vente cash",
     DEPOSITARY_STATUS,
+    "Vente cash",
+    "Maman",
 ]
 
 COMMISSION_FILTERS = [

@@ -28,28 +28,28 @@ from .report_branding import (
     get_logo_watermark_path,
     register_pdf_fonts,
 )
-from .status_labels import normalize_status_label
+from .status_labels import is_depositary_status, normalize_status_label
 from .version import APP_NAME
 
 REPORT_SECTIONS_BY_ROLE: dict[str, tuple[str, ...]] = {
-    "Admin": ("stock", "orders", "cash", "commissions"),
+    "Admin": ("stock", "production", "orders", "cash", "commissions"),
     "Caissier": ("orders", "cash", "commissions"),
     "Gestionnaire de stock": ("stock",),
-    "Gestionnaire des commandes": ("orders", "commissions"),
+    "Gestionnaire des commandes": ("production", "orders", "commissions"),
 }
 
 REPORT_SCOPE_LABELS = {
     "Admin": "Rapport complet",
     "Caissier": "Rapport commandes, commissions et caisse",
     "Gestionnaire de stock": "Rapport stock",
-    "Gestionnaire des commandes": "Rapport commandes et commissions",
+    "Gestionnaire des commandes": "Rapport production, commandes et commissions",
 }
 
 REPORT_SCOPE_DESCRIPTIONS = {
     "Admin": "Toutes les sections sont incluses dans ce rapport.",
     "Caissier": "Ce rapport contient uniquement les commandes, les commissions et la caisse.",
     "Gestionnaire de stock": "Ce rapport contient uniquement les informations de stock.",
-    "Gestionnaire des commandes": "Ce rapport contient uniquement les commandes et les commissions.",
+    "Gestionnaire des commandes": "Ce rapport contient la production, les commandes et les commissions.",
 }
 
 
@@ -173,6 +173,83 @@ def parse_named_amount_lines(text: str) -> list[tuple[str, str]]:
         if not matched:
             rows.append((line, ""))
     return rows
+
+
+def _summarize_production_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
+    keys = [
+        "NombreBacsCommandes",
+        "NombreBacsLivresDepositaires",
+        "NombreBacsLivresMamans",
+        "NombreBacsDonnes",
+        "NombreEchantillons",
+        "NombreBacsRestants",
+        "NombreBacsFoutus",
+        "NombreBacsProduits",
+        "NombreSacsUtilises",
+    ]
+    summary = {key: 0.0 for key in keys}
+    for row in rows:
+        for key in keys:
+            summary[key] += float(row.get(key, 0) or 0)
+    ordered = summary["NombreBacsCommandes"]
+    produced = summary["NombreBacsProduits"]
+    summary["EcartCommandes"] = produced - ordered
+    summary["TauxCouverture"] = round((produced * 100.0 / ordered), 2) if ordered > 0 else 0.0
+    return summary
+
+
+def _production_field_rows(summary: dict[str, Any]) -> list[list[str]]:
+    return [
+        ["Champ", "Valeur"],
+        ["Bacs commandés", _format_number(float(summary.get("NombreBacsCommandes", 0) or 0))],
+        ["Bacs livrés dépositaires", _format_number(float(summary.get("NombreBacsLivresDepositaires", 0) or 0))],
+        ["Bacs livrés mamans", _format_number(float(summary.get("NombreBacsLivresMamans", 0) or 0))],
+        ["Bacs donnés", _format_number(float(summary.get("NombreBacsDonnes", 0) or 0))],
+        ["Échantillons (Agent commercial)", _format_number(float(summary.get("NombreEchantillons", 0) or 0))],
+        ["Bacs restants / disponibles", _format_number(float(summary.get("NombreBacsRestants", 0) or 0))],
+        ["Bacs foutus", _format_number(float(summary.get("NombreBacsFoutus", 0) or 0))],
+        ["Total bacs produits", _format_number(float(summary.get("NombreBacsProduits", 0) or 0))],
+        ["Écart avec commandes", _format_number(float(summary.get("EcartCommandes", 0) or 0))],
+        ["Taux de couverture", f"{_format_number(float(summary.get('TauxCouverture', 0) or 0))} %"],
+        ["Nombre de sacs utilisés", _format_number(float(summary.get("NombreSacsUtilises", 0) or 0))],
+        ["Observations", _safe_text(summary.get("Observations")).strip() or "-"],
+    ]
+
+
+def _production_rows_by_day(rows: list[dict[str, Any]]) -> list[list[str]]:
+    table_rows = [
+        [
+            "Date",
+            "Commandés",
+            "Livrés dép.",
+            "Livrés mamans",
+            "Donnés",
+            "Éch.",
+            "Restants",
+            "Foutus",
+            "Produits",
+            "Sacs",
+            "Écart",
+        ]
+    ]
+    for row in rows:
+        row_date = _parse_row_date(row.get("DateProduction"))
+        table_rows.append(
+            [
+                _format_date(row_date) if row_date is not None else _safe_text(row.get("DateProduction")),
+                _format_number(float(row.get("NombreBacsCommandes", 0) or 0)),
+                _format_number(float(row.get("NombreBacsLivresDepositaires", 0) or 0)),
+                _format_number(float(row.get("NombreBacsLivresMamans", 0) or 0)),
+                _format_number(float(row.get("NombreBacsDonnes", 0) or 0)),
+                _format_number(float(row.get("NombreEchantillons", 0) or 0)),
+                _format_number(float(row.get("NombreBacsRestants", 0) or 0)),
+                _format_number(float(row.get("NombreBacsFoutus", 0) or 0)),
+                _format_number(float(row.get("NombreBacsProduits", 0) or 0)),
+                _format_number(float(row.get("NombreSacsUtilises", 0) or 0)),
+                _format_number(float(row.get("EcartCommandes", 0) or 0)),
+            ]
+        )
+    return table_rows
 
 
 def _cash_highlight_table_styles(rows: list[list[Any]]) -> list[tuple[Any, ...]]:
@@ -381,6 +458,77 @@ def _paragraph(text: str, style: ParagraphStyle) -> Paragraph:
     return Paragraph(escape(text).replace("\n", "<br/>"), style)
 
 
+def _rich_paragraph(markup: str, style: ParagraphStyle) -> Paragraph:
+    return Paragraph(markup.replace("\n", "<br/>"), style)
+
+
+def _bold_markup(value: Any) -> str:
+    return f'<font name="{PDF_FONT_BOLD}">{escape(str(value))}</font>'
+
+
+def _order_table_rows(rows: list[dict[str, Any]], include_date: bool) -> list[list[Any]]:
+    if include_date:
+        table_rows: list[list[Any]] = [["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]]
+    else:
+        table_rows = [["Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]]
+
+    for row in rows:
+        row_values: list[Any] = []
+        if include_date:
+            row_date = _parse_row_date(row.get("DateCommande"))
+            row_values.append(_format_date(row_date) if row_date is not None else _safe_text(row.get("DateCommande")))
+        row_values.extend(
+            [
+                _safe_text(row.get("Client")),
+                normalize_status_label(row.get("Statut")),
+                str(int(row.get("NombreBacs", 0) or 0)),
+                _format_fc(float(row.get("MontantAPercevoir", 0) or 0)),
+                _format_fc(float(row.get("MontantRecu", 0) or 0)),
+                _format_fc(float(row.get("Dette", 0) or 0)),
+            ]
+        )
+        table_rows.append(row_values)
+    return table_rows
+
+
+def _order_table_flowables(
+    orders: list[dict[str, Any]],
+    styles: dict[str, ParagraphStyle],
+    *,
+    include_date: bool = False,
+    empty_message: str,
+) -> list[Any]:
+    if not orders:
+        return [_paragraph(empty_message, styles["body"])]
+
+    depositary_orders = [row for row in orders if is_depositary_status(row.get("Statut"))]
+    customer_orders = [row for row in orders if not is_depositary_status(row.get("Statut"))]
+    column_widths = (
+        [22 * mm, 36 * mm, 26 * mm, 12 * mm, 28 * mm, 28 * mm, 24 * mm]
+        if include_date
+        else [42 * mm, 34 * mm, 16 * mm, 30 * mm, 28 * mm, 24 * mm]
+    )
+    blocks: list[Any] = []
+    grouped_orders = [
+        ("Commandes des dépositaires", depositary_orders, "Aucune commande dépositaire enregistrée."),
+        ("Commandes des mamans et ventes cash", customer_orders, "Aucune commande maman ou vente cash enregistrée."),
+    ]
+    for title, rows, group_empty_message in grouped_orders:
+        if rows:
+            blocks.append(
+                KeepTogether(
+                    [
+                        _paragraph(title, styles["subsection"]),
+                        _make_table(_order_table_rows(rows, include_date), column_widths),
+                    ]
+                )
+            )
+        else:
+            blocks.append(_paragraph(group_empty_message, styles["note"]))
+        blocks.append(Spacer(1, 3 * mm))
+    return blocks
+
+
 def _safe_text(value: Any) -> str:
     return "" if value is None else str(value)
 
@@ -388,14 +536,22 @@ def _safe_text(value: Any) -> str:
 def _draw_report_page_background(canvas: Any, doc: SimpleDocTemplate) -> None:
     watermark_path = get_logo_watermark_path()
     if not watermark_path.exists():
+        watermark_path = get_logo_path()
+    if not watermark_path.exists():
         return
 
     page_width, page_height = doc.pagesize
-    watermark_size = min(page_width, page_height) * 0.55
+    watermark_size = min(page_width, page_height) * 0.62
     x = (page_width - watermark_size) / 2
     y = (page_height - watermark_size) / 2
 
     canvas.saveState()
+    if watermark_path == get_logo_path():
+        try:
+            canvas.setFillAlpha(0.08)
+            canvas.setStrokeAlpha(0.08)
+        except Exception:
+            pass
     canvas.drawImage(
         str(watermark_path),
         x,
@@ -435,10 +591,12 @@ def create_daily_pdf_report(
 
     stock_journal = DatabaseHelper.get_stock_journal(target_date)
     stock_exits = DatabaseHelper.list_stock_exits_by_date(target_date)
+    stock_supplies = DatabaseHelper.list_stock_supplies_by_date(target_date)
     orders = DatabaseHelper.list_orders_by_date(target_date)
     orders_summary = DatabaseHelper.get_orders_summary_for_date(target_date)
     cash = DatabaseHelper.get_cash_for_date(target_date)
     commissions = DatabaseHelper.list_commissions_by_date(target_date)
+    production_summary = DatabaseHelper.get_production_summary_for_date(target_date)
 
     total_expected = float(orders_summary.get("MontantAttendu", 0) or 0)
     total_received = float(orders_summary.get("MontantRecu", 0) or 0)
@@ -485,8 +643,18 @@ def create_daily_pdf_report(
     if "stock" in allowed_sections:
         overview_rows.extend(
             [
+                ["Approvisionnements du jour", str(len(stock_supplies))],
                 ["Sorties de stock du jour", str(len(stock_exits))],
                 ["Journal de stock disponible", "Oui" if stock_journal else "Non"],
+            ]
+        )
+    if "production" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Bacs commandés", _format_number(float(production_summary.get("NombreBacsCommandes", 0) or 0))],
+                ["Total bacs produits", _format_number(float(production_summary.get("NombreBacsProduits", 0) or 0))],
+                ["Nombre de sacs utilisés", _format_number(float(production_summary.get("NombreSacsUtilises", 0) or 0))],
+                ["Écart production", _format_number(float(production_summary.get("EcartCommandes", 0) or 0))],
             ]
         )
     if "orders" in allowed_sections:
@@ -545,6 +713,24 @@ def create_daily_pdf_report(
             stock_intro.append(_paragraph("Aucun journal de stock disponible pour cette date.", styles["body"]))
         elements.append(KeepTogether(stock_intro))
 
+        if stock_supplies:
+            elements.append(Spacer(1, 4 * mm))
+            stock_supply_rows = [["Approvisionnements", "Farine", "Levure", "Sel", "Huile"]]
+            for index, row in enumerate(stock_supplies, start=1):
+                stock_supply_rows.append(
+                    [
+                        f"Entrée {index}",
+                        _format_number(float(row.get("SacsAjoutes", 0) or 0)),
+                        _format_number(float(row.get("PaquetsAjoutes", 0) or 0)),
+                        _format_number(float(row.get("KgSelAjoutes", 0) or 0)),
+                        _format_number(float(row.get("LitresHuileAjoutes", 0) or 0)),
+                    ]
+                )
+            elements.append(_make_table(stock_supply_rows, [36 * mm, 31 * mm, 31 * mm, 31 * mm, 31 * mm]))
+        else:
+            elements.append(Spacer(1, 2 * mm))
+            elements.append(_paragraph("Aucun approvisionnement enregistré pour cette date.", styles["note"]))
+
         if stock_exits:
             elements.append(Spacer(1, 4 * mm))
             stock_exit_rows = [["Sorties", "Farine", "Levure", "Sel", "Huile"]]
@@ -564,27 +750,23 @@ def create_daily_pdf_report(
             elements.append(_paragraph("Aucune sortie de stock enregistrée pour cette date.", styles["note"]))
         elements.append(Spacer(1, 6 * mm))
 
+    if "production" in allowed_sections:
+        production_section = [
+            _paragraph("Production", styles["section"]),
+            _make_table(_production_field_rows(production_summary), [72 * mm, 88 * mm]),
+        ]
+        elements.append(KeepTogether(production_section))
+        elements.append(Spacer(1, 6 * mm))
+
     if "orders" in allowed_sections:
-        order_section: list[Any] = [_paragraph("Commandes", styles["section"])]
-        if orders:
-            order_rows: list[list[Any]] = [["Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]]
-            for row in orders:
-                order_rows.append(
-                    [
-                        _safe_text(row.get("Client")),
-                        normalize_status_label(row.get("Statut")),
-                        str(int(row.get("NombreBacs", 0) or 0)),
-                        _format_fc(float(row.get("MontantAPercevoir", 0) or 0)),
-                        _format_fc(float(row.get("MontantRecu", 0) or 0)),
-                        _format_fc(float(row.get("Dette", 0) or 0)),
-                    ]
-                )
-            order_section.append(
-                _make_table(order_rows, [42 * mm, 34 * mm, 16 * mm, 30 * mm, 28 * mm, 24 * mm])
+        elements.append(_paragraph("Commandes", styles["section"]))
+        elements.extend(
+            _order_table_flowables(
+                orders,
+                styles,
+                empty_message="Aucune commande enregistrée pour cette date.",
             )
-        else:
-            order_section.append(_paragraph("Aucune commande enregistrée pour cette date.", styles["body"]))
-        elements.append(KeepTogether(order_section))
+        )
         elements.append(Spacer(1, 6 * mm))
 
     if "cash" in allowed_sections:
@@ -659,18 +841,19 @@ def create_daily_pdf_report(
     elements.append(_paragraph("NB", styles["section"]))
     if "cash" in allowed_sections:
         recap_text = (
-            f"Les entrées du jour correspondent au montant reçu ({_format_fc(total_received)}) "
-            f"additionné aux dettes payées aujourd'hui ({_format_fc(paid_debts_today)}), "
-            f"soit un total des entrées de {_format_fc(total_entries)}. "
-            f"Les sorties du jour correspondent aux dépenses enregistrées, soit {_format_fc(total_expenses)}. "
-            f"Le solde du jour ressort donc à {_format_fc(balance)}."
+            f"Les entrées du jour correspondent au montant reçu ({_bold_markup(_format_fc(total_received))}) "
+            f"additionné aux dettes payées aujourd'hui ({_bold_markup(_format_fc(paid_debts_today))}), "
+            f"soit un total des entrées de {_bold_markup(_format_fc(total_entries))}. "
+            f"Les sorties du jour correspondent aux dépenses enregistrées, soit {_bold_markup(_format_fc(total_expenses))}. "
+            f"Le solde du jour ressort donc à {_bold_markup(_format_fc(balance))}."
         )
+        elements.append(_rich_paragraph(recap_text, styles["body"]))
     else:
         recap_text = (
             f"Ce rapport a été généré par {generator_name} ({generator_role}) "
             f"et reprend uniquement les rubriques autorisées pour le profil {scope_label}."
         )
-    elements.append(_paragraph(recap_text, styles["body"]))
+        elements.append(_paragraph(recap_text, styles["body"]))
 
     try:
         doc.build(
@@ -711,6 +894,7 @@ def create_monthly_pdf_report(
     month_label = _format_month_label(target_date)
 
     stock_exits = _filter_rows_for_month(DatabaseHelper.list_stock_exits(), "DateSortie", target_date)
+    stock_supplies = _filter_rows_for_month(DatabaseHelper.list_stock_supplies(), "DateApprovisionnement", target_date)
     stock_journals: list[dict[str, Any]] = []
     for day_number in range(1, last_day.day + 1):
         current_day = target_date.replace(day=day_number)
@@ -720,6 +904,8 @@ def create_monthly_pdf_report(
     orders = _filter_rows_for_month(DatabaseHelper.list_orders(), "DateCommande", target_date)
     cash_days = _filter_rows_for_month(DatabaseHelper.list_cash_days(), "DateCaisse", target_date)
     commissions = _filter_rows_for_month(DatabaseHelper.list_commissions(), "DateCommission", target_date)
+    productions = _filter_rows_for_month(DatabaseHelper.list_productions(), "DateProduction", target_date)
+    production_summary = _summarize_production_rows(productions)
 
     total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in orders)
     total_expected = sum(float(row.get("MontantAPercevoir", 0) or 0) for row in orders)
@@ -736,6 +922,10 @@ def create_monthly_pdf_report(
     total_levure = sum(float(row.get("PaquetsUtilises", 0) or 0) for row in stock_exits)
     total_sel = sum(float(row.get("KgSelUtilises", 0) or 0) for row in stock_exits)
     total_huile = sum(float(row.get("LitresHuileUtilises", 0) or 0) for row in stock_exits)
+    total_farine_added = sum(float(row.get("SacsAjoutes", 0) or 0) for row in stock_supplies)
+    total_levure_added = sum(float(row.get("PaquetsAjoutes", 0) or 0) for row in stock_supplies)
+    total_sel_added = sum(float(row.get("KgSelAjoutes", 0) or 0) for row in stock_supplies)
+    total_huile_added = sum(float(row.get("LitresHuileAjoutes", 0) or 0) for row in stock_supplies)
 
     expense_items_by_day: list[tuple[str, str]] = []
     paid_debts_items_by_day: list[tuple[str, str, str]] = []
@@ -780,7 +970,18 @@ def create_monthly_pdf_report(
         overview_rows.extend(
             [
                 ["Jours avec journal de stock", str(len(stock_journals))],
+                ["Approvisionnements du mois", str(len(stock_supplies))],
                 ["Sorties de stock du mois", str(len(stock_exits))],
+            ]
+        )
+    if "production" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Jours de production saisis", str(len(productions))],
+                ["Bacs commandés", _format_number(production_summary["NombreBacsCommandes"])],
+                ["Total bacs produits", _format_number(production_summary["NombreBacsProduits"])],
+                ["Nombre de sacs utilisés", _format_number(production_summary["NombreSacsUtilises"])],
+                ["Écart production", _format_number(production_summary["EcartCommandes"])],
             ]
         )
     if "orders" in allowed_sections:
@@ -816,7 +1017,12 @@ def create_monthly_pdf_report(
         stock_intro_rows = [
             ["Indicateur", "Valeur"],
             ["Jours avec journal", str(len(stock_journals))],
+            ["Approvisionnements enregistrés", str(len(stock_supplies))],
             ["Sorties enregistrées", str(len(stock_exits))],
+            ["Farine ajoutée", _format_number(total_farine_added)],
+            ["Levure ajoutée", _format_number(total_levure_added)],
+            ["Sel ajouté", _format_number(total_sel_added)],
+            ["Huile ajoutée", _format_number(total_huile_added)],
             ["Farine utilisée", _format_number(total_farine)],
             ["Levure utilisée", _format_number(total_levure)],
             ["Sel utilisé", _format_number(total_sel)],
@@ -830,6 +1036,24 @@ def create_monthly_pdf_report(
                 ]
             )
         )
+        if stock_supplies:
+            elements.append(Spacer(1, 4 * mm))
+            supply_rows: list[list[Any]] = [["Date", "Farine", "Levure", "Sel", "Huile"]]
+            for row in stock_supplies:
+                row_date = _parse_row_date(row.get("DateApprovisionnement"))
+                supply_rows.append(
+                    [
+                        _format_date(row_date) if row_date is not None else _safe_text(row.get("DateApprovisionnement")),
+                        _format_number(float(row.get("SacsAjoutes", 0) or 0)),
+                        _format_number(float(row.get("PaquetsAjoutes", 0) or 0)),
+                        _format_number(float(row.get("KgSelAjoutes", 0) or 0)),
+                        _format_number(float(row.get("LitresHuileAjoutes", 0) or 0)),
+                    ]
+                )
+            elements.append(_make_table(supply_rows, [30 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm]))
+        else:
+            elements.append(Spacer(1, 2 * mm))
+            elements.append(_paragraph("Aucun approvisionnement n'a été enregistré pour ce mois.", styles["note"]))
         if stock_exits:
             elements.append(Spacer(1, 4 * mm))
             stock_rows: list[list[Any]] = [["Date", "Farine", "Levure", "Sel", "Huile"]]
@@ -850,29 +1074,30 @@ def create_monthly_pdf_report(
             elements.append(_paragraph("Aucune sortie de stock n'a été enregistrée pour ce mois.", styles["note"]))
         elements.append(Spacer(1, 6 * mm))
 
-    if "orders" in allowed_sections:
-        order_section: list[Any] = [_paragraph("Commandes du mois", styles["section"])]
-        if orders:
-            order_rows: list[list[Any]] = [["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]]
-            for row in orders:
-                row_date = _parse_row_date(row.get("DateCommande"))
-                order_rows.append(
-                    [
-                        _format_date(row_date) if row_date is not None else _safe_text(row.get("DateCommande")),
-                        _safe_text(row.get("Client")),
-                        normalize_status_label(row.get("Statut")),
-                        str(int(row.get("NombreBacs", 0) or 0)),
-                        _format_fc(float(row.get("MontantAPercevoir", 0) or 0)),
-                        _format_fc(float(row.get("MontantRecu", 0) or 0)),
-                        _format_fc(float(row.get("Dette", 0) or 0)),
-                    ]
-                )
-            order_section.append(
-                _make_table(order_rows, [22 * mm, 36 * mm, 26 * mm, 12 * mm, 28 * mm, 28 * mm, 24 * mm])
-            )
+    if "production" in allowed_sections:
+        production_intro = [
+            _paragraph("Production du mois", styles["section"]),
+            _make_table(_production_field_rows(production_summary), [72 * mm, 88 * mm]),
+        ]
+        elements.append(KeepTogether(production_intro))
+        if productions:
+            elements.append(Spacer(1, 4 * mm))
+            elements.append(_make_table(_production_rows_by_day(productions), [18 * mm, 16 * mm, 16 * mm, 18 * mm, 13 * mm, 12 * mm, 15 * mm, 12 * mm, 15 * mm, 12 * mm, 12 * mm]))
         else:
-            order_section.append(_paragraph("Aucune commande n'a été enregistrée pour ce mois.", styles["body"]))
-        elements.append(KeepTogether(order_section))
+            elements.append(Spacer(1, 2 * mm))
+            elements.append(_paragraph("Aucune production enregistrée pour ce mois.", styles["note"]))
+        elements.append(Spacer(1, 6 * mm))
+
+    if "orders" in allowed_sections:
+        elements.append(_paragraph("Commandes du mois", styles["section"]))
+        elements.extend(
+            _order_table_flowables(
+                orders,
+                styles,
+                include_date=True,
+                empty_message="Aucune commande n'a été enregistrée pour ce mois.",
+            )
+        )
         elements.append(Spacer(1, 6 * mm))
 
     if "cash" in allowed_sections:
@@ -959,17 +1184,18 @@ def create_monthly_pdf_report(
     if "cash" in allowed_sections:
         recap_text = (
             f"Pour le mois {month_label}, les entrées correspondent au montant reçu "
-            f"({_format_fc(total_received)}) additionné aux dettes payées ({_format_fc(paid_debts_month)}), "
-            f"soit un total des entrées de {_format_fc(total_entries)}. Les sorties correspondent aux dépenses "
-            f"enregistrées sur la période, soit {_format_fc(total_expenses)}. Le solde mensuel ressort donc à "
-            f"{_format_fc(balance)}."
+            f"({_bold_markup(_format_fc(total_received))}) additionné aux dettes payées ({_bold_markup(_format_fc(paid_debts_month))}), "
+            f"soit un total des entrées de {_bold_markup(_format_fc(total_entries))}. Les sorties correspondent aux dépenses "
+            f"enregistrées sur la période, soit {_bold_markup(_format_fc(total_expenses))}. Le solde mensuel ressort donc à "
+            f"{_bold_markup(_format_fc(balance))}."
         )
+        elements.append(_rich_paragraph(recap_text, styles["body"]))
     else:
         recap_text = (
             f"Ce rapport mensuel couvre la période du {_format_date(first_day)} au {_format_date(last_day)} "
             f"et reprend uniquement les rubriques autorisées pour le profil {scope_label}."
         )
-    elements.append(_paragraph(recap_text, styles["body"]))
+        elements.append(_paragraph(recap_text, styles["body"]))
 
     try:
         doc.build(
@@ -1011,6 +1237,12 @@ def create_period_pdf_report(
     period_label = f"Du {_format_date(start_date)} au {_format_date(end_date)}"
 
     stock_exits = _filter_rows_for_period(DatabaseHelper.list_stock_exits(), "DateSortie", start_date, end_date)
+    stock_supplies = _filter_rows_for_period(
+        DatabaseHelper.list_stock_supplies(),
+        "DateApprovisionnement",
+        start_date,
+        end_date,
+    )
     stock_journals: list[dict[str, Any]] = []
     for day_offset in range((end_date - start_date).days + 1):
         current_day = start_date.fromordinal(start_date.toordinal() + day_offset)
@@ -1020,6 +1252,8 @@ def create_period_pdf_report(
     orders = _filter_rows_for_period(DatabaseHelper.list_orders(), "DateCommande", start_date, end_date)
     cash_days = _filter_rows_for_period(DatabaseHelper.list_cash_days(), "DateCaisse", start_date, end_date)
     commissions = _filter_rows_for_period(DatabaseHelper.list_commissions(), "DateCommission", start_date, end_date)
+    productions = _filter_rows_for_period(DatabaseHelper.list_productions(), "DateProduction", start_date, end_date)
+    production_summary = _summarize_production_rows(productions)
 
     total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in orders)
     total_expected = sum(float(row.get("MontantAPercevoir", 0) or 0) for row in orders)
@@ -1036,6 +1270,10 @@ def create_period_pdf_report(
     total_levure = sum(float(row.get("PaquetsUtilises", 0) or 0) for row in stock_exits)
     total_sel = sum(float(row.get("KgSelUtilises", 0) or 0) for row in stock_exits)
     total_huile = sum(float(row.get("LitresHuileUtilises", 0) or 0) for row in stock_exits)
+    total_farine_added = sum(float(row.get("SacsAjoutes", 0) or 0) for row in stock_supplies)
+    total_levure_added = sum(float(row.get("PaquetsAjoutes", 0) or 0) for row in stock_supplies)
+    total_sel_added = sum(float(row.get("KgSelAjoutes", 0) or 0) for row in stock_supplies)
+    total_huile_added = sum(float(row.get("LitresHuileAjoutes", 0) or 0) for row in stock_supplies)
 
     expense_items_by_day: list[tuple[str, str]] = []
     paid_debts_items_by_day: list[tuple[str, str, str]] = []
@@ -1080,7 +1318,18 @@ def create_period_pdf_report(
         overview_rows.extend(
             [
                 ["Jours avec journal de stock", str(len(stock_journals))],
+                ["Approvisionnements sur la période", str(len(stock_supplies))],
                 ["Sorties de stock sur la période", str(len(stock_exits))],
+            ]
+        )
+    if "production" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Jours de production saisis", str(len(productions))],
+                ["Bacs commandés", _format_number(production_summary["NombreBacsCommandes"])],
+                ["Total bacs produits", _format_number(production_summary["NombreBacsProduits"])],
+                ["Nombre de sacs utilisés", _format_number(production_summary["NombreSacsUtilises"])],
+                ["Écart production", _format_number(production_summary["EcartCommandes"])],
             ]
         )
     if "orders" in allowed_sections:
@@ -1116,7 +1365,12 @@ def create_period_pdf_report(
         stock_intro_rows = [
             ["Indicateur", "Valeur"],
             ["Jours avec journal", str(len(stock_journals))],
+            ["Approvisionnements enregistrés", str(len(stock_supplies))],
             ["Sorties enregistrées", str(len(stock_exits))],
+            ["Farine ajoutée", _format_number(total_farine_added)],
+            ["Levure ajoutée", _format_number(total_levure_added)],
+            ["Sel ajouté", _format_number(total_sel_added)],
+            ["Huile ajoutée", _format_number(total_huile_added)],
             ["Farine utilisée", _format_number(total_farine)],
             ["Levure utilisée", _format_number(total_levure)],
             ["Sel utilisé", _format_number(total_sel)],
@@ -1130,6 +1384,24 @@ def create_period_pdf_report(
                 ]
             )
         )
+        if stock_supplies:
+            elements.append(Spacer(1, 4 * mm))
+            supply_rows: list[list[Any]] = [["Date", "Farine", "Levure", "Sel", "Huile"]]
+            for row in stock_supplies:
+                row_date = _parse_row_date(row.get("DateApprovisionnement"))
+                supply_rows.append(
+                    [
+                        _format_date(row_date) if row_date is not None else _safe_text(row.get("DateApprovisionnement")),
+                        _format_number(float(row.get("SacsAjoutes", 0) or 0)),
+                        _format_number(float(row.get("PaquetsAjoutes", 0) or 0)),
+                        _format_number(float(row.get("KgSelAjoutes", 0) or 0)),
+                        _format_number(float(row.get("LitresHuileAjoutes", 0) or 0)),
+                    ]
+                )
+            elements.append(_make_table(supply_rows, [30 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm]))
+        else:
+            elements.append(Spacer(1, 2 * mm))
+            elements.append(_paragraph("Aucun approvisionnement n'a été enregistré sur cette période.", styles["note"]))
         if stock_exits:
             elements.append(Spacer(1, 4 * mm))
             stock_rows: list[list[Any]] = [["Date", "Farine", "Levure", "Sel", "Huile"]]
@@ -1150,29 +1422,30 @@ def create_period_pdf_report(
             elements.append(_paragraph("Aucune sortie de stock n'a été enregistrée sur cette période.", styles["note"]))
         elements.append(Spacer(1, 6 * mm))
 
-    if "orders" in allowed_sections:
-        order_section: list[Any] = [_paragraph("Commandes sur la période", styles["section"])]
-        if orders:
-            order_rows: list[list[Any]] = [["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]]
-            for row in orders:
-                row_date = _parse_row_date(row.get("DateCommande"))
-                order_rows.append(
-                    [
-                        _format_date(row_date) if row_date is not None else _safe_text(row.get("DateCommande")),
-                        _safe_text(row.get("Client")),
-                        normalize_status_label(row.get("Statut")),
-                        str(int(row.get("NombreBacs", 0) or 0)),
-                        _format_fc(float(row.get("MontantAPercevoir", 0) or 0)),
-                        _format_fc(float(row.get("MontantRecu", 0) or 0)),
-                        _format_fc(float(row.get("Dette", 0) or 0)),
-                    ]
-                )
-            order_section.append(
-                _make_table(order_rows, [22 * mm, 36 * mm, 26 * mm, 12 * mm, 28 * mm, 28 * mm, 24 * mm])
-            )
+    if "production" in allowed_sections:
+        production_intro = [
+            _paragraph("Production sur la période", styles["section"]),
+            _make_table(_production_field_rows(production_summary), [72 * mm, 88 * mm]),
+        ]
+        elements.append(KeepTogether(production_intro))
+        if productions:
+            elements.append(Spacer(1, 4 * mm))
+            elements.append(_make_table(_production_rows_by_day(productions), [18 * mm, 16 * mm, 16 * mm, 18 * mm, 13 * mm, 12 * mm, 15 * mm, 12 * mm, 15 * mm, 12 * mm, 12 * mm]))
         else:
-            order_section.append(_paragraph("Aucune commande n'a été enregistrée sur cette période.", styles["body"]))
-        elements.append(KeepTogether(order_section))
+            elements.append(Spacer(1, 2 * mm))
+            elements.append(_paragraph("Aucune production enregistrée sur cette période.", styles["note"]))
+        elements.append(Spacer(1, 6 * mm))
+
+    if "orders" in allowed_sections:
+        elements.append(_paragraph("Commandes sur la période", styles["section"]))
+        elements.extend(
+            _order_table_flowables(
+                orders,
+                styles,
+                include_date=True,
+                empty_message="Aucune commande n'a été enregistrée sur cette période.",
+            )
+        )
         elements.append(Spacer(1, 6 * mm))
 
     if "cash" in allowed_sections:
@@ -1259,16 +1532,17 @@ def create_period_pdf_report(
     if "cash" in allowed_sections:
         recap_text = (
             f"Pour la période allant du {_format_date(start_date)} au {_format_date(end_date)}, les entrées correspondent au montant reçu "
-            f"({_format_fc(total_received)}) additionné aux dettes payées ({_format_fc(paid_debts_period)}), soit un total "
-            f"des entrées de {_format_fc(total_entries)}. Les sorties correspondent aux dépenses enregistrées sur cette période, "
-            f"soit {_format_fc(total_expenses)}. Le solde ressort donc à {_format_fc(balance)}."
+            f"({_bold_markup(_format_fc(total_received))}) additionné aux dettes payées ({_bold_markup(_format_fc(paid_debts_period))}), soit un total "
+            f"des entrées de {_bold_markup(_format_fc(total_entries))}. Les sorties correspondent aux dépenses enregistrées sur cette période, "
+            f"soit {_bold_markup(_format_fc(total_expenses))}. Le solde ressort donc à {_bold_markup(_format_fc(balance))}."
         )
+        elements.append(_rich_paragraph(recap_text, styles["body"]))
     else:
         recap_text = (
             f"Ce rapport couvre la période du {_format_date(start_date)} au {_format_date(end_date)} "
             f"et reprend uniquement les rubriques autorisées pour le profil {scope_label}."
         )
-    elements.append(_paragraph(recap_text, styles["body"]))
+        elements.append(_paragraph(recap_text, styles["body"]))
 
     try:
         doc.build(

@@ -1,9 +1,24 @@
-#define MyAppName "Boulangerie Lomoto"
-#define MyAppVersion "1.2.27"
-#define MyAppPublisher "Kay Box Store"
-#define MyAppExeName "Boulangerie Lomoto.exe"
-#define MyAppIdEscaped "{{D8D3424B-4C91-4C10-A7F5-84AB2F483F11}"
-#define MyAppIdValue "{D8D3424B-4C91-4C10-A7F5-84AB2F483F11}"
+#ifndef MyAppName
+  #define MyAppName "Boulangerie Lomoto"
+#endif
+#ifndef MyAppVersion
+  #define MyAppVersion "1.3.6"
+#endif
+#ifndef MyAppPublisher
+  #define MyAppPublisher "Kay Box Store"
+#endif
+#ifndef MyAppExeName
+  #define MyAppExeName "Boulangerie Lomoto.exe"
+#endif
+#ifndef MyAppIdEscaped
+  #define MyAppIdEscaped "{{D8D3424B-4C91-4C10-A7F5-84AB2F483F11}"
+#endif
+#ifndef MyAppIdValue
+  #define MyAppIdValue "{D8D3424B-4C91-4C10-A7F5-84AB2F483F11}"
+#endif
+#ifndef MyOutputBaseFilename
+  #define MyOutputBaseFilename "BoulangerieLomotoSetup"
+#endif
 
 [Setup]
 AppId={#MyAppIdEscaped}
@@ -15,7 +30,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputDir=output\{#MyAppVersion}
-OutputBaseFilename=BoulangerieLomotoSetup
+OutputBaseFilename={#MyOutputBaseFilename}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern

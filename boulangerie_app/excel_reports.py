@@ -137,6 +137,46 @@ def _safe_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _summarize_production_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
+    keys = [
+        "NombreBacsCommandes",
+        "NombreBacsLivresDepositaires",
+        "NombreBacsLivresMamans",
+        "NombreBacsDonnes",
+        "NombreEchantillons",
+        "NombreBacsRestants",
+        "NombreBacsFoutus",
+        "NombreBacsProduits",
+        "NombreSacsUtilises",
+    ]
+    summary = {key: 0.0 for key in keys}
+    for row in rows:
+        for key in keys:
+            summary[key] += float(row.get(key, 0) or 0)
+    ordered = summary["NombreBacsCommandes"]
+    produced = summary["NombreBacsProduits"]
+    summary["EcartCommandes"] = produced - ordered
+    summary["TauxCouverture"] = round((produced * 100.0 / ordered), 2) if ordered > 0 else 0.0
+    return summary
+
+
+def _production_field_rows(summary: dict[str, Any]) -> list[tuple[str, Any]]:
+    return [
+        ("Bacs commandés", float(summary.get("NombreBacsCommandes", 0) or 0)),
+        ("Bacs livrés dépositaires", float(summary.get("NombreBacsLivresDepositaires", 0) or 0)),
+        ("Bacs livrés mamans", float(summary.get("NombreBacsLivresMamans", 0) or 0)),
+        ("Bacs donnés", float(summary.get("NombreBacsDonnes", 0) or 0)),
+        ("Échantillons (Agent commercial)", float(summary.get("NombreEchantillons", 0) or 0)),
+        ("Bacs restants / disponibles", float(summary.get("NombreBacsRestants", 0) or 0)),
+        ("Bacs foutus", float(summary.get("NombreBacsFoutus", 0) or 0)),
+        ("Total bacs produits", float(summary.get("NombreBacsProduits", 0) or 0)),
+        ("Écart avec commandes", float(summary.get("EcartCommandes", 0) or 0)),
+        ("Taux de couverture", f"{_format_number(float(summary.get('TauxCouverture', 0) or 0))} %"),
+        ("Nombre de sacs utilisés", float(summary.get("NombreSacsUtilises", 0) or 0)),
+        ("Observations", _safe_text(summary.get("Observations")).strip() or "-"),
+    ]
+
+
 def _apply_cell_style(
     cell: Any,
     *,
@@ -192,6 +232,8 @@ def _add_brand_image(sheet: Worksheet, image_path: Path, anchor: str, width: int
 
 def _add_sheet_watermark(sheet: Worksheet, anchor: str, width: int, height: int) -> None:
     watermark_path = get_logo_watermark_path()
+    if not watermark_path.exists():
+        watermark_path = get_logo_path()
     if not watermark_path.exists():
         return
     image = XLImage(str(watermark_path))
@@ -308,11 +350,13 @@ def _build_report_context(
 
     stock_journal = DatabaseHelper.get_stock_journal(target_date)
     stock_exits = DatabaseHelper.list_stock_exits_by_date(target_date)
+    stock_supplies = DatabaseHelper.list_stock_supplies_by_date(target_date)
     orders = DatabaseHelper.list_orders_by_date(target_date)
     orders_summary = DatabaseHelper.get_orders_summary_for_date(target_date)
     cash = DatabaseHelper.get_cash_for_date(target_date)
     accumulated_debts = DatabaseHelper.get_accumulated_debt_totals_for_date(target_date)
     commissions = DatabaseHelper.list_commissions_by_date(target_date)
+    production_summary = DatabaseHelper.get_production_summary_for_date(target_date)
     expense_details = _safe_text(cash.get("DepensesEffectuees")).strip()
     paid_debts_details = _safe_text(cash.get("DettesPayeesDetails")).strip()
     accumulated_debts_before = float(accumulated_debts.get("DettesAccumuleesAvantPaiement", 0) or 0)
@@ -330,10 +374,12 @@ def _build_report_context(
         "generated_role": (generated_role or normalized_role).strip() or normalized_role,
         "stock_journal": stock_journal,
         "stock_exits": stock_exits,
+        "stock_supplies": stock_supplies,
         "orders": orders,
         "orders_summary": orders_summary,
         "cash": cash,
         "commissions": commissions,
+        "production_summary": production_summary,
         "expense_items": split_structured_lines(expense_details),
         "paid_debts_details": paid_debts_details,
         "paid_debts_items": parse_named_amount_lines(paid_debts_details),
@@ -387,7 +433,18 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         rows.extend(
             [
                 ("Sorties de stock du jour", len(context["stock_exits"]), "nombre"),
+                ("Approvisionnements du jour", len(context["stock_supplies"]), "nombre"),
                 ("Journal de stock disponible", 1 if context["stock_journal"] else 0, "nombre"),
+            ]
+        )
+    if "production" in context["allowed_sections"]:
+        production = context["production_summary"]
+        rows.extend(
+            [
+                ("Bacs commandés", float(production.get("NombreBacsCommandes", 0) or 0), "nombre"),
+                ("Total bacs produits", float(production.get("NombreBacsProduits", 0) or 0), "nombre"),
+                ("Nombre de sacs utilisés", float(production.get("NombreSacsUtilises", 0) or 0), "nombre"),
+                ("Écart production", float(production.get("EcartCommandes", 0) or 0), "nombre"),
             ]
         )
     if "orders" in context["allowed_sections"]:
@@ -491,6 +548,38 @@ def _build_stock_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         _apply_cell_style(sheet["A4"], alignment=Alignment(horizontal="left"), font=NOTE_FONT)
 
     row_index += 3
+    sheet.cell(row_index, 1, "Approvisionnements")
+    _apply_cell_style(sheet.cell(row_index, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
+    row_index += 1
+    supply_headers = ["N°", "Farine", "Levure", "Sel", "Huile"]
+    for col_index, header in enumerate(supply_headers, start=1):
+        cell = sheet.cell(row_index, col_index, header)
+        _apply_cell_style(cell, fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+    supplies_start = row_index
+
+    stock_supplies = context["stock_supplies"]
+    if stock_supplies:
+        for index, item in enumerate(stock_supplies, start=1):
+            row_index += 1
+            row_values = [
+                index,
+                item.get("SacsAjoutes", 0),
+                item.get("PaquetsAjoutes", 0),
+                item.get("KgSelAjoutes", 0),
+                item.get("LitresHuileAjoutes", 0),
+            ]
+            for col_index, value in enumerate(row_values, start=1):
+                cell = sheet.cell(row_index, col_index, value)
+                _apply_cell_style(cell, alignment=Alignment(horizontal="left"))
+            for col in range(2, 6):
+                sheet.cell(row_index, col).number_format = "0.00"
+        _add_table(sheet, supplies_start, row_index, 5, "ApprovisionnementsStock")
+    else:
+        row_index += 1
+        sheet.cell(row_index, 1, "Aucun approvisionnement enregistré pour cette date.")
+        _apply_cell_style(sheet.cell(row_index, 1), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
+
+    row_index += 3
     sheet.cell(row_index, 1, "Sorties de stock")
     _apply_cell_style(sheet.cell(row_index, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
     row_index += 1
@@ -522,6 +611,29 @@ def _build_stock_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         sheet.cell(row_index, 1, "Aucune sortie de stock enregistrée pour cette date.")
         _apply_cell_style(sheet.cell(row_index, 1), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
 
+    _autofit_columns(sheet)
+
+
+def _build_production_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
+    sheet = workbook.create_sheet("Production")
+    sheet.freeze_panes = "A4"
+    _add_sheet_watermark(sheet, "G5", 220, 220)
+
+    sheet["A1"] = "Production du jour"
+    _apply_cell_style(sheet["A1"], fill=TITLE_FILL, alignment=Alignment(horizontal="left"), font=TITLE_FONT)
+    sheet["A2"] = f"Date : {_format_date(context['target_date'])}"
+    _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
+
+    headers = ["Champ", "Valeur"]
+    for col_index, header in enumerate(headers, start=1):
+        _apply_cell_style(sheet.cell(4, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+
+    current_row = 4
+    for label, value in _production_field_rows(context["production_summary"]):
+        current_row += 1
+        _apply_cell_style(sheet.cell(current_row, 1, label), alignment=Alignment(horizontal="left"))
+        _apply_cell_style(sheet.cell(current_row, 2, value), alignment=Alignment(horizontal="left", wrap_text=True))
+    _add_table(sheet, 4, current_row, 2, "ProductionJournaliere")
     _autofit_columns(sheet)
 
 
@@ -769,6 +881,7 @@ def _build_monthly_report_context(
     month_label = _format_month_label(target_date)
 
     stock_exits = _filter_rows_for_month(DatabaseHelper.list_stock_exits(), "DateSortie", target_date)
+    stock_supplies = _filter_rows_for_month(DatabaseHelper.list_stock_supplies(), "DateApprovisionnement", target_date)
     stock_journals: list[dict[str, Any]] = []
     for day_number in range(1, last_day.day + 1):
         current_day = target_date.replace(day=day_number)
@@ -779,6 +892,8 @@ def _build_monthly_report_context(
     orders = _filter_rows_for_month(DatabaseHelper.list_orders(), "DateCommande", target_date)
     cash_days = DatabaseHelper.list_cash_balance_by_period(first_day, last_day)
     commissions = _filter_rows_for_month(DatabaseHelper.list_commissions(), "DateCommission", target_date)
+    productions = _filter_rows_for_month(DatabaseHelper.list_productions(), "DateProduction", target_date)
+    production_summary = _summarize_production_rows(productions)
 
     expense_items_by_day: list[tuple[str, str]] = []
     paid_debts_items_by_day: list[tuple[str, str, str]] = []
@@ -817,9 +932,12 @@ def _build_monthly_report_context(
         "generated_role": (generated_role or normalized_role).strip() or normalized_role,
         "stock_journals": stock_journals,
         "stock_exits": stock_exits,
+        "stock_supplies": stock_supplies,
         "orders": orders,
         "cash_days": cash_days,
         "commissions": commissions,
+        "productions": productions,
+        "production_summary": production_summary,
         "expense_items_by_day": expense_items_by_day,
         "paid_debts_items_by_day": paid_debts_items_by_day,
         "total_expected": total_expected,
@@ -837,6 +955,10 @@ def _build_monthly_report_context(
         "total_levure": sum(float(row.get("PaquetsUtilises", 0) or 0) for row in stock_exits),
         "total_sel": sum(float(row.get("KgSelUtilises", 0) or 0) for row in stock_exits),
         "total_huile": sum(float(row.get("LitresHuileUtilises", 0) or 0) for row in stock_exits),
+        "total_farine_added": sum(float(row.get("SacsAjoutes", 0) or 0) for row in stock_supplies),
+        "total_levure_added": sum(float(row.get("PaquetsAjoutes", 0) or 0) for row in stock_supplies),
+        "total_sel_added": sum(float(row.get("KgSelAjoutes", 0) or 0) for row in stock_supplies),
+        "total_huile_added": sum(float(row.get("LitresHuileAjoutes", 0) or 0) for row in stock_supplies),
     }
 
 
@@ -856,6 +978,12 @@ def _build_period_report_context(
     scope_description = get_report_scope_description(normalized_role)
 
     stock_exits = _filter_rows_for_period(DatabaseHelper.list_stock_exits(), "DateSortie", start_date, end_date)
+    stock_supplies = _filter_rows_for_period(
+        DatabaseHelper.list_stock_supplies(),
+        "DateApprovisionnement",
+        start_date,
+        end_date,
+    )
     stock_journals: list[dict[str, Any]] = []
     for day_offset in range((end_date - start_date).days + 1):
         current_day = date.fromordinal(start_date.toordinal() + day_offset)
@@ -866,6 +994,8 @@ def _build_period_report_context(
     orders = _filter_rows_for_period(DatabaseHelper.list_orders(), "DateCommande", start_date, end_date)
     cash_days = DatabaseHelper.list_cash_balance_by_period(start_date, end_date)
     commissions = _filter_rows_for_period(DatabaseHelper.list_commissions(), "DateCommission", start_date, end_date)
+    productions = _filter_rows_for_period(DatabaseHelper.list_productions(), "DateProduction", start_date, end_date)
+    production_summary = _summarize_production_rows(productions)
 
     expense_items_by_day: list[tuple[str, str]] = []
     paid_debts_items_by_day: list[tuple[str, str, str]] = []
@@ -902,9 +1032,12 @@ def _build_period_report_context(
         "generated_role": (generated_role or normalized_role).strip() or normalized_role,
         "stock_journals": stock_journals,
         "stock_exits": stock_exits,
+        "stock_supplies": stock_supplies,
         "orders": orders,
         "cash_days": cash_days,
         "commissions": commissions,
+        "productions": productions,
+        "production_summary": production_summary,
         "expense_items_by_day": expense_items_by_day,
         "paid_debts_items_by_day": paid_debts_items_by_day,
         "total_expected": total_expected,
@@ -922,6 +1055,10 @@ def _build_period_report_context(
         "total_levure": sum(float(row.get("PaquetsUtilises", 0) or 0) for row in stock_exits),
         "total_sel": sum(float(row.get("KgSelUtilises", 0) or 0) for row in stock_exits),
         "total_huile": sum(float(row.get("LitresHuileUtilises", 0) or 0) for row in stock_exits),
+        "total_farine_added": sum(float(row.get("SacsAjoutes", 0) or 0) for row in stock_supplies),
+        "total_levure_added": sum(float(row.get("PaquetsAjoutes", 0) or 0) for row in stock_supplies),
+        "total_sel_added": sum(float(row.get("KgSelAjoutes", 0) or 0) for row in stock_supplies),
+        "total_huile_added": sum(float(row.get("LitresHuileAjoutes", 0) or 0) for row in stock_supplies),
     }
 
 
@@ -950,7 +1087,19 @@ def _build_monthly_summary_sheet(workbook: Workbook, context: dict[str, Any]) ->
         rows.extend(
             [
                 ("Jours avec journal de stock", len(context["stock_journals"]), "nombre"),
+                ("Approvisionnements du mois", len(context["stock_supplies"]), "nombre"),
                 ("Sorties de stock du mois", len(context["stock_exits"]), "nombre"),
+            ]
+        )
+    if "production" in context["allowed_sections"]:
+        production = context["production_summary"]
+        rows.extend(
+            [
+                ("Jours de production saisis", len(context["productions"]), "nombre"),
+                ("Bacs commandés", production["NombreBacsCommandes"], "nombre"),
+                ("Total bacs produits", production["NombreBacsProduits"], "nombre"),
+                ("Nombre de sacs utilisés", production["NombreSacsUtilises"], "nombre"),
+                ("Écart production", production["EcartCommandes"], "nombre"),
             ]
         )
     if "orders" in context["allowed_sections"]:
@@ -1014,7 +1163,12 @@ def _build_monthly_stock_sheet(workbook: Workbook, context: dict[str, Any]) -> N
         _apply_cell_style(sheet.cell(4, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
     summary_rows = [
         ("Jours avec journal", len(context["stock_journals"])),
+        ("Approvisionnements enregistrés", len(context["stock_supplies"])),
         ("Sorties enregistrées", len(context["stock_exits"])),
+        ("Farine ajoutée", context["total_farine_added"]),
+        ("Levure ajoutée", context["total_levure_added"]),
+        ("Sel ajouté", context["total_sel_added"]),
+        ("Huile ajoutée", context["total_huile_added"]),
         ("Farine utilisée", context["total_farine"]),
         ("Levure utilisée", context["total_levure"]),
         ("Sel utilisé", context["total_sel"]),
@@ -1026,6 +1180,32 @@ def _build_monthly_stock_sheet(workbook: Workbook, context: dict[str, Any]) -> N
         _apply_cell_style(sheet.cell(current_row, 1, label), alignment=Alignment(horizontal="left"))
         _apply_cell_style(sheet.cell(current_row, 2, value), alignment=Alignment(horizontal="left"))
     _add_table(sheet, 4, current_row, 2, "StockMensuel")
+
+    current_row += 3
+    sheet.cell(current_row, 1, "Approvisionnements")
+    _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
+    current_row += 1
+    headers = ["Date", "Farine", "Levure", "Sel", "Huile"]
+    for col_index, header in enumerate(headers, start=1):
+        _apply_cell_style(sheet.cell(current_row, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+    start_table = current_row
+    if context["stock_supplies"]:
+        for row in context["stock_supplies"]:
+            current_row += 1
+            row_date = _parse_row_date(row.get("DateApprovisionnement"))
+            values = [
+                _format_date(row_date) if row_date is not None else _safe_text(row.get("DateApprovisionnement")),
+                float(row.get("SacsAjoutes", 0) or 0),
+                float(row.get("PaquetsAjoutes", 0) or 0),
+                float(row.get("KgSelAjoutes", 0) or 0),
+                float(row.get("LitresHuileAjoutes", 0) or 0),
+            ]
+            for col_index, value in enumerate(values, start=1):
+                _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
+        _add_table(sheet, start_table, current_row, 5, "ApprovisionnementsStockMensuel")
+    else:
+        current_row += 1
+        _apply_cell_style(sheet.cell(current_row, 1, "Aucun approvisionnement enregistré pour ce mois."), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
 
     current_row += 3
     sheet.cell(current_row, 1, "Sorties de stock")
@@ -1052,6 +1232,73 @@ def _build_monthly_stock_sheet(workbook: Workbook, context: dict[str, Any]) -> N
     else:
         current_row += 1
         _apply_cell_style(sheet.cell(current_row, 1, "Aucune sortie de stock enregistrée pour ce mois."), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
+
+    _autofit_columns(sheet)
+
+
+def _build_production_period_sheet(workbook: Workbook, context: dict[str, Any], title: str, table_name: str) -> None:
+    sheet = workbook.create_sheet("Production")
+    sheet.freeze_panes = "A4"
+    _add_sheet_watermark(sheet, "G5", 220, 220)
+
+    sheet["A1"] = title
+    _apply_cell_style(sheet["A1"], fill=TITLE_FILL, alignment=Alignment(horizontal="left"), font=TITLE_FONT)
+    sheet["A2"] = f"Période : {context['period_label']}"
+    _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
+
+    summary_headers = ["Champ", "Valeur"]
+    for col_index, header in enumerate(summary_headers, start=1):
+        _apply_cell_style(sheet.cell(4, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+    current_row = 4
+    for label, value in _production_field_rows(context["production_summary"]):
+        current_row += 1
+        _apply_cell_style(sheet.cell(current_row, 1, label), alignment=Alignment(horizontal="left"))
+        _apply_cell_style(sheet.cell(current_row, 2, value), alignment=Alignment(horizontal="left", wrap_text=True))
+    _add_table(sheet, 4, current_row, 2, f"{table_name}Synthese")
+
+    current_row += 3
+    sheet.cell(current_row, 1, "Détail par jour")
+    _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
+    current_row += 1
+    headers = [
+        "Date",
+        "Commandés",
+        "Livrés dép.",
+        "Livrés mamans",
+        "Donnés",
+        "Éch.",
+        "Restants",
+        "Foutus",
+        "Produits",
+        "Sacs",
+        "Écart",
+    ]
+    for col_index, header in enumerate(headers, start=1):
+        _apply_cell_style(sheet.cell(current_row, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+    start_table = current_row
+    if context["productions"]:
+        for row in context["productions"]:
+            current_row += 1
+            row_date = _parse_row_date(row.get("DateProduction"))
+            values = [
+                _format_date(row_date) if row_date is not None else _safe_text(row.get("DateProduction")),
+                float(row.get("NombreBacsCommandes", 0) or 0),
+                float(row.get("NombreBacsLivresDepositaires", 0) or 0),
+                float(row.get("NombreBacsLivresMamans", 0) or 0),
+                float(row.get("NombreBacsDonnes", 0) or 0),
+                float(row.get("NombreEchantillons", 0) or 0),
+                float(row.get("NombreBacsRestants", 0) or 0),
+                float(row.get("NombreBacsFoutus", 0) or 0),
+                float(row.get("NombreBacsProduits", 0) or 0),
+                float(row.get("NombreSacsUtilises", 0) or 0),
+                float(row.get("EcartCommandes", 0) or 0),
+            ]
+            for col_index, value in enumerate(values, start=1):
+                _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
+        _add_table(sheet, start_table, current_row, 11, table_name)
+    else:
+        current_row += 1
+        _apply_cell_style(sheet.cell(current_row, 1, "Aucune production enregistrée pour cette période."), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
 
     _autofit_columns(sheet)
 
@@ -1301,7 +1548,19 @@ def _build_period_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> 
         rows.extend(
             [
                 ("Jours avec journal de stock", len(context["stock_journals"]), "nombre"),
+                ("Approvisionnements sur la période", len(context["stock_supplies"]), "nombre"),
                 ("Sorties de stock sur la période", len(context["stock_exits"]), "nombre"),
+            ]
+        )
+    if "production" in context["allowed_sections"]:
+        production = context["production_summary"]
+        rows.extend(
+            [
+                ("Jours de production saisis", len(context["productions"]), "nombre"),
+                ("Bacs commandés", production["NombreBacsCommandes"], "nombre"),
+                ("Total bacs produits", production["NombreBacsProduits"], "nombre"),
+                ("Nombre de sacs utilisés", production["NombreSacsUtilises"], "nombre"),
+                ("Écart production", production["EcartCommandes"], "nombre"),
             ]
         )
     if "orders" in context["allowed_sections"]:
@@ -1365,7 +1624,12 @@ def _build_period_stock_sheet(workbook: Workbook, context: dict[str, Any]) -> No
         _apply_cell_style(sheet.cell(4, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
     summary_rows = [
         ("Jours avec journal", len(context["stock_journals"])),
+        ("Approvisionnements enregistrés", len(context["stock_supplies"])),
         ("Sorties enregistrées", len(context["stock_exits"])),
+        ("Farine ajoutée", context["total_farine_added"]),
+        ("Levure ajoutée", context["total_levure_added"]),
+        ("Sel ajouté", context["total_sel_added"]),
+        ("Huile ajoutée", context["total_huile_added"]),
         ("Farine utilisée", context["total_farine"]),
         ("Levure utilisée", context["total_levure"]),
         ("Sel utilisé", context["total_sel"]),
@@ -1377,6 +1641,32 @@ def _build_period_stock_sheet(workbook: Workbook, context: dict[str, Any]) -> No
         _apply_cell_style(sheet.cell(current_row, 1, label), alignment=Alignment(horizontal="left"))
         _apply_cell_style(sheet.cell(current_row, 2, value), alignment=Alignment(horizontal="left"))
     _add_table(sheet, 4, current_row, 2, "StockPeriode")
+
+    current_row += 3
+    sheet.cell(current_row, 1, "Approvisionnements")
+    _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
+    current_row += 1
+    headers = ["Date", "Farine", "Levure", "Sel", "Huile"]
+    for col_index, header in enumerate(headers, start=1):
+        _apply_cell_style(sheet.cell(current_row, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+    start_table = current_row
+    if context["stock_supplies"]:
+        for row in context["stock_supplies"]:
+            current_row += 1
+            row_date = _parse_row_date(row.get("DateApprovisionnement"))
+            values = [
+                _format_date(row_date) if row_date is not None else _safe_text(row.get("DateApprovisionnement")),
+                float(row.get("SacsAjoutes", 0) or 0),
+                float(row.get("PaquetsAjoutes", 0) or 0),
+                float(row.get("KgSelAjoutes", 0) or 0),
+                float(row.get("LitresHuileAjoutes", 0) or 0),
+            ]
+            for col_index, value in enumerate(values, start=1):
+                _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
+        _add_table(sheet, start_table, current_row, 5, "ApprovisionnementsStockPeriode")
+    else:
+        current_row += 1
+        _apply_cell_style(sheet.cell(current_row, 1, "Aucun approvisionnement enregistré pour cette période."), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
 
     current_row += 3
     sheet.cell(current_row, 1, "Sorties de stock")
@@ -1648,6 +1938,8 @@ def create_daily_excel_report(
         _build_summary_sheet(workbook, context)
         if "stock" in context["allowed_sections"]:
             _build_stock_sheet(workbook, context)
+        if "production" in context["allowed_sections"]:
+            _build_production_sheet(workbook, context)
         if "orders" in context["allowed_sections"]:
             _build_orders_sheet(workbook, context)
         if "cash" in context["allowed_sections"]:
@@ -1689,6 +1981,8 @@ def create_monthly_excel_report(
         _build_monthly_summary_sheet(workbook, context)
         if "stock" in context["allowed_sections"]:
             _build_monthly_stock_sheet(workbook, context)
+        if "production" in context["allowed_sections"]:
+            _build_production_period_sheet(workbook, context, "Production du mois", "ProductionMensuelle")
         if "orders" in context["allowed_sections"]:
             _build_monthly_orders_sheet(workbook, context)
         if "cash" in context["allowed_sections"]:
@@ -1733,6 +2027,8 @@ def create_period_excel_report(
         _build_period_summary_sheet(workbook, context)
         if "stock" in context["allowed_sections"]:
             _build_period_stock_sheet(workbook, context)
+        if "production" in context["allowed_sections"]:
+            _build_production_period_sheet(workbook, context, "Production sur la période", "ProductionPeriode")
         if "orders" in context["allowed_sections"]:
             _build_period_orders_sheet(workbook, context)
         if "cash" in context["allowed_sections"]:

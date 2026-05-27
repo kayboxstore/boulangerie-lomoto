@@ -120,6 +120,22 @@ Si les autres postes n'arrivent pas a se connectér :
 - vérifiez que le pare-feu Windows autorise le port `8765`
 - testez l'adresse du serveur depuis un autre poste
 
+## Si le serveur central est introuvable
+
+À partir de la version `1.3.6`, un poste configuré en mode connecté ne bascule plus silencieusement en mode local.
+
+Si le serveur central est introuvable, l'application affiche un message clair et bloque la connexion locale automatique. Cela évite de créer des données séparées sur un poste client.
+
+À vérifier dans ce cas :
+
+- le poste serveur principal est allumé ;
+- le service Windows du serveur central est démarré ;
+- le poste client et le poste serveur utilisent le même réseau local ;
+- le pare-feu Windows autorise le port `8765` en TCP ;
+- le bouton `Détecter le serveur` retrouve bien le serveur central.
+
+Si le poste client utilise une autre connexion Internet, une autre box, la 4G ou un autre site, l'adresse locale du serveur ne sera pas accessible directement. Dans ce cas, il faudra une configuration distante complémentaire comme Tailscale, ZeroTier, VPN ou hébergement en ligne.
+
 ## Résumé pratique
 
 - poste principal : installé et démarre le service Windows

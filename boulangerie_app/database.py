@@ -4,11 +4,13 @@ import base64
 import functools
 import hashlib
 import hmac
+import math
 import os
 import secrets
 import shutil
 import sqlite3
 import threading
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -22,13 +24,24 @@ from .connected_mode import (
     load_connection_settings,
     save_connection_settings,
 )
-from .status_labels import DEPOSITARY_STATUS, LEGACY_DEPOSITARY_6000_STATUS
+from .status_labels import (
+    DEPOSITARY_STATUS,
+    LEGACY_DEPOSITARY_6000_STATUS,
+    ORDER_STATUS_RATES,
+    normalize_status_form_label,
+)
+from .version import APP_VERSION
 
 
 DB_DATE_FORMAT = "%Y-%m-%d"
 PASSWORD_PREFIX = "PBKDF2$"
 PASSWORD_ITERATIONS = 100_000
-DEFAULT_ADMIN_PASSWORD = "010203"
+LOGIN_FAILURE_LIMIT = 5
+LOGIN_LOCK_DURATIONS_MINUTES = (2, 5, 30)
+DEFAULT_ADMIN_FULL_NAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_FULL_NAME", "Augustin Kayembe")
+DEFAULT_ADMIN_USERNAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_USERNAME", "a.kayembe")
+DEFAULT_ADMIN_PASSWORD = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_PASSWORD", "010203")
+FORCED_DATABASE_RESET_VERSION = "1.3.0"
 OUTSTANDING_DEBT_SQL = (
     "CASE WHEN IFNULL(Dette, 0) - IFNULL(DettePayee, 0) > 0 "
     "THEN IFNULL(Dette, 0) - IFNULL(DettePayee, 0) ELSE 0 END"
@@ -217,11 +230,16 @@ class DatabaseHelper:
             shutil.copy2(cls.legacy_db_path, cls.db_path)
         with cls.connect() as connection:
             cls._create_tables(connection)
+            cls._migrate_user_recoverable_password_column(connection)
+            cls._migrate_user_login_security_columns(connection)
             cls._migrate_stock_configuration_table(connection)
             cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
             cls._migrate_order_debt_payment_columns(connection)
             cls._migrate_commissions_table(connection)
+            cls._migrate_previsions_commandes_table(connection)
+            cls._migrate_production_table(connection)
+            cls._maybe_reset_database_for_forced_version(connection)
             cls._normalize_status_values(connection)
             cls._recalculate_debt_payments(connection)
             cls._sync_all_commissions(connection)
@@ -385,11 +403,17 @@ class DatabaseHelper:
 
         with cls.connect() as connection:
             cls._create_tables(connection)
+            cls._migrate_user_recoverable_password_column(connection)
             cls._migrate_stock_configuration_table(connection)
             cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
+            cls._migrate_order_debt_payment_columns(connection)
             cls._migrate_commissions_table(connection)
+            cls._migrate_previsions_commandes_table(connection)
+            cls._migrate_production_table(connection)
             cls._normalize_status_values(connection)
+            cls._recalculate_debt_payments(connection)
+            cls._sync_all_commissions(connection)
             cls._insert_default_admin(connection)
             cls._insert_default_stock_config(connection)
 
@@ -404,7 +428,11 @@ class DatabaseHelper:
                 NomComplet TEXT NOT NULL,
                 Identifiant TEXT NOT NULL UNIQUE,
                 MotDePasse TEXT NOT NULL,
-                Role TEXT NOT NULL
+                MotDePasseLisible TEXT NOT NULL DEFAULT '',
+                Role TEXT NOT NULL,
+                EchecsConnexion INTEGER NOT NULL DEFAULT 0,
+                NiveauBlocage INTEGER NOT NULL DEFAULT 0,
+                VerrouilleJusqua TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS ConfigurationStock (
@@ -428,6 +456,16 @@ class DatabaseHelper:
                 LitresHuileUtilises REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS StockApprovisionnements (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateApprovisionnement TEXT NOT NULL,
+                SacsAjoutes REAL NOT NULL,
+                PaquetsAjoutes REAL NOT NULL,
+                KgSelAjoutes REAL NOT NULL,
+                LitresHuileAjoutes REAL NOT NULL,
+                Observations TEXT NOT NULL DEFAULT ''
+            );
+
             CREATE TABLE IF NOT EXISTS StockJournalier (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 DateJour TEXT NOT NULL UNIQUE,
@@ -439,6 +477,49 @@ class DatabaseHelper:
                 LevureCloture REAL NOT NULL,
                 SelCloture REAL NOT NULL,
                 HuileCloture REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS PrevisionsProduction (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DatePrevision TEXT NOT NULL UNIQUE,
+                NombreBacsPrevus INTEGER NOT NULL DEFAULT 0,
+                FarinePrevue REAL NOT NULL DEFAULT 0,
+                LevurePrevue REAL NOT NULL DEFAULT 0,
+                SelPrevu REAL NOT NULL DEFAULT 0,
+                HuilePrevue REAL NOT NULL DEFAULT 0,
+                Observations TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS PrevisionsCommandes (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DatePrevision TEXT NOT NULL,
+                Localisation TEXT NOT NULL,
+                Client TEXT NOT NULL,
+                Statut TEXT NOT NULL,
+                Carre1500 INTEGER NOT NULL DEFAULT 0,
+                Carre1000 INTEGER NOT NULL DEFAULT 0,
+                Baguette500 INTEGER NOT NULL DEFAULT 0,
+                Baguette1000 INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_previsions_commandes_date
+            ON PrevisionsCommandes (DatePrevision);
+
+            CREATE TABLE IF NOT EXISTS ProductionJournaliere (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                DateProduction TEXT NOT NULL UNIQUE,
+                NombreBacsCommandes INTEGER NOT NULL DEFAULT 0,
+                NombreBacsProduits INTEGER NOT NULL DEFAULT 0,
+                NombreBacsPerdus INTEGER NOT NULL DEFAULT 0,
+                NombreBacsInvendus INTEGER NOT NULL DEFAULT 0,
+                NombreBacsLivresDepositaires INTEGER NOT NULL DEFAULT 0,
+                NombreBacsLivresMamans INTEGER NOT NULL DEFAULT 0,
+                NombreBacsDonnes INTEGER NOT NULL DEFAULT 0,
+                NombreEchantillons INTEGER NOT NULL DEFAULT 0,
+                NombreBacsRestants INTEGER NOT NULL DEFAULT 0,
+                NombreBacsFoutus INTEGER NOT NULL DEFAULT 0,
+                NombreSacsUtilises REAL NOT NULL DEFAULT 0,
+                Observations TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS CaisseVentes (
@@ -750,13 +831,159 @@ class DatabaseHelper:
         connection.execute("DROP TABLE Commissions")
         connection.execute("ALTER TABLE Commissions_Nouvelle RENAME TO Commissions")
 
+    @classmethod
+    def _migrate_previsions_commandes_table(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "PrevisionsCommandes")
+        if not columns:
+            return
+        if "Baguette1000" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE PrevisionsCommandes
+                ADD COLUMN Baguette1000 INTEGER NOT NULL DEFAULT 0
+                """
+            )
+
+    @classmethod
+    def _migrate_production_table(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "ProductionJournaliere")
+        if not columns:
+            return
+        missing_columns = {
+            "NombreBacsCommandes": "INTEGER NOT NULL DEFAULT 0",
+            "NombreBacsLivresDepositaires": "INTEGER NOT NULL DEFAULT 0",
+            "NombreBacsLivresMamans": "INTEGER NOT NULL DEFAULT 0",
+            "NombreBacsDonnes": "INTEGER NOT NULL DEFAULT 0",
+            "NombreEchantillons": "INTEGER NOT NULL DEFAULT 0",
+            "NombreBacsRestants": "INTEGER NOT NULL DEFAULT 0",
+            "NombreBacsFoutus": "INTEGER NOT NULL DEFAULT 0",
+            "NombreSacsUtilises": "REAL NOT NULL DEFAULT 0",
+        }
+        for column_name, column_definition in missing_columns.items():
+            if column_name not in columns:
+                connection.execute(
+                    f"""
+                    ALTER TABLE ProductionJournaliere
+                    ADD COLUMN {column_name} {column_definition}
+                    """
+                )
+
     @staticmethod
     def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
         rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
         return {row["name"] for row in rows}
 
     @classmethod
+    def _migrate_user_recoverable_password_column(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "Utilisateurs")
+        if not columns:
+            return
+        if "MotDePasseLisible" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE Utilisateurs
+                ADD COLUMN MotDePasseLisible TEXT NOT NULL DEFAULT ''
+                """
+            )
+
+        rows = connection.execute(
+            """
+            SELECT Identifiant, MotDePasse, IFNULL(MotDePasseLisible, '') AS MotDePasseLisible
+            FROM Utilisateurs
+            WHERE IFNULL(MotDePasseLisible, '') = ''
+            """
+        ).fetchall()
+        for row in rows:
+            stored_password = str(row["MotDePasse"] or "")
+            recoverable_password = ""
+            if stored_password and not cls.is_hashed_password(stored_password):
+                recoverable_password = stored_password
+            elif stored_password and cls.verify_password(DEFAULT_ADMIN_PASSWORD, stored_password):
+                recoverable_password = DEFAULT_ADMIN_PASSWORD
+            if recoverable_password:
+                connection.execute(
+                    """
+                    UPDATE Utilisateurs
+                    SET MotDePasseLisible = ?
+                    WHERE Identifiant = ?
+                    """,
+                    (cls.protect_recoverable_password(recoverable_password), row["Identifiant"]),
+                )
+
+    @classmethod
+    def _migrate_user_login_security_columns(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "Utilisateurs")
+        if not columns:
+            return
+        missing_columns = {
+            "EchecsConnexion": "INTEGER NOT NULL DEFAULT 0",
+            "NiveauBlocage": "INTEGER NOT NULL DEFAULT 0",
+            "VerrouilleJusqua": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column_name, column_definition in missing_columns.items():
+            if column_name not in columns:
+                connection.execute(
+                    f"""
+                    ALTER TABLE Utilisateurs
+                    ADD COLUMN {column_name} {column_definition}
+                    """
+                )
+
+    @classmethod
     def _insert_default_admin(cls, connection: sqlite3.Connection) -> None:
+        target_admin = connection.execute(
+            "SELECT Id FROM Utilisateurs WHERE Identifiant = ?",
+            (DEFAULT_ADMIN_USERNAME,),
+        ).fetchone()
+        if target_admin:
+            connection.execute(
+                """
+                UPDATE Utilisateurs
+                SET NomComplet = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = 'Admin',
+                    EchecsConnexion = 0, NiveauBlocage = 0, VerrouilleJusqua = ''
+                WHERE Id = ?
+                """,
+                (
+                    DEFAULT_ADMIN_FULL_NAME,
+                    cls.hash_password(DEFAULT_ADMIN_PASSWORD),
+                    cls.protect_recoverable_password(DEFAULT_ADMIN_PASSWORD),
+                    target_admin["Id"],
+                ),
+            )
+            return
+
+        legacy_admin = connection.execute(
+            """
+            SELECT Id
+            FROM Utilisateurs
+            WHERE Identifiant IN ('au.keyembe', 'au.kayembe', 'admin')
+            ORDER BY
+                CASE
+                    WHEN Identifiant = 'au.keyembe' THEN 0
+                    WHEN Identifiant = 'au.kayembe' THEN 1
+                    ELSE 2
+                END
+            LIMIT 1
+            """
+        ).fetchone()
+        if legacy_admin:
+            connection.execute(
+                """
+                UPDATE Utilisateurs
+                SET NomComplet = ?, Identifiant = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = 'Admin',
+                    EchecsConnexion = 0, NiveauBlocage = 0, VerrouilleJusqua = ''
+                WHERE Id = ?
+                """,
+                (
+                    DEFAULT_ADMIN_FULL_NAME,
+                    DEFAULT_ADMIN_USERNAME,
+                    cls.hash_password(DEFAULT_ADMIN_PASSWORD),
+                    cls.protect_recoverable_password(DEFAULT_ADMIN_PASSWORD),
+                    legacy_admin["Id"],
+                ),
+            )
+            return
+
         count = connection.execute(
             "SELECT COUNT(*) FROM Utilisateurs WHERE Role = 'Admin'"
         ).fetchone()[0]
@@ -765,10 +992,17 @@ class DatabaseHelper:
 
         connection.execute(
             """
-            INSERT INTO Utilisateurs (NomComplet, Identifiant, MotDePasse, Role)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO Utilisateurs
+                (NomComplet, Identifiant, MotDePasse, MotDePasseLisible, Role, EchecsConnexion, NiveauBlocage, VerrouilleJusqua)
+            VALUES (?, ?, ?, ?, ?, 0, 0, '')
             """,
-            ("Administrateur", "admin", cls.hash_password(DEFAULT_ADMIN_PASSWORD), "Admin"),
+            (
+                DEFAULT_ADMIN_FULL_NAME,
+                DEFAULT_ADMIN_USERNAME,
+                cls.hash_password(DEFAULT_ADMIN_PASSWORD),
+                cls.protect_recoverable_password(DEFAULT_ADMIN_PASSWORD),
+                "Admin",
+            ),
         )
 
     @classmethod
@@ -797,6 +1031,67 @@ class DatabaseHelper:
             """
         )
 
+    @classmethod
+    def _record_tables(cls) -> list[str]:
+        return [
+            "Utilisateurs",
+            "ConfigurationStock",
+            "StockSorties",
+            "StockApprovisionnements",
+            "StockJournalier",
+            "PrevisionsProduction",
+            "PrevisionsCommandes",
+            "ProductionJournaliere",
+            "CaisseVentes",
+            "CaisseJournaliere",
+            "Commandes",
+            "Commissions",
+            "CloturesJournalieres",
+            "HistoriqueActions",
+        ]
+
+    @classmethod
+    def _reset_marker_path(cls) -> Path:
+        return cls.app_data_dir / f".reset-{FORCED_DATABASE_RESET_VERSION}.done"
+
+    @classmethod
+    def _write_reset_marker(cls) -> None:
+        cls.app_data_dir.mkdir(parents=True, exist_ok=True)
+        cls._reset_marker_path().write_text(
+            f"Base réinitialisée automatiquement pour la version {FORCED_DATABASE_RESET_VERSION}.\n",
+            encoding="utf-8",
+        )
+
+    @classmethod
+    def _clear_records_and_insert_defaults(cls, connection: sqlite3.Connection) -> None:
+        tables = cls._record_tables()
+        for table_name in tables:
+            connection.execute(f"DELETE FROM {table_name}")
+        placeholders = ",".join("?" for _ in tables)
+        connection.execute(
+            f"DELETE FROM sqlite_sequence WHERE name IN ({placeholders})",
+            tuple(tables),
+        )
+        cls._insert_default_admin(connection)
+        cls._insert_default_stock_config(connection)
+
+    @classmethod
+    def _maybe_reset_database_for_forced_version(cls, connection: sqlite3.Connection) -> None:
+        if APP_VERSION != FORCED_DATABASE_RESET_VERSION:
+            return
+        if cls._reset_marker_path().exists():
+            return
+        cls._clear_records_and_insert_defaults(connection)
+        cls._write_reset_marker()
+
+    @classmethod
+    def reset_database_to_default_admin(cls) -> None:
+        with cls.local_calls_only():
+            cls.initialize_local_database()
+            with cls.connect() as connection:
+                cls._clear_records_and_insert_defaults(connection)
+            cls._write_reset_marker()
+
     @staticmethod
     def hash_password(plain_password: str) -> str:
         salt = secrets.token_bytes(16)
@@ -810,6 +1105,44 @@ class DatabaseHelper:
         salt_b64 = base64.b64encode(salt).decode("ascii")
         digest_b64 = base64.b64encode(digest).decode("ascii")
         return f"{PASSWORD_PREFIX}{PASSWORD_ITERATIONS}${salt_b64}${digest_b64}"
+
+    @staticmethod
+    def protect_recoverable_password(plain_password: str) -> str:
+        value = plain_password.strip()
+        if not value:
+            return ""
+        try:
+            import win32crypt  # type: ignore[import-not-found]
+
+            encrypted = win32crypt.CryptProtectData(
+                value.encode("utf-8"),
+                "Boulangerie Lomoto - mot de passe utilisateur",
+                None,
+                None,
+                None,
+                0,
+            )
+            return "DPAPI$" + base64.b64encode(encrypted).decode("ascii")
+        except Exception:
+            return "B64$" + base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+    @staticmethod
+    def unprotect_recoverable_password(stored_password: str) -> str:
+        value = str(stored_password or "").strip()
+        if not value:
+            return ""
+        try:
+            if value.startswith("DPAPI$"):
+                import win32crypt  # type: ignore[import-not-found]
+
+                encrypted = base64.b64decode(value.removeprefix("DPAPI$"))
+                _description, decrypted = win32crypt.CryptUnprotectData(encrypted, None, None, None, 0)
+                return decrypted.decode("utf-8")
+            if value.startswith("B64$"):
+                return base64.b64decode(value.removeprefix("B64$")).decode("utf-8")
+        except Exception:
+            return ""
+        return value
 
     @staticmethod
     def is_hashed_password(stored_password: str) -> bool:
@@ -845,10 +1178,16 @@ class DatabaseHelper:
         with cls.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO Utilisateurs (NomComplet, Identifiant, MotDePasse, Role)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO Utilisateurs (NomComplet, Identifiant, MotDePasse, MotDePasseLisible, Role)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (full_name, identifiant, cls.hash_password(password), role),
+                (
+                    full_name,
+                    identifiant,
+                    cls.hash_password(password),
+                    cls.protect_recoverable_password(password),
+                    role,
+                ),
             )
 
     @classmethod
@@ -864,10 +1203,16 @@ class DatabaseHelper:
                 cursor = connection.execute(
                     """
                     UPDATE Utilisateurs
-                    SET NomComplet = ?, MotDePasse = ?, Role = ?
+                    SET NomComplet = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = ?
                     WHERE Identifiant = ?
                     """,
-                    (full_name, cls.hash_password(password), role, original_identifiant),
+                    (
+                        full_name,
+                        cls.hash_password(password),
+                        cls.protect_recoverable_password(password),
+                        role,
+                        original_identifiant,
+                    ),
                 )
             else:
                 cursor = connection.execute(
@@ -885,7 +1230,14 @@ class DatabaseHelper:
         with cls.connect() as connection:
             row = connection.execute(
                 """
-                SELECT NomComplet, Identifiant, MotDePasse, Role
+                SELECT
+                    NomComplet,
+                    Identifiant,
+                    MotDePasse,
+                    Role,
+                    IFNULL(EchecsConnexion, 0) AS EchecsConnexion,
+                    IFNULL(NiveauBlocage, 0) AS NiveauBlocage,
+                    IFNULL(VerrouilleJusqua, '') AS VerrouilleJusqua
                 FROM Utilisateurs
                 WHERE Identifiant = ?
                 """,
@@ -894,15 +1246,77 @@ class DatabaseHelper:
             if row is None:
                 return None
 
+            now = datetime.now()
+            locked_until_text = str(row["VerrouilleJusqua"] or "").strip()
+            if locked_until_text:
+                try:
+                    locked_until = datetime.fromisoformat(locked_until_text)
+                except ValueError:
+                    locked_until = None
+                if locked_until is not None and locked_until > now:
+                    remaining_seconds = max(int((locked_until - now).total_seconds()), 1)
+                    remaining_minutes = max((remaining_seconds + 59) // 60, 1)
+                    raise ValueError(
+                        "Ce compte est temporairement bloqué après plusieurs mauvais mots de passe. "
+                        f"Réessayez dans environ {remaining_minutes} minute(s)."
+                    )
+
             stored_password = row["MotDePasse"]
             if not cls.verify_password(password, stored_password):
+                failures = int(row["EchecsConnexion"] or 0) + 1
+                lock_level = int(row["NiveauBlocage"] or 0)
+                if failures >= LOGIN_FAILURE_LIMIT:
+                    lock_level += 1
+                    duration_index = min(lock_level - 1, len(LOGIN_LOCK_DURATIONS_MINUTES) - 1)
+                    lock_minutes = LOGIN_LOCK_DURATIONS_MINUTES[duration_index]
+                    locked_until = now + timedelta(minutes=lock_minutes)
+                    connection.execute(
+                        """
+                        UPDATE Utilisateurs
+                        SET EchecsConnexion = 0,
+                            NiveauBlocage = ?,
+                            VerrouilleJusqua = ?
+                        WHERE Identifiant = ?
+                        """,
+                        (lock_level, locked_until.isoformat(timespec="seconds"), row["Identifiant"]),
+                    )
+                    connection.commit()
+                    raise ValueError(
+                        "Trop de mauvais mots de passe. "
+                        f"Le compte est bloqué pendant {lock_minutes} minute(s)."
+                    )
+                connection.execute(
+                    """
+                    UPDATE Utilisateurs
+                    SET EchecsConnexion = ?, VerrouilleJusqua = ''
+                    WHERE Identifiant = ?
+                    """,
+                    (failures, row["Identifiant"]),
+                )
                 return None
 
             if not cls.is_hashed_password(stored_password):
                 connection.execute(
-                    "UPDATE Utilisateurs SET MotDePasse = ? WHERE Identifiant = ?",
-                    (cls.hash_password(password), row["Identifiant"]),
+                    """
+                    UPDATE Utilisateurs
+                    SET MotDePasse = ?, MotDePasseLisible = ?
+                    WHERE Identifiant = ?
+                    """,
+                    (
+                        cls.hash_password(password),
+                        cls.protect_recoverable_password(password),
+                        row["Identifiant"],
+                    ),
                 )
+
+            connection.execute(
+                """
+                UPDATE Utilisateurs
+                SET EchecsConnexion = 0, NiveauBlocage = 0, VerrouilleJusqua = ''
+                WHERE Identifiant = ?
+                """,
+                (row["Identifiant"],),
+            )
 
             return AuthenticatedUser(
                 identifiant=row["Identifiant"],
@@ -957,8 +1371,16 @@ class DatabaseHelper:
                 raise ValueError("Le nouveau mot de passe doit etre different de l'ancien.")
 
             connection.execute(
-                "UPDATE Utilisateurs SET MotDePasse = ? WHERE Identifiant = ?",
-                (cls.hash_password(new_password), normalized_identifiant),
+                """
+                UPDATE Utilisateurs
+                SET MotDePasse = ?, MotDePasseLisible = ?
+                WHERE Identifiant = ?
+                """,
+                (
+                    cls.hash_password(new_password),
+                    cls.protect_recoverable_password(new_password),
+                    normalized_identifiant,
+                ),
             )
 
     @classmethod
@@ -972,6 +1394,35 @@ class DatabaseHelper:
             """,
             (f"%{identifiant}%",),
         )
+
+    @classmethod
+    def get_user_for_admin_edit(cls, identifiant: str) -> dict[str, Any]:
+        row = cls._fetch_one(
+            """
+            SELECT Id, NomComplet, Identifiant, MotDePasse, IFNULL(MotDePasseLisible, '') AS MotDePasseLisible, Role
+            FROM Utilisateurs
+            WHERE Identifiant = ?
+            """,
+            (identifiant,),
+        )
+        if not row:
+            return {}
+
+        stored_password = str(row.get("MotDePasse", "") or "")
+        visible_password = cls.unprotect_recoverable_password(str(row.get("MotDePasseLisible", "") or ""))
+        if not visible_password and stored_password and not cls.is_hashed_password(stored_password):
+            visible_password = stored_password
+        elif not visible_password and stored_password and cls.verify_password(DEFAULT_ADMIN_PASSWORD, stored_password):
+            visible_password = DEFAULT_ADMIN_PASSWORD
+
+        return {
+            "Id": row.get("Id"),
+            "NomComplet": row.get("NomComplet", ""),
+            "Identifiant": row.get("Identifiant", ""),
+            "MotDePasse": visible_password,
+            "MotDePasseDisponible": bool(visible_password),
+            "Role": row.get("Role", ""),
+        }
 
     @classmethod
     def delete_user(cls, identifiant: str) -> int:
@@ -1104,23 +1555,31 @@ class DatabaseHelper:
 
     @classmethod
     def get_stock_summary(cls, exclude_exit_id: int = 0) -> dict[str, Any]:
-        sql = """
-            SELECT
-                p.FarineInitial - IFNULL(SUM(s.SacsUtilises), 0) AS FarineRestante,
-                p.LevureInitial - IFNULL(SUM(s.PaquetsUtilises), 0) AS LevureRestante,
-                p.SelInitial - IFNULL(SUM(s.KgSelUtilises), 0) AS SelRestant,
-                p.HuileInitial - IFNULL(SUM(s.LitresHuileUtilises), 0) AS HuileRestante
-            FROM ConfigurationStock p
-            LEFT JOIN StockSorties s ON 1 = 1
-        """
+        exit_filter = "WHERE s.Id <> ?" if exclude_exit_id > 0 else ""
         params: list[Any] = []
         if exclude_exit_id > 0:
-            sql += " AND s.Id <> ?"
-            params.append(exclude_exit_id)
+            params = [exclude_exit_id, exclude_exit_id, exclude_exit_id, exclude_exit_id]
 
-        sql += """
+        sql = f"""
+            SELECT
+                p.FarineInitial
+                    + IFNULL((SELECT SUM(a.SacsAjoutes) FROM StockApprovisionnements a), 0)
+                    - IFNULL((SELECT SUM(s.SacsUtilises) FROM StockSorties s {exit_filter}), 0)
+                    AS FarineRestante,
+                p.LevureInitial
+                    + IFNULL((SELECT SUM(a.PaquetsAjoutes) FROM StockApprovisionnements a), 0)
+                    - IFNULL((SELECT SUM(s.PaquetsUtilises) FROM StockSorties s {exit_filter}), 0)
+                    AS LevureRestante,
+                p.SelInitial
+                    + IFNULL((SELECT SUM(a.KgSelAjoutes) FROM StockApprovisionnements a), 0)
+                    - IFNULL((SELECT SUM(s.KgSelUtilises) FROM StockSorties s {exit_filter}), 0)
+                    AS SelRestant,
+                p.HuileInitial
+                    + IFNULL((SELECT SUM(a.LitresHuileAjoutes) FROM StockApprovisionnements a), 0)
+                    - IFNULL((SELECT SUM(s.LitresHuileUtilises) FROM StockSorties s {exit_filter}), 0)
+                    AS HuileRestante
+            FROM ConfigurationStock p
             WHERE p.Id = 1
-            GROUP BY p.FarineInitial, p.LevureInitial, p.SelInitial, p.HuileInitial
         """
         return cls._fetch_one(sql, tuple(params)) or {}
 
@@ -1244,6 +1703,53 @@ class DatabaseHelper:
         )
 
     @classmethod
+    def get_stock_sacks_used_for_date(cls, target_date: date, exclude_exit_id: int = 0) -> float:
+        target_date = cls._coerce_date(target_date)
+        sql = """
+            SELECT IFNULL(SUM(SacsUtilises), 0)
+            FROM StockSorties
+            WHERE DateSortie = ?
+        """
+        params: list[Any] = [target_date.strftime(DB_DATE_FORMAT)]
+        if exclude_exit_id > 0:
+            sql += " AND Id <> ?"
+            params.append(exclude_exit_id)
+        value = cls._fetch_value(sql, tuple(params))
+        return float(value or 0)
+
+    @classmethod
+    def _production_sacks_for_date(cls, target_date: date) -> float:
+        value = cls._fetch_value(
+            """
+            SELECT IFNULL(NombreSacsUtilises, 0)
+            FROM ProductionJournaliere
+            WHERE DateProduction = ?
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+        return float(value or 0)
+
+    @classmethod
+    def _ensure_stock_sacks_match_production(cls, target_date: date, stock_sacks_total: float) -> None:
+        production_sacks = cls._production_sacks_for_date(target_date)
+        if production_sacks > 0 and not math.isclose(stock_sacks_total, production_sacks, abs_tol=0.001):
+            raise ValueError(
+                "Les sacs utilisés ne correspondent pas à ceux déclarés par le Chargé de la Production.\n\n"
+                f"Production : {production_sacks:g} sac(s)\n"
+                f"Stock : {stock_sacks_total:g} sac(s)"
+            )
+
+    @classmethod
+    def _ensure_production_sacks_match_stock(cls, target_date: date, production_sacks: float) -> None:
+        stock_sacks_total = cls.get_stock_sacks_used_for_date(target_date)
+        if stock_sacks_total > 0 and not math.isclose(stock_sacks_total, production_sacks, abs_tol=0.001):
+            raise ValueError(
+                "Les sacs utilisés ne correspondent pas à ceux déclarés par le Gestionnaire de stock.\n\n"
+                f"Production : {production_sacks:g} sac(s)\n"
+                f"Stock : {stock_sacks_total:g} sac(s)"
+            )
+
+    @classmethod
     def add_stock_exit(
         cls,
         target_date: date,
@@ -1252,6 +1758,10 @@ class DatabaseHelper:
         kg_sel: float,
         litres_huile: float,
     ) -> None:
+        target_date = cls._coerce_date(target_date)
+        sacs = float(sacs)
+        projected_total = cls.get_stock_sacks_used_for_date(target_date) + sacs
+        cls._ensure_stock_sacks_match_production(target_date, projected_total)
         cls.ensure_day_open_for_write(target_date, "le stock")
         cls._execute(
             """
@@ -1279,8 +1789,16 @@ class DatabaseHelper:
         kg_sel: float,
         litres_huile: float,
     ) -> int:
+        target_date = cls._coerce_date(target_date)
+        sacs = float(sacs)
         original_date_text = cls._get_record_date_text("StockSorties", "DateSortie", exit_id)
         cls._ensure_update_dates_open("le stock", original_date_text, target_date)
+        projected_total = cls.get_stock_sacks_used_for_date(target_date, exclude_exit_id=exit_id) + sacs
+        cls._ensure_stock_sacks_match_production(target_date, projected_total)
+        if original_date_text and original_date_text != target_date.strftime(DB_DATE_FORMAT):
+            original_date = cls._coerce_date(original_date_text)
+            original_projected_total = cls.get_stock_sacks_used_for_date(original_date, exclude_exit_id=exit_id)
+            cls._ensure_stock_sacks_match_production(original_date, original_projected_total)
         return cls._execute(
             """
             UPDATE StockSorties
@@ -1308,6 +1826,700 @@ class DatabaseHelper:
         if original_date_text:
             cls.ensure_day_open_for_write(original_date_text, "le stock")
         return cls._execute("DELETE FROM StockSorties WHERE Id = ?", (exit_id,))
+
+    @classmethod
+    def count_stock_supplies(cls) -> int:
+        return int(cls._fetch_value("SELECT COUNT(*) FROM StockApprovisionnements"))
+
+    @classmethod
+    def list_stock_supplies(cls) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT
+                Id,
+                DateApprovisionnement,
+                SacsAjoutes,
+                PaquetsAjoutes,
+                KgSelAjoutes,
+                LitresHuileAjoutes,
+                IFNULL(Observations, '') AS Observations
+            FROM StockApprovisionnements
+            ORDER BY DateApprovisionnement DESC, Id DESC
+            """
+        )
+
+    @classmethod
+    def list_stock_supplies_by_date(cls, target_date: date) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT
+                Id,
+                DateApprovisionnement,
+                SacsAjoutes,
+                PaquetsAjoutes,
+                KgSelAjoutes,
+                LitresHuileAjoutes,
+                IFNULL(Observations, '') AS Observations
+            FROM StockApprovisionnements
+            WHERE DateApprovisionnement = ?
+            ORDER BY Id DESC
+            """,
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+
+    @classmethod
+    def add_stock_supply(
+        cls,
+        target_date: date,
+        sacs: float,
+        paquets: float,
+        kg_sel: float,
+        litres_huile: float,
+        observations: str = "",
+    ) -> None:
+        target_date = cls._coerce_date(target_date)
+        cls.ensure_day_open_for_write(target_date, "le stock")
+        if min(sacs, paquets, kg_sel, litres_huile) < 0:
+            raise ValueError("Les quantités ajoutées au stock ne peuvent pas être négatives.")
+        if sacs == 0 and paquets == 0 and kg_sel == 0 and litres_huile == 0:
+            raise ValueError("Veuillez saisir au moins une quantité supérieure à zéro.")
+        cls._execute(
+            """
+            INSERT INTO StockApprovisionnements (
+                DateApprovisionnement,
+                SacsAjoutes,
+                PaquetsAjoutes,
+                KgSelAjoutes,
+                LitresHuileAjoutes,
+                Observations
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                sacs,
+                paquets,
+                kg_sel,
+                litres_huile,
+                observations.strip(),
+            ),
+        )
+
+    @classmethod
+    def update_stock_supply(
+        cls,
+        supply_id: int,
+        target_date: date,
+        sacs: float,
+        paquets: float,
+        kg_sel: float,
+        litres_huile: float,
+        observations: str = "",
+    ) -> int:
+        target_date = cls._coerce_date(target_date)
+        original_date_text = cls._get_record_date_text(
+            "StockApprovisionnements",
+            "DateApprovisionnement",
+            supply_id,
+        )
+        cls._ensure_update_dates_open("le stock", original_date_text, target_date)
+        if min(sacs, paquets, kg_sel, litres_huile) < 0:
+            raise ValueError("Les quantités ajoutées au stock ne peuvent pas être négatives.")
+        if sacs == 0 and paquets == 0 and kg_sel == 0 and litres_huile == 0:
+            raise ValueError("Veuillez saisir au moins une quantité supérieure à zéro.")
+        return cls._execute(
+            """
+            UPDATE StockApprovisionnements
+            SET
+                DateApprovisionnement = ?,
+                SacsAjoutes = ?,
+                PaquetsAjoutes = ?,
+                KgSelAjoutes = ?,
+                LitresHuileAjoutes = ?,
+                Observations = ?
+            WHERE Id = ?
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                sacs,
+                paquets,
+                kg_sel,
+                litres_huile,
+                observations.strip(),
+                supply_id,
+            ),
+        )
+
+    @classmethod
+    def delete_stock_supply(cls, supply_id: int) -> int:
+        original_date_text = cls._get_record_date_text(
+            "StockApprovisionnements",
+            "DateApprovisionnement",
+            supply_id,
+        )
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, "le stock")
+        return cls._execute("DELETE FROM StockApprovisionnements WHERE Id = ?", (supply_id,))
+
+    @staticmethod
+    def _prevision_select_sql(where_clause: str = "") -> str:
+        return f"""
+            SELECT
+                Id,
+                DatePrevision,
+                Localisation,
+                Client,
+                Statut,
+                IFNULL(Carre1500, 0) AS Carre1500,
+                IFNULL(Carre1000, 0) AS Carre1000,
+                IFNULL(Baguette500, 0) AS Baguette500,
+                IFNULL(Baguette1000, 0) AS Baguette1000,
+                (
+                    IFNULL(Carre1500, 0)
+                    + IFNULL(Carre1000, 0)
+                    + IFNULL(Baguette500, 0)
+                    + IFNULL(Baguette1000, 0)
+                ) AS TotalArticles,
+                (
+                    IFNULL(Carre1500, 0) * 1500
+                    + IFNULL(Carre1000, 0) * 1000
+                    + IFNULL(Baguette500, 0) * 500
+                    + IFNULL(Baguette1000, 0) * 1000
+                ) AS MontantPrevu
+            FROM PrevisionsCommandes
+            {where_clause}
+        """
+
+    @staticmethod
+    def _validate_prevision_order_values(
+        localisation: str,
+        client: str,
+        status: str,
+        square_1500: int,
+        square_1000: int,
+        baguette_500: int,
+        baguette_1000: int,
+    ) -> tuple[str, str, str]:
+        clean_localisation = localisation.strip()
+        clean_client = client.strip()
+        clean_status = status.strip()
+        if clean_status == DEPOSITARY_STATUS and not clean_localisation:
+            raise ValueError("Veuillez renseigner la localisation.")
+        if clean_status == "Maman":
+            clean_localisation = ""
+        if not clean_client:
+            raise ValueError("Veuillez renseigner le nom du client.")
+        if clean_status not in {DEPOSITARY_STATUS, "Maman"}:
+            raise ValueError("Le statut doit être Dépositaire ou Maman.")
+        if min(square_1500, square_1000, baguette_500, baguette_1000) < 0:
+            raise ValueError("Les quantités de la prévision ne peuvent pas être négatives.")
+        if square_1500 + square_1000 + baguette_500 + baguette_1000 <= 0:
+            raise ValueError("Veuillez saisir au moins une quantité dans la commande.")
+        return clean_localisation, clean_client, clean_status
+
+    @classmethod
+    def get_prevision_for_date(cls, target_date: date) -> dict[str, Any]:
+        return cls.get_prevision_summary_for_date(target_date)
+
+    @classmethod
+    def get_prevision_summary_for_date(cls, target_date: date) -> dict[str, Any]:
+        target_date = cls._coerce_date(target_date)
+        date_text = target_date.strftime(DB_DATE_FORMAT)
+        prevision = cls._fetch_one(
+            """
+            SELECT
+                COUNT(*) AS NombreClients,
+                IFNULL(SUM(CASE WHEN Statut = 'Dépositaire' THEN 1 ELSE 0 END), 0) AS NombreDepositaires,
+                IFNULL(SUM(CASE WHEN Statut = 'Maman' THEN 1 ELSE 0 END), 0) AS NombreMamans,
+                IFNULL(SUM(Carre1500), 0) AS TotalCarre1500,
+                IFNULL(SUM(Carre1000), 0) AS TotalCarre1000,
+                IFNULL(SUM(Baguette500), 0) AS TotalBaguette500,
+                IFNULL(SUM(Baguette1000), 0) AS TotalBaguette1000,
+                IFNULL(SUM(CASE WHEN Statut = 'Dépositaire' THEN Carre1500 + Carre1000 + Baguette500 + Baguette1000 ELSE 0 END), 0) AS TotalDepositaires,
+                IFNULL(SUM(CASE WHEN Statut = 'Maman' THEN Carre1500 + Carre1000 + Baguette500 + Baguette1000 ELSE 0 END), 0) AS TotalMamans,
+                IFNULL(SUM(Carre1500 + Carre1000 + Baguette500 + Baguette1000), 0) AS TotalArticlesPrevus,
+                IFNULL(SUM((Carre1500 * 1500) + (Carre1000 * 1000) + (Baguette500 * 500) + (Baguette1000 * 1000)), 0) AS MontantPrevu
+            FROM PrevisionsCommandes
+            WHERE DatePrevision = ?
+            """,
+            (date_text,),
+        ) or {}
+        legacy = cls._fetch_one(
+            "SELECT IFNULL(NombreBacsPrevus, 0) AS NombreBacsPrevus FROM PrevisionsProduction WHERE DatePrevision = ?",
+            (date_text,),
+        ) or {}
+        planned_articles = int(float(prevision.get("TotalArticlesPrevus", 0) or 0))
+        if planned_articles == 0:
+            planned_articles = int(float(legacy.get("NombreBacsPrevus", 0) or 0))
+        return {
+            "Id": 0,
+            "DatePrevision": date_text,
+            "NombreClients": int(prevision.get("NombreClients", 0) or 0),
+            "NombreDepositaires": int(prevision.get("NombreDepositaires", 0) or 0),
+            "NombreMamans": int(prevision.get("NombreMamans", 0) or 0),
+            "NombreBacsCommandes": planned_articles,
+            "NombreBacsPrevus": planned_articles,
+            "TotalArticlesPrevus": planned_articles,
+            "TotalDepositaires": int(prevision.get("TotalDepositaires", 0) or 0),
+            "TotalMamans": int(prevision.get("TotalMamans", 0) or 0),
+            "TotalCarre1500": int(prevision.get("TotalCarre1500", 0) or 0),
+            "TotalCarre1000": int(prevision.get("TotalCarre1000", 0) or 0),
+            "TotalBaguette500": int(prevision.get("TotalBaguette500", 0) or 0),
+            "TotalBaguette1000": int(prevision.get("TotalBaguette1000", 0) or 0),
+            "MontantPrevu": float(prevision.get("MontantPrevu", 0) or 0),
+            "NombreSacsAProduire": round(planned_articles / 33.0, 2) if planned_articles > 0 else 0.0,
+            "EcartCommandes": 0,
+            "FarinePrevue": 0.0,
+            "LevurePrevue": 0.0,
+            "SelPrevu": 0.0,
+            "HuilePrevue": 0.0,
+            "StockSuffisant": 1,
+            "Observations": "",
+        }
+
+    @classmethod
+    def list_previsions(cls) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            cls._prevision_select_sql("ORDER BY DatePrevision DESC, Localisation ASC, Client ASC, Id DESC")
+        )
+
+    @classmethod
+    def list_previsions_by_date(cls, target_date: date) -> list[dict[str, Any]]:
+        target_date = cls._coerce_date(target_date)
+        return cls._fetch_all(
+            cls._prevision_select_sql("WHERE DatePrevision = ? ORDER BY Localisation ASC, Client ASC, Id DESC"),
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+
+    @classmethod
+    def get_global_prevision_summary(cls) -> dict[str, Any]:
+        prevision = cls._fetch_one(
+            """
+            SELECT
+                COUNT(DISTINCT DatePrevision) AS JoursPrevision,
+                COUNT(*) AS NombreClients,
+                IFNULL(SUM(Carre1500), 0) AS TotalCarre1500,
+                IFNULL(SUM(Carre1000), 0) AS TotalCarre1000,
+                IFNULL(SUM(Baguette500), 0) AS TotalBaguette500,
+                IFNULL(SUM(Baguette1000), 0) AS TotalBaguette1000,
+                IFNULL(SUM(CASE WHEN Statut = 'Dépositaire' THEN Carre1500 + Carre1000 + Baguette500 + Baguette1000 ELSE 0 END), 0) AS TotalDepositaires,
+                IFNULL(SUM(CASE WHEN Statut = 'Maman' THEN Carre1500 + Carre1000 + Baguette500 + Baguette1000 ELSE 0 END), 0) AS TotalMamans,
+                IFNULL(SUM(Carre1500 + Carre1000 + Baguette500 + Baguette1000), 0) AS TotalArticlesPrevus,
+                IFNULL(SUM((Carre1500 * 1500) + (Carre1000 * 1000) + (Baguette500 * 500) + (Baguette1000 * 1000)), 0) AS MontantPrevu
+            FROM PrevisionsCommandes
+            """
+        ) or {}
+        planned_articles = int(float(prevision.get("TotalArticlesPrevus", 0) or 0))
+        prevision["TotalBacsCommandes"] = planned_articles
+        prevision["TotalBacsPrevus"] = planned_articles
+        prevision["NombreSacsAProduire"] = round(planned_articles / 33.0, 2) if planned_articles > 0 else 0.0
+        prevision["EcartCommandes"] = 0
+        return prevision
+
+    @classmethod
+    def add_prevision_order(
+        cls,
+        target_date: date,
+        localisation: str,
+        client: str,
+        status: str,
+        square_1500: int,
+        square_1000: int,
+        baguette_500: int,
+        baguette_1000: int,
+    ) -> None:
+        target_date = cls._coerce_date(target_date)
+        cls.ensure_day_open_for_write(target_date, "la prévision")
+        clean_localisation, clean_client, clean_status = cls._validate_prevision_order_values(
+            localisation,
+            client,
+            status,
+            square_1500,
+            square_1000,
+            baguette_500,
+            baguette_1000,
+        )
+        cls._execute(
+            """
+            INSERT INTO PrevisionsCommandes
+                (DatePrevision, Localisation, Client, Statut, Carre1500, Carre1000, Baguette500, Baguette1000)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                clean_localisation,
+                clean_client,
+                clean_status,
+                square_1500,
+                square_1000,
+                baguette_500,
+                baguette_1000,
+            ),
+        )
+
+    @classmethod
+    def update_prevision_order(
+        cls,
+        prevision_id: int,
+        target_date: date,
+        localisation: str,
+        client: str,
+        status: str,
+        square_1500: int,
+        square_1000: int,
+        baguette_500: int,
+        baguette_1000: int,
+    ) -> int:
+        target_date = cls._coerce_date(target_date)
+        original_date_text = cls._get_record_date_text("PrevisionsCommandes", "DatePrevision", prevision_id)
+        cls._ensure_update_dates_open("la prévision", original_date_text, target_date)
+        clean_localisation, clean_client, clean_status = cls._validate_prevision_order_values(
+            localisation,
+            client,
+            status,
+            square_1500,
+            square_1000,
+            baguette_500,
+            baguette_1000,
+        )
+        return cls._execute(
+            """
+            UPDATE PrevisionsCommandes
+            SET DatePrevision = ?,
+                Localisation = ?,
+                Client = ?,
+                Statut = ?,
+                Carre1500 = ?,
+                Carre1000 = ?,
+                Baguette500 = ?,
+                Baguette1000 = ?
+            WHERE Id = ?
+            """,
+            (
+                target_date.strftime(DB_DATE_FORMAT),
+                clean_localisation,
+                clean_client,
+                clean_status,
+                square_1500,
+                square_1000,
+                baguette_500,
+                baguette_1000,
+                prevision_id,
+            ),
+        )
+
+    @classmethod
+    def save_prevision_day(
+        cls,
+        target_date: date,
+        planned_trays: int,
+        flour_planned: float,
+        yeast_planned: float,
+        salt_planned: float,
+        oil_planned: float,
+        observations: str = "",
+    ) -> None:
+        target_date = cls._coerce_date(target_date)
+        cls.ensure_day_open_for_write(target_date, "la prévision")
+        if min(planned_trays, flour_planned, yeast_planned, salt_planned, oil_planned) < 0:
+            raise ValueError("Les valeurs de prévision ne peuvent pas être négatives.")
+
+        date_text = target_date.strftime(DB_DATE_FORMAT)
+        exists = int(
+            cls._fetch_value(
+                "SELECT COUNT(*) FROM PrevisionsProduction WHERE DatePrevision = ?",
+                (date_text,),
+            )
+            or 0
+        )
+        if exists:
+            cls._execute(
+                """
+                UPDATE PrevisionsProduction
+                SET NombreBacsPrevus = ?,
+                    FarinePrevue = ?,
+                    LevurePrevue = ?,
+                    SelPrevu = ?,
+                    HuilePrevue = ?,
+                    Observations = ?
+                WHERE DatePrevision = ?
+                """,
+                (
+                    planned_trays,
+                    flour_planned,
+                    yeast_planned,
+                    salt_planned,
+                    oil_planned,
+                    observations.strip(),
+                    date_text,
+                ),
+            )
+            return
+
+        cls._execute(
+            """
+            INSERT INTO PrevisionsProduction
+                (DatePrevision, NombreBacsPrevus, FarinePrevue, LevurePrevue, SelPrevu, HuilePrevue, Observations)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                date_text,
+                planned_trays,
+                flour_planned,
+                yeast_planned,
+                salt_planned,
+                oil_planned,
+                observations.strip(),
+            ),
+        )
+
+    @classmethod
+    def delete_prevision_day(cls, prevision_id: int) -> int:
+        original_date_text = cls._get_record_date_text("PrevisionsCommandes", "DatePrevision", prevision_id)
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, "la prévision")
+            return cls._execute("DELETE FROM PrevisionsCommandes WHERE Id = ?", (prevision_id,))
+
+        legacy_date_text = cls._get_record_date_text("PrevisionsProduction", "DatePrevision", prevision_id)
+        if legacy_date_text:
+            cls.ensure_day_open_for_write(legacy_date_text, "la prévision")
+        return cls._execute("DELETE FROM PrevisionsProduction WHERE Id = ?", (prevision_id,))
+
+    @staticmethod
+    def _production_select_sql(where_clause: str = "") -> str:
+        return f"""
+            SELECT
+                p.Id,
+                p.DateProduction,
+                IFNULL(p.NombreBacsCommandes, 0) AS NombreBacsCommandes,
+                IFNULL(p.NombreBacsProduits, 0) AS NombreBacsProduits,
+                IFNULL(p.NombreBacsLivresDepositaires, 0) AS NombreBacsLivresDepositaires,
+                IFNULL(p.NombreBacsLivresMamans, 0) AS NombreBacsLivresMamans,
+                IFNULL(p.NombreBacsDonnes, 0) AS NombreBacsDonnes,
+                IFNULL(p.NombreEchantillons, 0) AS NombreEchantillons,
+                IFNULL(p.NombreBacsRestants, 0) AS NombreBacsRestants,
+                IFNULL(p.NombreBacsFoutus, 0) AS NombreBacsFoutus,
+                IFNULL(p.NombreSacsUtilises, 0) AS NombreSacsUtilises,
+                IFNULL(p.NombreBacsRestants, 0) AS BacsDisponibles,
+                (
+                    IFNULL(p.NombreBacsProduits, 0)
+                    - IFNULL(p.NombreBacsCommandes, 0)
+                ) AS EcartCommandes,
+                CASE
+                    WHEN IFNULL(p.NombreBacsCommandes, 0) > 0 THEN ROUND(
+                        IFNULL(p.NombreBacsProduits, 0) * 100.0 / IFNULL(p.NombreBacsCommandes, 0),
+                        2
+                    )
+                    ELSE 0
+                END AS TauxCouverture,
+                IFNULL(p.Observations, '') AS Observations
+            FROM ProductionJournaliere p
+            {where_clause}
+        """
+
+    @classmethod
+    def get_production_for_date(cls, target_date: date) -> dict[str, Any]:
+        row = cls._fetch_one(
+            cls._production_select_sql("WHERE p.DateProduction = ?"),
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+        return row or {}
+
+    @classmethod
+    def get_production_summary_for_date(cls, target_date: date) -> dict[str, Any]:
+        target_date = cls._coerce_date(target_date)
+        production = cls.get_production_for_date(target_date)
+        ordered_trays = int(float(production.get("NombreBacsCommandes", 0) or 0))
+        produced_trays = int(float(production.get("NombreBacsProduits", 0) or 0))
+        delivered_depositaries = int(float(production.get("NombreBacsLivresDepositaires", 0) or 0))
+        delivered_mamas = int(float(production.get("NombreBacsLivresMamans", 0) or 0))
+        given_trays = int(float(production.get("NombreBacsDonnes", 0) or 0))
+        sample_trays = int(float(production.get("NombreEchantillons", 0) or 0))
+        remaining_trays = int(float(production.get("NombreBacsRestants", 0) or 0))
+        wasted_trays = int(float(production.get("NombreBacsFoutus", 0) or 0))
+        sacks_used = float(production.get("NombreSacsUtilises", 0) or 0)
+        coverage_rate = round((produced_trays * 100.0 / ordered_trays), 2) if ordered_trays > 0 else 0.0
+        return {
+            "Id": int(production.get("Id", 0) or 0),
+            "DateProduction": target_date.strftime(DB_DATE_FORMAT),
+            "NombreBacsCommandes": ordered_trays,
+            "NombreBacsProduits": produced_trays,
+            "NombreBacsLivresDepositaires": delivered_depositaries,
+            "NombreBacsLivresMamans": delivered_mamas,
+            "NombreBacsDonnes": given_trays,
+            "NombreEchantillons": sample_trays,
+            "NombreBacsRestants": remaining_trays,
+            "NombreBacsFoutus": wasted_trays,
+            "NombreSacsUtilises": sacks_used,
+            "BacsDisponibles": remaining_trays,
+            "EcartCommandes": produced_trays - ordered_trays,
+            "TauxCouverture": coverage_rate,
+            "Observations": str(production.get("Observations", "") or ""),
+        }
+
+    @classmethod
+    def list_productions(cls) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            cls._production_select_sql("ORDER BY p.DateProduction DESC, p.Id DESC")
+        )
+
+    @classmethod
+    def list_productions_by_date(cls, target_date: date) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            cls._production_select_sql("WHERE p.DateProduction = ? ORDER BY p.Id DESC"),
+            (target_date.strftime(DB_DATE_FORMAT),),
+        )
+
+    @classmethod
+    def get_global_production_summary(cls) -> dict[str, Any]:
+        production = cls._fetch_one(
+            """
+            SELECT
+                COUNT(*) AS JoursProduction,
+                IFNULL(SUM(NombreBacsCommandes), 0) AS TotalBacsCommandes,
+                IFNULL(SUM(NombreBacsProduits), 0) AS TotalBacsProduits,
+                IFNULL(SUM(NombreBacsLivresDepositaires), 0) AS TotalBacsLivresDepositaires,
+                IFNULL(SUM(NombreBacsLivresMamans), 0) AS TotalBacsLivresMamans,
+                IFNULL(SUM(NombreBacsDonnes), 0) AS TotalBacsDonnes,
+                IFNULL(SUM(NombreEchantillons), 0) AS TotalEchantillons,
+                IFNULL(SUM(NombreBacsRestants), 0) AS TotalBacsRestants,
+                IFNULL(SUM(NombreBacsFoutus), 0) AS TotalBacsFoutus,
+                IFNULL(SUM(NombreSacsUtilises), 0) AS TotalSacsUtilises,
+                IFNULL(SUM(NombreBacsRestants), 0) AS TotalBacsDisponibles
+            FROM ProductionJournaliere
+            """
+        ) or {}
+        ordered_trays = int(float(production.get("TotalBacsCommandes", 0) or 0))
+        produced_trays = int(float(production.get("TotalBacsProduits", 0) or 0))
+        production["EcartCommandes"] = produced_trays - ordered_trays
+        production["TauxCouverture"] = round((produced_trays * 100.0 / ordered_trays), 2) if ordered_trays > 0 else 0.0
+        return production
+
+    @classmethod
+    def save_production_day(
+        cls,
+        target_date: date,
+        ordered_trays: int,
+        delivered_depositaries: int,
+        delivered_mamas: int,
+        given_trays: int,
+        sample_trays: int,
+        remaining_trays: int,
+        wasted_trays: int,
+        sacks_used: float | str | None = None,
+        observations: str = "",
+    ) -> None:
+        target_date = cls._coerce_date(target_date)
+        cls.ensure_day_open_for_write(target_date, "la production")
+        production_values = [
+            delivered_depositaries,
+            delivered_mamas,
+            given_trays,
+            sample_trays,
+            remaining_trays,
+            wasted_trays,
+        ]
+        values = [ordered_trays, *production_values]
+        if min(values) < 0:
+            raise ValueError("Les quantités de production ne peuvent pas être négatives.")
+
+        produced_trays = sum(production_values)
+        if isinstance(sacks_used, str) and not observations:
+            observations = sacks_used
+            sacks_value = round(produced_trays / 33.0, 2) if produced_trays > 0 else 0.0
+        elif sacks_used is None:
+            sacks_value = round(produced_trays / 33.0, 2) if produced_trays > 0 else 0.0
+        else:
+            try:
+                sacks_value = float(sacks_used)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Le nombre de sacs utilisés doit être numérique.") from exc
+        if sacks_value < 0:
+            raise ValueError("Le nombre de sacs utilisés ne peut pas être négatif.")
+        cls._ensure_production_sacks_match_stock(target_date, sacks_value)
+        date_text = target_date.strftime(DB_DATE_FORMAT)
+        exists = int(
+            cls._fetch_value(
+                "SELECT COUNT(*) FROM ProductionJournaliere WHERE DateProduction = ?",
+                (date_text,),
+            )
+            or 0
+        )
+        if exists:
+            cls._execute(
+                """
+                UPDATE ProductionJournaliere
+                SET NombreBacsCommandes = ?,
+                    NombreBacsProduits = ?,
+                    NombreBacsPerdus = 0,
+                    NombreBacsInvendus = 0,
+                    NombreBacsLivresDepositaires = ?,
+                    NombreBacsLivresMamans = ?,
+                    NombreBacsDonnes = ?,
+                    NombreEchantillons = ?,
+                    NombreBacsRestants = ?,
+                    NombreBacsFoutus = ?,
+                    NombreSacsUtilises = ?,
+                    Observations = ?
+                WHERE DateProduction = ?
+                """,
+                (
+                    ordered_trays,
+                    produced_trays,
+                    delivered_depositaries,
+                    delivered_mamas,
+                    given_trays,
+                    sample_trays,
+                    remaining_trays,
+                    wasted_trays,
+                    sacks_value,
+                    observations.strip(),
+                    date_text,
+                ),
+            )
+            return
+
+        cls._execute(
+            """
+            INSERT INTO ProductionJournaliere
+                (
+                    DateProduction,
+                    NombreBacsCommandes,
+                    NombreBacsProduits,
+                    NombreBacsPerdus,
+                    NombreBacsInvendus,
+                    NombreBacsLivresDepositaires,
+                    NombreBacsLivresMamans,
+                    NombreBacsDonnes,
+                    NombreEchantillons,
+                    NombreBacsRestants,
+                    NombreBacsFoutus,
+                    NombreSacsUtilises,
+                    Observations
+                )
+            VALUES (?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                date_text,
+                ordered_trays,
+                produced_trays,
+                delivered_depositaries,
+                delivered_mamas,
+                given_trays,
+                sample_trays,
+                remaining_trays,
+                wasted_trays,
+                sacks_value,
+                observations.strip(),
+            ),
+        )
+
+    @classmethod
+    def delete_production_day(cls, production_id: int) -> int:
+        original_date_text = cls._get_record_date_text("ProductionJournaliere", "DateProduction", production_id)
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, "la production")
+        return cls._execute("DELETE FROM ProductionJournaliere WHERE Id = ?", (production_id,))
 
     @classmethod
     def get_orders_summary_for_date(cls, target_date: date) -> dict[str, Any]:
@@ -1806,6 +3018,42 @@ class DatabaseHelper:
         )
 
     @classmethod
+    def _validate_order_amounts(
+        cls,
+        client: str,
+        status: str,
+        number_of_trays: int,
+        amount_due: float,
+        amount_received: float,
+    ) -> tuple[str, str, int, float, float, float]:
+        normalized_client = str(client or "").strip()
+        normalized_status = normalize_status_form_label(status)
+        try:
+            trays = int(float(number_of_trays))
+            received = float(amount_received)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("La commande contient une valeur numérique invalide.") from exc
+
+        if not normalized_client:
+            raise ValueError("Veuillez saisir le nom du client.")
+        if not normalized_status:
+            raise ValueError("Veuillez choisir un statut.")
+        if normalized_status not in ORDER_STATUS_RATES:
+            raise ValueError("Le statut de la commande est invalide.")
+        if trays <= 0:
+            raise ValueError("Le nombre de bacs doit être supérieur à zéro.")
+        if not math.isfinite(received) or received < 0:
+            raise ValueError("Le montant reçu est invalide.")
+        due = float(trays * ORDER_STATUS_RATES[normalized_status])
+        if received > due:
+            raise ValueError(
+                "Le montant reçu ne peut pas dépasser le montant à percevoir."
+            )
+
+        debt = max(due - received, 0.0)
+        return normalized_client, normalized_status, trays, due, received, debt
+
+    @classmethod
     def add_order(
         cls,
         target_date: date,
@@ -1816,6 +3064,13 @@ class DatabaseHelper:
         amount_received: float,
         debt: float,
     ) -> None:
+        client, status, number_of_trays, amount_due, amount_received, debt = cls._validate_order_amounts(
+            client,
+            status,
+            number_of_trays,
+            amount_due,
+            amount_received,
+        )
         cls.ensure_day_open_for_write(target_date, "les commandes")
         cls._execute(
             """
@@ -1870,6 +3125,13 @@ class DatabaseHelper:
         amount_received: float,
         debt: float,
     ) -> int:
+        client, status, number_of_trays, amount_due, amount_received, debt = cls._validate_order_amounts(
+            client,
+            status,
+            number_of_trays,
+            amount_due,
+            amount_received,
+        )
         original_date_text = cls._get_record_date_text("Commandes", "DateCommande", order_id)
         cls._ensure_update_dates_open("les commandes", original_date_text, target_date)
         updated = cls._execute(
@@ -1931,6 +3193,55 @@ class DatabaseHelper:
         value = cls._fetch_value(sql, tuple(params))
         return int(value or 0)
 
+    @staticmethod
+    def _client_similarity_tokens(value: str) -> set[str]:
+        normalized = unicodedata.normalize("NFD", str(value or "").casefold())
+        normalized = "".join(character for character in normalized if unicodedata.category(character) != "Mn")
+        cleaned = "".join(character if character.isalnum() else " " for character in normalized)
+        return {token for token in cleaned.split() if len(token) >= 3}
+
+    @classmethod
+    def find_similar_order(
+        cls,
+        target_date: date,
+        client: str,
+        exclude_id: int = 0,
+    ) -> dict[str, Any] | None:
+        client_tokens = cls._client_similarity_tokens(client)
+        if not client_tokens:
+            return None
+        sql = f"""
+            SELECT
+                Id,
+                DateCommande,
+                Client,
+                Statut,
+                NombreBacs,
+                MontantAPercevoir,
+                MontantRecu,
+                Dette AS DetteInitiale,
+                IFNULL(DettePayee, 0) AS DettePayee,
+                {OUTSTANDING_DEBT_SQL} AS Dette,
+                {DEBT_STATUS_SQL} AS StatutDette
+            FROM Commandes
+            WHERE DateCommande = ?
+        """
+        params: list[Any] = [target_date.strftime(DB_DATE_FORMAT)]
+        if exclude_id > 0:
+            sql += " AND Id <> ?"
+            params.append(exclude_id)
+        sql += " ORDER BY Id DESC"
+        rows = cls._fetch_all(sql, tuple(params))
+        for row in rows:
+            existing_tokens = cls._client_similarity_tokens(str(row.get("Client", "")))
+            if not existing_tokens:
+                continue
+            shorter = client_tokens if len(client_tokens) <= len(existing_tokens) else existing_tokens
+            longer = existing_tokens if shorter is client_tokens else client_tokens
+            if shorter.issubset(longer):
+                return row
+        return None
+
     @classmethod
     def list_commissions(cls) -> list[dict[str, Any]]:
         return cls._fetch_all(
@@ -1957,10 +3268,13 @@ class DatabaseHelper:
     def list_clients_from_orders_by_date(cls, target_date: date) -> list[str]:
         rows = cls._fetch_all(
             """
-            SELECT DISTINCT Client
+            SELECT TRIM(Client) AS Client
             FROM Commandes
             WHERE DateCommande = ?
-            ORDER BY Client
+              AND Statut = 'Maman'
+            GROUP BY UPPER(TRIM(Client))
+            HAVING IFNULL(SUM(NombreBacs), 0) > 0
+            ORDER BY TRIM(Client)
             """,
             (target_date.strftime(DB_DATE_FORMAT),),
         )
@@ -1976,10 +3290,7 @@ class DatabaseHelper:
             SELECT
                 DateCommande,
                 TRIM(Client) AS Nom,
-                CASE
-                    WHEN COUNT(DISTINCT Statut) = 1 THEN MAX(Statut)
-                    ELSE 'Mixte'
-                END AS Statut,
+                'Maman' AS Statut,
                 IFNULL(SUM(NombreBacs), 0) AS NombreBacs,
                 IFNULL(SUM(MontantRecu), 0) AS MontantPaye,
                 IFNULL(SUM(
@@ -1999,6 +3310,7 @@ class DatabaseHelper:
                 ) AS NetAPayer
             FROM Commandes
             WHERE DateCommande = ?
+              AND Statut = 'Maman'
             GROUP BY DateCommande, UPPER(TRIM(Client))
             HAVING Commissions > 0
             ORDER BY Nom
@@ -2029,10 +3341,7 @@ class DatabaseHelper:
         row = cls._fetch_one(
             f"""
             SELECT
-                CASE
-                    WHEN COUNT(DISTINCT Statut) = 1 THEN MAX(Statut)
-                    ELSE 'Mixte'
-                END AS Statut,
+                'Maman' AS Statut,
                 IFNULL(SUM(NombreBacs), 0) AS NombreBacs,
                 IFNULL(SUM(MontantRecu), 0) AS MontantPaye,
                 IFNULL(SUM(
@@ -2067,7 +3376,8 @@ class DatabaseHelper:
                     ), 0) - IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0)
                 ) AS NetAPayer
             FROM Commandes
-            WHERE DateCommande = ? AND Client = ?
+            WHERE DateCommande = ? AND Client = ? AND Statut = 'Maman'
+            HAVING COUNT(*) > 0
             """,
             (target_date.strftime(DB_DATE_FORMAT), client),
         )
