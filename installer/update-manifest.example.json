@@ -1,6 +1,6 @@
 {
-  "version": "1.3.7",
-  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.7/BoulangerieLomotoSetup.exe",
-  "published_at": "2026-05-27",
-  "notes": "Correction 1.3.7 : connexion Internet automatique via une adresse publique du serveur central, avec session distante sécurisée."
+  "version": "1.3.8",
+  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.8/BoulangerieLomotoSetup.exe",
+  "published_at": "2026-05-28",
+  "notes": "Version 1.3.8 : retour au serveur local. Le serveur Internet est désactivé temporairement."
 }

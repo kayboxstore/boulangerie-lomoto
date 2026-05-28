@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,9 +20,7 @@ REMOTE_DISCOVERY_PORT = 8766
 REMOTE_DISCOVERY_TIMEOUT_SECONDS = 3.0
 REMOTE_REFRESH_INTERVAL_MS = 5000
 CONNECTION_CONFIG_FILENAME = "connection_settings.json"
-PUBLIC_SERVER_DIRECTORY_URL = (
-    "https://raw.githubusercontent.com/kayboxstore/boulangerie-lomoto-updates/main/server.json"
-)
+PUBLIC_SERVER_DIRECTORY_URL = os.environ.get("BOULANGERIE_PUBLIC_SERVER_DIRECTORY_URL", "").strip()
 PUBLIC_SERVER_DIRECTORY_TIMEOUT_SECONDS = 4
 DISCOVERY_APP_ID = "boulangerie-lomoto-sync"
 DISCOVERY_REQUEST_ACTION = "discover_server"
@@ -235,8 +234,21 @@ def fetch_public_server_directory(
     directory_url: str = PUBLIC_SERVER_DIRECTORY_URL,
     timeout_seconds: int = PUBLIC_SERVER_DIRECTORY_TIMEOUT_SECONDS,
 ) -> PublicServerDirectoryInfo:
+    if not str(directory_url or "").strip():
+        return PublicServerDirectoryInfo(
+            enabled=False,
+            required=False,
+            notes="Serveur Internet désactivé.",
+        )
+
+    target_url = directory_url
+    parsed_url = urlsplit(directory_url)
+    if parsed_url.scheme in {"http", "https"}:
+        separator = "&" if parsed_url.query else "?"
+        target_url = f"{directory_url}{separator}fresh={int(time.time())}"
+
     request = Request(
-        directory_url,
+        target_url,
         headers={
             "Accept": "application/json",
             "Cache-Control": "no-cache",
