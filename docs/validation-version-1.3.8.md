@@ -13,6 +13,7 @@ Le serveur Internet est désactivé temporairement. L'application ne récupère 
 - Désactivation du répertoire Internet par défaut.
 - Publication de `server.json` avec `enabled=false` et `required=false`.
 - Suppression effectuée du service Cloud Run de test.
+- Désactivation effectuée de Firebase Hosting pour la version web de test.
 - Maintien du mode connecté local avec le service Windows du serveur central.
 
 ## Test recommandé
