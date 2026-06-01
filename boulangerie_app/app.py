@@ -40,7 +40,7 @@ from .connected_server import (
     start_embedded_server,
     stop_embedded_server,
 )
-from .database import AuthenticatedUser, DatabaseHelper
+from .database import AUTO_BACKUP_PREFIX, AuthenticatedUser, DatabaseHelper
 from .excel_reports import create_daily_excel_report, create_monthly_excel_report, create_period_excel_report
 from .reports import (
     ReportGenerationError,
@@ -341,6 +341,33 @@ def format_file_size(value: int | float) -> str:
     if unit_index == 0:
         return f"{int(size)} {units[unit_index]}"
     return f"{size:.1f} {units[unit_index]}"
+
+
+def describe_latest_automatic_backup(data_dir: Path) -> str:
+    backup_dir = Path(data_dir) / "sauvegardes"
+    try:
+        backup_files = sorted(
+            backup_dir.glob(f"{AUTO_BACKUP_PREFIX}-*.db"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        backup_files = []
+
+    if not backup_files:
+        return "Sauvegarde automatique : en attente de la première sauvegarde quotidienne."
+
+    latest_backup = backup_files[0]
+    try:
+        stat = latest_backup.stat()
+    except OSError:
+        return "Sauvegarde automatique : dernière sauvegarde momentanément illisible."
+
+    modified_at = datetime.fromtimestamp(stat.st_mtime).strftime("%d/%m/%Y %H:%M")
+    return (
+        "Sauvegarde automatique : "
+        f"{latest_backup.name} | {modified_at} | {format_file_size(stat.st_size)}"
+    )
 
 
 def compact_multiline_text(value: Any) -> str:
@@ -1556,8 +1583,9 @@ class ConnectionSettingsDialog(tk.Toplevel):
         ttk.Label(
             service_frame,
             text=(
-                "Mode recommande pour le poste serveur : le service Windows demarre avec Windows "
-                "et reste actif meme si l'application est fermee."
+                "Mode recommandé pour le poste serveur : le service Windows démarre avec Windows "
+                "et reste actif même si l'application est fermée. Une sauvegarde automatique "
+                "est créée chaque jour dans le dossier central."
             ),
             wraplength=620,
             justify="center",
@@ -1684,10 +1712,11 @@ class ConnectionSettingsDialog(tk.Toplevel):
         addresses = "\n".join(build_local_server_addresses(host_settings.normalized_port()))
         token_line = "Jeton : defini" if host_settings.normalized_token() else "Jeton : aucun"
         data_line = f"Dossier central : {host_settings.normalized_data_dir()}"
+        backup_line = describe_latest_automatic_backup(host_settings.normalized_data_dir())
 
         if not service_status.installed:
             self.windows_service_status_var.set(
-                f"{service_status.message}\n{data_line}\nPort : {host_settings.normalized_port()}\n{token_line}"
+                f"{service_status.message}\n{data_line}\nPort : {host_settings.normalized_port()}\n{token_line}\n{backup_line}"
             )
             return
 
@@ -1696,6 +1725,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
             details.append(addresses)
         details.append(data_line)
         details.append(token_line)
+        details.append(backup_line)
         self.windows_service_status_var.set("\n".join(details))
 
     def use_local_server_url(self) -> None:

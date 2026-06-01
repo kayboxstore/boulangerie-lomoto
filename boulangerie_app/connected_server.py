@@ -35,6 +35,8 @@ class EmbeddedServerHandle:
     urls: list[str]
     discovery_thread: threading.Thread | None = None
     discovery_stop_event: threading.Event | None = None
+    automatic_backup_thread: threading.Thread | None = None
+    automatic_backup_stop_event: threading.Event | None = None
 
     @property
     def preferred_url(self) -> str:
@@ -45,10 +47,14 @@ class EmbeddedServerHandle:
     def stop(self) -> None:
         if self.discovery_stop_event is not None:
             self.discovery_stop_event.set()
+        if self.automatic_backup_stop_event is not None:
+            self.automatic_backup_stop_event.set()
         self.server.shutdown()
         self.server.server_close()
         if self.discovery_thread is not None:
             self.discovery_thread.join(timeout=5)
+        if self.automatic_backup_thread is not None:
+            self.automatic_backup_thread.join(timeout=5)
         self.thread.join(timeout=5)
 
 
@@ -56,6 +62,8 @@ _embedded_server_handle: EmbeddedServerHandle | None = None
 _web_sessions: dict[str, dict[str, Any]] = {}
 _web_sessions_lock = threading.Lock()
 _WEB_SESSION_TTL_SECONDS = 12 * 60 * 60
+_AUTO_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
+_AUTO_BACKUP_RETRY_INTERVAL_SECONDS = 5 * 60
 
 _READ_METHODS = {
     "get_stock_configuration",
@@ -465,6 +473,17 @@ def _run_discovery_listener(
         return
 
 
+def _run_automatic_backup_loop(stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            DatabaseHelper = _database_helper()
+            DatabaseHelper.invoke_local_method("create_automatic_backup_if_needed")
+            wait_seconds = _AUTO_BACKUP_CHECK_INTERVAL_SECONDS
+        except Exception:
+            wait_seconds = _AUTO_BACKUP_RETRY_INTERVAL_SECONDS
+        stop_event.wait(wait_seconds)
+
+
 def is_embedded_server_running() -> bool:
     return _embedded_server_handle is not None
 
@@ -504,6 +523,15 @@ def start_embedded_server(
     )
     discovery_thread.start()
 
+    automatic_backup_stop_event = threading.Event()
+    automatic_backup_thread = threading.Thread(
+        target=_run_automatic_backup_loop,
+        args=(automatic_backup_stop_event,),
+        name="boulangerie-sync-auto-backup",
+        daemon=True,
+    )
+    automatic_backup_thread.start()
+
     _embedded_server_handle = EmbeddedServerHandle(
         server=server,
         thread=thread,
@@ -513,6 +541,8 @@ def start_embedded_server(
         urls=list_local_server_urls(port),
         discovery_thread=discovery_thread,
         discovery_stop_event=discovery_stop_event,
+        automatic_backup_thread=automatic_backup_thread,
+        automatic_backup_stop_event=automatic_backup_stop_event,
     )
     return _embedded_server_handle
 

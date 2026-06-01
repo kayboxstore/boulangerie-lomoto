@@ -42,6 +42,9 @@ DEFAULT_ADMIN_FULL_NAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_FULL_NAME", 
 DEFAULT_ADMIN_USERNAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_USERNAME", "a.kayembe")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_PASSWORD", "010203")
 FORCED_DATABASE_RESET_VERSION = "1.3.0"
+AUTO_BACKUP_PREFIX = "sauvegarde-automatique"
+AUTO_BACKUP_RETENTION_DAYS = 30
+AUTO_BACKUP_MIN_KEEP = 7
 OUTSTANDING_DEBT_SQL = (
     "CASE WHEN IFNULL(Dette, 0) - IFNULL(DettePayee, 0) > 0 "
     "THEN IFNULL(Dette, 0) - IFNULL(DettePayee, 0) ELSE 0 END"
@@ -376,6 +379,64 @@ class DatabaseHelper:
                 source_connection.close()
 
         return target_path
+
+    @classmethod
+    def prune_automatic_backups(
+        cls,
+        retention_days: int = AUTO_BACKUP_RETENTION_DAYS,
+        min_keep: int = AUTO_BACKUP_MIN_KEEP,
+    ) -> None:
+        cls.backups_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            backup_files = sorted(
+                cls.backups_dir.glob(f"{AUTO_BACKUP_PREFIX}-*.db"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return
+
+        cutoff = datetime.now() - timedelta(days=max(int(retention_days), 1))
+        for index, backup_path in enumerate(backup_files):
+            if index < max(int(min_keep), 0):
+                continue
+            try:
+                modified_at = datetime.fromtimestamp(backup_path.stat().st_mtime)
+            except OSError:
+                continue
+            if modified_at >= cutoff:
+                continue
+            try:
+                backup_path.unlink()
+            except OSError:
+                continue
+
+    @classmethod
+    def create_automatic_backup_if_needed(cls, force: bool = False) -> Path | None:
+        if cls._should_use_remote():
+            raise RuntimeError(
+                "Les sauvegardes automatiques doivent être exécutées sur le poste serveur central."
+            )
+
+        cls.initialize_database()
+        cls.backups_dir.mkdir(parents=True, exist_ok=True)
+        today = date.today()
+        if not force:
+            try:
+                backup_files = list(cls.backups_dir.glob(f"{AUTO_BACKUP_PREFIX}-*.db"))
+            except OSError:
+                backup_files = []
+            for backup_path in backup_files:
+                try:
+                    if datetime.fromtimestamp(backup_path.stat().st_mtime).date() == today:
+                        cls.prune_automatic_backups()
+                        return None
+                except OSError:
+                    continue
+
+        backup_path = cls.backup_database(cls.build_backup_path(AUTO_BACKUP_PREFIX))
+        cls.prune_automatic_backups()
+        return backup_path
 
     @classmethod
     def restore_database(cls, source_path: str | Path) -> tuple[Path | None, Path]:

@@ -2,7 +2,7 @@
   #define MyAppName "Boulangerie Lomoto"
 #endif
 #ifndef MyAppVersion
-  #define MyAppVersion "1.3.8"
+  #define MyAppVersion "1.3.9"
 #endif
 #ifndef MyAppPublisher
   #define MyAppPublisher "Kay Box Store"
