@@ -160,6 +160,10 @@ def _summarize_production_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
     return summary
 
 
+def _payroll_total(payrolls: list[dict[str, Any]], key: str) -> float:
+    return sum(float(row.get(key, 0) or 0) for row in payrolls)
+
+
 def _production_field_rows(summary: dict[str, Any]) -> list[tuple[str, Any]]:
     return [
         ("Bacs commandés", float(summary.get("NombreBacsCommandes", 0) or 0)),
@@ -324,9 +328,9 @@ def _apply_cash_emphasis(sheet: Worksheet, row_index: int, label: str, end_colum
         "Total des entrées",
     }:
         font = CASH_BOLD_FONT
-    elif label in {"Dépenses", "Dépenses du mois", "Dépenses sur la période"}:
+    elif label in {"Dépenses", "Dépenses du mois", "Dépenses sur la période", "Paies travailleurs", "Total des sorties"}:
         font = CASH_GREEN_FONT
-    elif label in {"Solde du jour", "Solde du mois", "Solde sur la période"}:
+    elif label in {"Solde du jour", "Solde du mois", "Solde sur la période", "Solde après paies"}:
         font = CASH_RED_FONT
     else:
         return
@@ -357,10 +361,15 @@ def _build_report_context(
     accumulated_debts = DatabaseHelper.get_accumulated_debt_totals_for_date(target_date)
     commissions = DatabaseHelper.list_commissions_by_date(target_date)
     production_summary = DatabaseHelper.get_production_summary_for_date(target_date)
+    payrolls = DatabaseHelper.list_payrolls(start_date=target_date, end_date=target_date)
+    payroll_summary = DatabaseHelper.get_workers_payroll_summary(start_date=target_date, end_date=target_date)
     expense_details = _safe_text(cash.get("DepensesEffectuees")).strip()
     paid_debts_details = _safe_text(cash.get("DettesPayeesDetails")).strip()
     accumulated_debts_before = float(accumulated_debts.get("DettesAccumuleesAvantPaiement", 0) or 0)
     paid_debts_today = float(cash.get("DettesPayeesAujourdHui", 0) or 0)
+    total_payroll_net = _payroll_total(payrolls, "MontantNet")
+    total_entries = float(orders_summary.get("MontantRecu", 0) or 0) + paid_debts_today
+    balance = total_entries - float(cash.get("MontantTotalDepenses", 0) or 0)
 
     return {
         "target_date": target_date,
@@ -379,6 +388,8 @@ def _build_report_context(
         "orders_summary": orders_summary,
         "cash": cash,
         "commissions": commissions,
+        "payrolls": payrolls,
+        "payroll_summary": payroll_summary,
         "production_summary": production_summary,
         "expense_items": split_structured_lines(expense_details),
         "paid_debts_details": paid_debts_details,
@@ -393,13 +404,10 @@ def _build_report_context(
         "accumulated_debts_remaining": max(accumulated_debts_before - paid_debts_today, 0.0),
         "total_commissions": sum(float(row.get("Commissions", 0) or 0) for row in commissions),
         "total_net_commissions": sum(float(row.get("NetAPayer", 0) or 0) for row in commissions),
-        "total_entries": float(orders_summary.get("MontantRecu", 0) or 0)
-        + float(cash.get("DettesPayeesAujourdHui", 0) or 0),
-        "balance": (
-            float(orders_summary.get("MontantRecu", 0) or 0)
-            + float(cash.get("DettesPayeesAujourdHui", 0) or 0)
-            - float(cash.get("MontantTotalDepenses", 0) or 0)
-        ),
+        "total_payroll_net": total_payroll_net,
+        "total_entries": total_entries,
+        "balance": balance,
+        "balance_after_payrolls": balance - total_payroll_net,
     }
 
 
@@ -473,6 +481,16 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
             [
                 ("Commissions", context["total_commissions"], "monnaie"),
                 ("Net commissions", context["total_net_commissions"], "monnaie"),
+            ]
+        )
+    if "workers" in context["allowed_sections"]:
+        payroll_summary = context["payroll_summary"]
+        rows.extend(
+            [
+                ("Travailleurs actifs", int(payroll_summary.get("TravailleursActifs", 0) or 0), "nombre"),
+                ("Masse salariale mensuelle", float(payroll_summary.get("MasseSalarialeMensuelle", 0) or 0), "monnaie"),
+                ("Paies travailleurs", context["total_payroll_net"], "monnaie"),
+                ("Solde après paies", context["balance_after_payrolls"], "monnaie"),
             ]
         )
 
@@ -718,6 +736,15 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         ("Dettes accumulées restantes", context["accumulated_debts_remaining"]),
         ("Total des entrées", context["total_entries"]),
         ("Dépenses", context["total_expenses"]),
+        *(
+            [
+                ("Paies travailleurs", context["total_payroll_net"]),
+                ("Total des sorties", context["total_expenses"] + context["total_payroll_net"]),
+                ("Solde après paies", context["balance_after_payrolls"]),
+            ]
+            if "workers" in context["allowed_sections"]
+            else []
+        ),
         ("Solde du jour", context["balance"]),
     ]
     current_row = 4
@@ -790,6 +817,12 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     sheet.cell(current_row, 1, "NB")
     _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
     current_row += 1
+    payroll_sentence = ""
+    if "workers" in context["allowed_sections"]:
+        payroll_sentence = (
+            f" Les paies des travailleurs représentent {_format_fc(context['total_payroll_net'])}; "
+            f"le solde réel après paies est de {_format_fc(context['balance_after_payrolls'])}."
+        )
     recap_text = (
         f"Les entrées du jour correspondent au montant reçu ({context['total_received']:,.0f} FC) "
         f"additionné aux dettes payées aujourd'hui ({context['paid_debts_today']:,.0f} FC), "
@@ -797,6 +830,7 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         f"Les sorties du jour correspondent aux dépenses enregistrées, soit {context['total_expenses']:,.0f} FC. "
         f"Le solde du jour ressort donc à {context['balance']:,.0f} FC. "
         f"Les dettes accumulées restantes sont de {context['accumulated_debts_remaining']:,.0f} FC."
+        f"{payroll_sentence}"
     ).replace(",", " ")
     sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 2, end_column=5)
     recap_cell = sheet.cell(current_row, 1, recap_text)
@@ -865,6 +899,113 @@ def _build_commissions_sheet(workbook: Workbook, context: dict[str, Any]) -> Non
     _autofit_columns(sheet)
 
 
+def _build_payroll_sheet(
+    workbook: Workbook,
+    context: dict[str, Any],
+    title: str,
+    table_name: str,
+    *,
+    include_date: bool = True,
+) -> None:
+    sheet = workbook.create_sheet("Travailleurs et paies")
+    sheet.freeze_panes = "A4"
+    _add_sheet_watermark(sheet, "G5", 220, 220)
+
+    sheet["A1"] = title
+    _apply_cell_style(sheet["A1"], fill=TITLE_FILL, alignment=Alignment(horizontal="left"), font=TITLE_FONT)
+    sheet["A2"] = f"Période : {context['period_label']}"
+    _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
+
+    payroll_summary = context["payroll_summary"]
+    summary_rows = [
+        ("Travailleurs enregistrés", int(payroll_summary.get("NombreTravailleurs", 0) or 0), "nombre"),
+        ("Travailleurs actifs", int(payroll_summary.get("TravailleursActifs", 0) or 0), "nombre"),
+        ("Masse salariale mensuelle", float(payroll_summary.get("MasseSalarialeMensuelle", 0) or 0), "monnaie"),
+        ("Paies enregistrées", len(context["payrolls"]), "nombre"),
+        ("Montant brut", _payroll_total(context["payrolls"], "MontantBrut"), "monnaie"),
+        ("Primes", _payroll_total(context["payrolls"], "Prime"), "monnaie"),
+        ("Avances", _payroll_total(context["payrolls"], "Avance"), "monnaie"),
+        ("Retenues", _payroll_total(context["payrolls"], "Retenue"), "monnaie"),
+        ("Net payé", context["total_payroll_net"], "monnaie"),
+    ]
+    sheet.cell(4, 1, "Indicateur")
+    sheet.cell(4, 2, "Valeur")
+    for col in range(1, 3):
+        _apply_cell_style(sheet.cell(4, col), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+    for row_index, (label, value, kind) in enumerate(summary_rows, start=5):
+        _apply_cell_style(sheet.cell(row_index, 1, label), alignment=Alignment(horizontal="left"))
+        value_cell = sheet.cell(row_index, 2, value)
+        _apply_cell_style(value_cell, alignment=Alignment(horizontal="left"))
+        if kind == "monnaie":
+            value_cell.number_format = MONEY_FORMAT
+        _apply_cash_emphasis(sheet, row_index, label, end_column=2)
+    _add_table(sheet, 4, 4 + len(summary_rows), 2, f"{table_name}Resume")
+
+    current_row = 4 + len(summary_rows) + 3
+    sheet.cell(current_row, 1, "Détail des paies")
+    _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
+    current_row += 1
+    headers = ["Travailleur", "Fonction", "Période", "Brut", "Prime", "Avance", "Retenue", "Net", "Mode", "Statut"]
+    if include_date:
+        headers.insert(0, "Date")
+    for col_index, header in enumerate(headers, start=1):
+        _apply_cell_style(sheet.cell(current_row, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
+    detail_start = current_row
+
+    if context["payrolls"]:
+        for item in context["payrolls"]:
+            current_row += 1
+            values: list[Any] = []
+            if include_date:
+                row_date = _parse_row_date(item.get("DatePaie"))
+                values.append(_format_date(row_date) if row_date is not None else _safe_text(item.get("DatePaie")))
+            values.extend(
+                [
+                    _safe_text(item.get("NomComplet")),
+                    _safe_text(item.get("Fonction")),
+                    _safe_text(item.get("Periode")),
+                    float(item.get("MontantBrut", 0) or 0),
+                    float(item.get("Prime", 0) or 0),
+                    float(item.get("Avance", 0) or 0),
+                    float(item.get("Retenue", 0) or 0),
+                    float(item.get("MontantNet", 0) or 0),
+                    _safe_text(item.get("ModePaiement")),
+                    _safe_text(item.get("Statut")),
+                ]
+            )
+            for col_index, value in enumerate(values, start=1):
+                _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
+            first_money_col = 5 if include_date else 4
+            for col in range(first_money_col, first_money_col + 5):
+                sheet.cell(current_row, col).number_format = MONEY_FORMAT
+
+        totals_row = current_row + 1
+        sheet.cell(totals_row, 1, "Totaux")
+        first_money_col = 5 if include_date else 4
+        for offset in range(5):
+            col_index = first_money_col + offset
+            col_letter = get_column_letter(col_index)
+            sheet.cell(totals_row, col_index, f"=SUM({col_letter}{detail_start + 1}:{col_letter}{current_row})")
+            sheet.cell(totals_row, col_index).number_format = MONEY_FORMAT
+        for col_index in range(1, len(headers) + 1):
+            _apply_cell_style(
+                sheet.cell(totals_row, col_index),
+                fill=SECTION_FILL,
+                alignment=Alignment(horizontal="left"),
+                font=SECTION_FONT if col_index == 1 else BODY_FONT,
+            )
+        _add_table(sheet, detail_start, current_row, len(headers), table_name)
+    else:
+        current_row += 1
+        _apply_cell_style(
+            sheet.cell(current_row, 1, "Aucune paie de travailleur enregistrée pour cette période."),
+            alignment=Alignment(horizontal="left"),
+            font=NOTE_FONT,
+        )
+
+    _autofit_columns(sheet, min_width=13, max_width=32)
+
+
 def _build_monthly_report_context(
     target_date: date,
     role: str,
@@ -893,6 +1034,8 @@ def _build_monthly_report_context(
     cash_days = DatabaseHelper.list_cash_balance_by_period(first_day, last_day)
     commissions = _filter_rows_for_month(DatabaseHelper.list_commissions(), "DateCommission", target_date)
     productions = _filter_rows_for_month(DatabaseHelper.list_productions(), "DateProduction", target_date)
+    payrolls = DatabaseHelper.list_payrolls(start_date=first_day, end_date=last_day)
+    payroll_summary = DatabaseHelper.get_workers_payroll_summary(start_date=first_day, end_date=last_day)
     production_summary = _summarize_production_rows(productions)
 
     expense_items_by_day: list[tuple[str, str]] = []
@@ -915,6 +1058,7 @@ def _build_monthly_report_context(
     balance = total_entries - total_expenses
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
+    total_payroll_net = _payroll_total(payrolls, "MontantNet")
     remaining_accumulated_debts = float(cash_days[-1].get("DettesAccumuleesRestantes", 0) or 0) if cash_days else 0.0
 
     return {
@@ -936,6 +1080,8 @@ def _build_monthly_report_context(
         "orders": orders,
         "cash_days": cash_days,
         "commissions": commissions,
+        "payrolls": payrolls,
+        "payroll_summary": payroll_summary,
         "productions": productions,
         "production_summary": production_summary,
         "expense_items_by_day": expense_items_by_day,
@@ -951,6 +1097,8 @@ def _build_monthly_report_context(
         "remaining_accumulated_debts": remaining_accumulated_debts,
         "total_commissions": total_commissions,
         "total_net_commissions": total_net_commissions,
+        "total_payroll_net": total_payroll_net,
+        "balance_after_payrolls": balance - total_payroll_net,
         "total_farine": sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits),
         "total_levure": sum(float(row.get("PaquetsUtilises", 0) or 0) for row in stock_exits),
         "total_sel": sum(float(row.get("KgSelUtilises", 0) or 0) for row in stock_exits),
@@ -995,6 +1143,8 @@ def _build_period_report_context(
     cash_days = DatabaseHelper.list_cash_balance_by_period(start_date, end_date)
     commissions = _filter_rows_for_period(DatabaseHelper.list_commissions(), "DateCommission", start_date, end_date)
     productions = _filter_rows_for_period(DatabaseHelper.list_productions(), "DateProduction", start_date, end_date)
+    payrolls = DatabaseHelper.list_payrolls(start_date=start_date, end_date=end_date)
+    payroll_summary = DatabaseHelper.get_workers_payroll_summary(start_date=start_date, end_date=end_date)
     production_summary = _summarize_production_rows(productions)
 
     expense_items_by_day: list[tuple[str, str]] = []
@@ -1017,6 +1167,7 @@ def _build_period_report_context(
     balance = total_entries - total_expenses
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
+    total_payroll_net = _payroll_total(payrolls, "MontantNet")
     remaining_accumulated_debts = float(cash_days[-1].get("DettesAccumuleesRestantes", 0) or 0) if cash_days else 0.0
 
     return {
@@ -1036,6 +1187,8 @@ def _build_period_report_context(
         "orders": orders,
         "cash_days": cash_days,
         "commissions": commissions,
+        "payrolls": payrolls,
+        "payroll_summary": payroll_summary,
         "productions": productions,
         "production_summary": production_summary,
         "expense_items_by_day": expense_items_by_day,
@@ -1051,6 +1204,8 @@ def _build_period_report_context(
         "remaining_accumulated_debts": remaining_accumulated_debts,
         "total_commissions": total_commissions,
         "total_net_commissions": total_net_commissions,
+        "total_payroll_net": total_payroll_net,
+        "balance_after_payrolls": balance - total_payroll_net,
         "total_farine": sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits),
         "total_levure": sum(float(row.get("PaquetsUtilises", 0) or 0) for row in stock_exits),
         "total_sel": sum(float(row.get("KgSelUtilises", 0) or 0) for row in stock_exits),
@@ -1127,6 +1282,16 @@ def _build_monthly_summary_sheet(workbook: Workbook, context: dict[str, Any]) ->
             [
                 ("Commissions", context["total_commissions"], "monnaie"),
                 ("Net commissions", context["total_net_commissions"], "monnaie"),
+            ]
+        )
+    if "workers" in context["allowed_sections"]:
+        payroll_summary = context["payroll_summary"]
+        rows.extend(
+            [
+                ("Travailleurs actifs", int(payroll_summary.get("TravailleursActifs", 0) or 0), "nombre"),
+                ("Masse salariale mensuelle", float(payroll_summary.get("MasseSalarialeMensuelle", 0) or 0), "monnaie"),
+                ("Paies travailleurs", context["total_payroll_net"], "monnaie"),
+                ("Solde après paies", context["balance_after_payrolls"], "monnaie"),
             ]
         )
 
@@ -1376,6 +1541,15 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
         ("Dettes accumulées restantes", context["remaining_accumulated_debts"]),
         ("Total des entrées", context["total_entries"]),
         ("Dépenses du mois", context["total_expenses"]),
+        *(
+            [
+                ("Paies travailleurs", context["total_payroll_net"]),
+                ("Total des sorties", context["total_expenses"] + context["total_payroll_net"]),
+                ("Solde après paies", context["balance_after_payrolls"]),
+            ]
+            if "workers" in context["allowed_sections"]
+            else []
+        ),
         ("Solde du mois", context["balance"]),
     ]
     current_row = 4
@@ -1457,12 +1631,19 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
     sheet.cell(current_row, 1, "NB")
     _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
     current_row += 1
+    payroll_sentence = ""
+    if "workers" in context["allowed_sections"]:
+        payroll_sentence = (
+            f" Les paies des travailleurs représentent {_format_fc(context['total_payroll_net'])}; "
+            f"le solde réel après paies est de {_format_fc(context['balance_after_payrolls'])}."
+        )
     recap_text = (
         f"Pour le mois {context['month_label']}, les entrées correspondent au montant reçu ({_format_fc(context['total_received'])}) "
         f"additionné aux dettes payées ({_format_fc(context['paid_debts_month'])}), soit un total des entrées de {_format_fc(context['total_entries'])}. "
         f"Les sorties correspondent aux dépenses du mois, soit {_format_fc(context['total_expenses'])}. "
         f"Le solde mensuel ressort donc à {_format_fc(context['balance'])}. "
         f"Les dettes accumulées restantes à la fin du mois sont de {_format_fc(context['remaining_accumulated_debts'])}."
+        f"{payroll_sentence}"
     )
     sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 2, end_column=6)
     _apply_cell_style(sheet.cell(current_row, 1, recap_text), alignment=Alignment(horizontal="left", vertical="top", wrap_text=True))
@@ -1588,6 +1769,16 @@ def _build_period_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> 
             [
                 ("Commissions", context["total_commissions"], "monnaie"),
                 ("Net commissions", context["total_net_commissions"], "monnaie"),
+            ]
+        )
+    if "workers" in context["allowed_sections"]:
+        payroll_summary = context["payroll_summary"]
+        rows.extend(
+            [
+                ("Travailleurs actifs", int(payroll_summary.get("TravailleursActifs", 0) or 0), "nombre"),
+                ("Masse salariale mensuelle", float(payroll_summary.get("MasseSalarialeMensuelle", 0) or 0), "monnaie"),
+                ("Paies travailleurs", context["total_payroll_net"], "monnaie"),
+                ("Solde après paies", context["balance_after_payrolls"], "monnaie"),
             ]
         )
 
@@ -1770,6 +1961,15 @@ def _build_period_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> Non
         ("Dettes accumulées restantes", context["remaining_accumulated_debts"]),
         ("Total des entrées", context["total_entries"]),
         ("Dépenses sur la période", context["total_expenses"]),
+        *(
+            [
+                ("Paies travailleurs", context["total_payroll_net"]),
+                ("Total des sorties", context["total_expenses"] + context["total_payroll_net"]),
+                ("Solde après paies", context["balance_after_payrolls"]),
+            ]
+            if "workers" in context["allowed_sections"]
+            else []
+        ),
         ("Solde sur la période", context["balance"]),
     ]
     current_row = 4
@@ -1851,12 +2051,19 @@ def _build_period_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> Non
     sheet.cell(current_row, 1, "NB")
     _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
     current_row += 1
+    payroll_sentence = ""
+    if "workers" in context["allowed_sections"]:
+        payroll_sentence = (
+            f" Les paies des travailleurs représentent {_format_fc(context['total_payroll_net'])}; "
+            f"le solde réel après paies est de {_format_fc(context['balance_after_payrolls'])}."
+        )
     recap_text = (
         f"Pour la période du {_format_date(context['start_date'])} au {_format_date(context['end_date'])}, les entrées correspondent au montant reçu "
         f"({_format_fc(context['total_received'])}) additionné aux dettes payées ({_format_fc(context['paid_debts_period'])}), soit un total des entrées "
         f"de {_format_fc(context['total_entries'])}. Les sorties correspondent aux dépenses enregistrées sur la période, soit "
         f"{_format_fc(context['total_expenses'])}. Le solde ressort donc à {_format_fc(context['balance'])}. "
         f"Les dettes accumulées restantes à la fin de la période sont de {_format_fc(context['remaining_accumulated_debts'])}."
+        f"{payroll_sentence}"
     )
     sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 2, end_column=6)
     _apply_cell_style(sheet.cell(current_row, 1, recap_text), alignment=Alignment(horizontal="left", vertical="top", wrap_text=True))
@@ -1946,6 +2153,8 @@ def create_daily_excel_report(
             _build_cash_sheet(workbook, context)
         if "commissions" in context["allowed_sections"]:
             _build_commissions_sheet(workbook, context)
+        if "workers" in context["allowed_sections"]:
+            _build_payroll_sheet(workbook, context, "Travailleurs et paies du jour", "PaiesJour", include_date=False)
         workbook.save(report_path)
     except Exception as exc:
         raise ReportGenerationError("Impossible de générer le rapport Excel.") from exc
@@ -1989,6 +2198,8 @@ def create_monthly_excel_report(
             _build_monthly_cash_sheet(workbook, context)
         if "commissions" in context["allowed_sections"]:
             _build_monthly_commissions_sheet(workbook, context)
+        if "workers" in context["allowed_sections"]:
+            _build_payroll_sheet(workbook, context, "Travailleurs et paies du mois", "PaiesMensuelles")
         workbook.save(report_path)
     except Exception as exc:
         raise ReportGenerationError("Impossible de générer le rapport Excel mensuel.") from exc
@@ -2035,6 +2246,8 @@ def create_period_excel_report(
             _build_period_cash_sheet(workbook, context)
         if "commissions" in context["allowed_sections"]:
             _build_period_commissions_sheet(workbook, context)
+        if "workers" in context["allowed_sections"]:
+            _build_payroll_sheet(workbook, context, "Travailleurs et paies sur la période", "PaiesPeriode")
         workbook.save(report_path)
     except Exception as exc:
         raise ReportGenerationError("Impossible de générer le rapport Excel sur la période demandée.") from exc

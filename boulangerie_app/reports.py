@@ -32,7 +32,7 @@ from .status_labels import is_depositary_status, normalize_status_label
 from .version import APP_NAME
 
 REPORT_SECTIONS_BY_ROLE: dict[str, tuple[str, ...]] = {
-    "Admin": ("stock", "production", "orders", "cash", "commissions"),
+    "Admin": ("stock", "production", "orders", "cash", "commissions", "workers"),
     "Caissier": ("orders", "cash", "commissions"),
     "Gestionnaire de stock": ("stock",),
     "Gestionnaire des commandes": ("production", "orders", "commissions"),
@@ -46,7 +46,7 @@ REPORT_SCOPE_LABELS = {
 }
 
 REPORT_SCOPE_DESCRIPTIONS = {
-    "Admin": "Toutes les sections sont incluses dans ce rapport.",
+    "Admin": "Toutes les sections sont incluses dans ce rapport, y compris les travailleurs et les paies.",
     "Caissier": "Ce rapport contient uniquement les commandes, les commissions et la caisse.",
     "Gestionnaire de stock": "Ce rapport contient uniquement les informations de stock.",
     "Gestionnaire des commandes": "Ce rapport contient la production, les commandes et les commissions.",
@@ -266,13 +266,38 @@ def _cash_highlight_table_styles(rows: list[list[Any]]) -> list[tuple[Any, ...]]
             "Total des entrées",
         }:
             styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
-        elif label in {"Dépenses", "Dépenses du mois", "Dépenses sur la période"}:
+        elif label in {
+            "Dépenses",
+            "Dépenses du mois",
+            "Dépenses sur la période",
+            "Paies travailleurs",
+            "Total des sorties",
+        }:
             styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
             styles.append(("TEXTCOLOR", (0, row_index), (-1, row_index), colors.HexColor("#1E7D32")))
-        elif label in {"Solde du jour", "Solde du mois", "Solde sur la période"}:
+        elif label in {"Solde du jour", "Solde du mois", "Solde sur la période", "Solde après paies"}:
             styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
             styles.append(("TEXTCOLOR", (0, row_index), (-1, row_index), colors.HexColor(REPORT_RED)))
     return styles
+
+
+def _payroll_total(payrolls: list[dict[str, Any]], key: str) -> float:
+    return sum(float(row.get(key, 0) or 0) for row in payrolls)
+
+
+def _payroll_summary_rows(summary: dict[str, Any], payrolls: list[dict[str, Any]]) -> list[list[Any]]:
+    return [
+        ["Indicateur", "Valeur"],
+        ["Travailleurs enregistrés", str(int(summary.get("NombreTravailleurs", 0) or 0))],
+        ["Travailleurs actifs", str(int(summary.get("TravailleursActifs", 0) or 0))],
+        ["Masse salariale mensuelle", _format_fc(float(summary.get("MasseSalarialeMensuelle", 0) or 0))],
+        ["Paies enregistrées", str(len(payrolls))],
+        ["Montant brut", _format_fc(_payroll_total(payrolls, "MontantBrut"))],
+        ["Primes", _format_fc(_payroll_total(payrolls, "Prime"))],
+        ["Avances", _format_fc(_payroll_total(payrolls, "Avance"))],
+        ["Retenues", _format_fc(_payroll_total(payrolls, "Retenue"))],
+        ["Net payé", _format_fc(_payroll_total(payrolls, "MontantNet"))],
+    ]
 
 
 def _build_styles() -> dict[str, ParagraphStyle]:
@@ -529,6 +554,61 @@ def _order_table_flowables(
     return blocks
 
 
+def _payroll_table_rows(payrolls: list[dict[str, Any]], include_date: bool) -> list[list[Any]]:
+    headers = ["Travailleur", "Fonction", "Période", "Brut", "Prime", "Avance", "Retenue", "Net", "Statut"]
+    if include_date:
+        headers.insert(0, "Date")
+    table_rows: list[list[Any]] = [headers]
+
+    for row in payrolls:
+        values: list[Any] = []
+        if include_date:
+            row_date = _parse_row_date(row.get("DatePaie"))
+            values.append(_format_date(row_date) if row_date is not None else _safe_text(row.get("DatePaie")))
+        values.extend(
+            [
+                _safe_text(row.get("NomComplet")),
+                _safe_text(row.get("Fonction")),
+                _safe_text(row.get("Periode")),
+                _format_fc(float(row.get("MontantBrut", 0) or 0)),
+                _format_fc(float(row.get("Prime", 0) or 0)),
+                _format_fc(float(row.get("Avance", 0) or 0)),
+                _format_fc(float(row.get("Retenue", 0) or 0)),
+                _format_fc(float(row.get("MontantNet", 0) or 0)),
+                _safe_text(row.get("Statut")),
+            ]
+        )
+        table_rows.append(values)
+    return table_rows
+
+
+def _payroll_section_flowables(
+    title: str,
+    payrolls: list[dict[str, Any]],
+    payroll_summary: dict[str, Any],
+    styles: dict[str, ParagraphStyle],
+    *,
+    include_date: bool,
+    empty_message: str,
+) -> list[Any]:
+    elements: list[Any] = [
+        _paragraph(title, styles["section"]),
+        _make_table(_payroll_summary_rows(payroll_summary, payrolls), [72 * mm, 88 * mm]),
+        Spacer(1, 4 * mm),
+        _paragraph("Détail des paies", styles["subsection"]),
+    ]
+    if payrolls:
+        widths = (
+            [16 * mm, 28 * mm, 18 * mm, 16 * mm, 15 * mm, 15 * mm, 15 * mm, 15 * mm, 20 * mm, 14 * mm]
+            if include_date
+            else [32 * mm, 22 * mm, 17 * mm, 18 * mm, 15 * mm, 15 * mm, 15 * mm, 20 * mm, 14 * mm]
+        )
+        elements.append(_make_table(_payroll_table_rows(payrolls, include_date), widths))
+    else:
+        elements.append(_paragraph(empty_message, styles["body"]))
+    return elements
+
+
 def _safe_text(value: Any) -> str:
     return "" if value is None else str(value)
 
@@ -597,6 +677,8 @@ def create_daily_pdf_report(
     cash = DatabaseHelper.get_cash_for_date(target_date)
     commissions = DatabaseHelper.list_commissions_by_date(target_date)
     production_summary = DatabaseHelper.get_production_summary_for_date(target_date)
+    payrolls = DatabaseHelper.list_payrolls(start_date=target_date, end_date=target_date)
+    payroll_summary = DatabaseHelper.get_workers_payroll_summary(start_date=target_date, end_date=target_date)
 
     total_expected = float(orders_summary.get("MontantAttendu", 0) or 0)
     total_received = float(orders_summary.get("MontantRecu", 0) or 0)
@@ -612,7 +694,9 @@ def create_daily_pdf_report(
     total_entries = total_received + paid_debts_today
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
+    total_payroll_net = _payroll_total(payrolls, "MontantNet")
     balance = total_entries - total_expenses
+    balance_after_payrolls = balance - total_payroll_net
 
     styles = _build_styles()
     doc = SimpleDocTemplate(
@@ -683,6 +767,14 @@ def create_daily_pdf_report(
             [
                 ["Commissions", _format_fc(total_commissions)],
                 ["Net commissions", _format_fc(total_net_commissions)],
+            ]
+        )
+    if "workers" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Travailleurs actifs", str(int(payroll_summary.get("TravailleursActifs", 0) or 0))],
+                ["Paies travailleurs", _format_fc(total_payroll_net)],
+                ["Solde après paies", _format_fc(balance_after_payrolls)],
             ]
         )
     elements.append(_make_table(overview_rows, [72 * mm, 88 * mm], extra_styles=_cash_highlight_table_styles(overview_rows)))
@@ -780,6 +872,15 @@ def create_daily_pdf_report(
             ["Dettes accumulées restantes", _format_fc(accumulated_debts_remaining)],
             ["Total des entrées", _format_fc(total_entries)],
             ["Dépenses", _format_fc(total_expenses)],
+            *(
+                [
+                    ["Paies travailleurs", _format_fc(total_payroll_net)],
+                    ["Total des sorties", _format_fc(total_expenses + total_payroll_net)],
+                    ["Solde après paies", _format_fc(balance_after_payrolls)],
+                ]
+                if "workers" in allowed_sections
+                else []
+            ),
             ["Solde du jour", _format_fc(balance)],
         ]
         cash_table = _make_table(cash_rows, [72 * mm, 88 * mm], extra_styles=_cash_highlight_table_styles(cash_rows))
@@ -837,15 +938,33 @@ def create_daily_pdf_report(
             commission_section.append(_paragraph("Aucune commission enregistrée pour cette date.", styles["body"]))
         elements.append(KeepTogether(commission_section))
 
+    if "workers" in allowed_sections:
+        elements.extend(
+            _payroll_section_flowables(
+                "Travailleurs et paies",
+                payrolls,
+                payroll_summary,
+                styles,
+                include_date=False,
+                empty_message="Aucune paie de travailleur enregistrée pour cette date.",
+            )
+        )
+
     elements.append(Spacer(1, 6 * mm))
     elements.append(_paragraph("NB", styles["section"]))
     if "cash" in allowed_sections:
+        payroll_sentence = ""
+        if "workers" in allowed_sections:
+            payroll_sentence = (
+                f" Les paies des travailleurs représentent {_bold_markup(_format_fc(total_payroll_net))}; "
+                f"le solde réel après ces charges salariales est donc {_bold_markup(_format_fc(balance_after_payrolls))}."
+            )
         recap_text = (
             f"Les entrées du jour correspondent au montant reçu ({_bold_markup(_format_fc(total_received))}) "
             f"additionné aux dettes payées aujourd'hui ({_bold_markup(_format_fc(paid_debts_today))}), "
             f"soit un total des entrées de {_bold_markup(_format_fc(total_entries))}. "
             f"Les sorties du jour correspondent aux dépenses enregistrées, soit {_bold_markup(_format_fc(total_expenses))}. "
-            f"Le solde du jour ressort donc à {_bold_markup(_format_fc(balance))}."
+            f"Le solde du jour ressort donc à {_bold_markup(_format_fc(balance))}.{payroll_sentence}"
         )
         elements.append(_rich_paragraph(recap_text, styles["body"]))
     else:
@@ -905,6 +1024,8 @@ def create_monthly_pdf_report(
     cash_days = _filter_rows_for_month(DatabaseHelper.list_cash_days(), "DateCaisse", target_date)
     commissions = _filter_rows_for_month(DatabaseHelper.list_commissions(), "DateCommission", target_date)
     productions = _filter_rows_for_month(DatabaseHelper.list_productions(), "DateProduction", target_date)
+    payrolls = DatabaseHelper.list_payrolls(start_date=first_day, end_date=last_day)
+    payroll_summary = DatabaseHelper.get_workers_payroll_summary(start_date=first_day, end_date=last_day)
     production_summary = _summarize_production_rows(productions)
 
     total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in orders)
@@ -917,6 +1038,8 @@ def create_monthly_pdf_report(
     balance = total_entries - total_expenses
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
+    total_payroll_net = _payroll_total(payrolls, "MontantNet")
+    balance_after_payrolls = balance - total_payroll_net
 
     total_farine = sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits)
     total_levure = sum(float(row.get("PaquetsUtilises", 0) or 0) for row in stock_exits)
@@ -1008,6 +1131,14 @@ def create_monthly_pdf_report(
             [
                 ["Commissions", _format_fc(total_commissions)],
                 ["Net commissions", _format_fc(total_net_commissions)],
+            ]
+        )
+    if "workers" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Travailleurs actifs", str(int(payroll_summary.get("TravailleursActifs", 0) or 0))],
+                ["Paies travailleurs", _format_fc(total_payroll_net)],
+                ["Solde après paies", _format_fc(balance_after_payrolls)],
             ]
         )
     elements.append(_make_table(overview_rows, [72 * mm, 88 * mm], extra_styles=_cash_highlight_table_styles(overview_rows)))
@@ -1109,6 +1240,15 @@ def create_monthly_pdf_report(
             ["Dettes payées du mois", _format_fc(paid_debts_month)],
             ["Total des entrées", _format_fc(total_entries)],
             ["Dépenses du mois", _format_fc(total_expenses)],
+            *(
+                [
+                    ["Paies travailleurs", _format_fc(total_payroll_net)],
+                    ["Total des sorties", _format_fc(total_expenses + total_payroll_net)],
+                    ["Solde après paies", _format_fc(balance_after_payrolls)],
+                ]
+                if "workers" in allowed_sections
+                else []
+            ),
             ["Solde du mois", _format_fc(balance)],
         ]
         elements.append(
@@ -1179,15 +1319,33 @@ def create_monthly_pdf_report(
             commission_section.append(_paragraph("Aucune commission n'a été enregistrée pour ce mois.", styles["body"]))
         elements.append(KeepTogether(commission_section))
 
+    if "workers" in allowed_sections:
+        elements.extend(
+            _payroll_section_flowables(
+                "Travailleurs et paies du mois",
+                payrolls,
+                payroll_summary,
+                styles,
+                include_date=True,
+                empty_message="Aucune paie de travailleur n'a été enregistrée pour ce mois.",
+            )
+        )
+
     elements.append(Spacer(1, 6 * mm))
     elements.append(_paragraph("NB", styles["section"]))
     if "cash" in allowed_sections:
+        payroll_sentence = ""
+        if "workers" in allowed_sections:
+            payroll_sentence = (
+                f" Les paies des travailleurs représentent {_bold_markup(_format_fc(total_payroll_net))}; "
+                f"le solde réel après ces charges salariales est donc {_bold_markup(_format_fc(balance_after_payrolls))}."
+            )
         recap_text = (
             f"Pour le mois {month_label}, les entrées correspondent au montant reçu "
             f"({_bold_markup(_format_fc(total_received))}) additionné aux dettes payées ({_bold_markup(_format_fc(paid_debts_month))}), "
             f"soit un total des entrées de {_bold_markup(_format_fc(total_entries))}. Les sorties correspondent aux dépenses "
             f"enregistrées sur la période, soit {_bold_markup(_format_fc(total_expenses))}. Le solde mensuel ressort donc à "
-            f"{_bold_markup(_format_fc(balance))}."
+            f"{_bold_markup(_format_fc(balance))}.{payroll_sentence}"
         )
         elements.append(_rich_paragraph(recap_text, styles["body"]))
     else:
@@ -1253,6 +1411,8 @@ def create_period_pdf_report(
     cash_days = _filter_rows_for_period(DatabaseHelper.list_cash_days(), "DateCaisse", start_date, end_date)
     commissions = _filter_rows_for_period(DatabaseHelper.list_commissions(), "DateCommission", start_date, end_date)
     productions = _filter_rows_for_period(DatabaseHelper.list_productions(), "DateProduction", start_date, end_date)
+    payrolls = DatabaseHelper.list_payrolls(start_date=start_date, end_date=end_date)
+    payroll_summary = DatabaseHelper.get_workers_payroll_summary(start_date=start_date, end_date=end_date)
     production_summary = _summarize_production_rows(productions)
 
     total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in orders)
@@ -1265,6 +1425,8 @@ def create_period_pdf_report(
     balance = total_entries - total_expenses
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
+    total_payroll_net = _payroll_total(payrolls, "MontantNet")
+    balance_after_payrolls = balance - total_payroll_net
 
     total_farine = sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits)
     total_levure = sum(float(row.get("PaquetsUtilises", 0) or 0) for row in stock_exits)
@@ -1356,6 +1518,14 @@ def create_period_pdf_report(
             [
                 ["Commissions", _format_fc(total_commissions)],
                 ["Net commissions", _format_fc(total_net_commissions)],
+            ]
+        )
+    if "workers" in allowed_sections:
+        overview_rows.extend(
+            [
+                ["Travailleurs actifs", str(int(payroll_summary.get("TravailleursActifs", 0) or 0))],
+                ["Paies travailleurs", _format_fc(total_payroll_net)],
+                ["Solde après paies", _format_fc(balance_after_payrolls)],
             ]
         )
     elements.append(_make_table(overview_rows, [72 * mm, 88 * mm], extra_styles=_cash_highlight_table_styles(overview_rows)))
@@ -1457,6 +1627,15 @@ def create_period_pdf_report(
             ["Dettes payées sur la période", _format_fc(paid_debts_period)],
             ["Total des entrées", _format_fc(total_entries)],
             ["Dépenses sur la période", _format_fc(total_expenses)],
+            *(
+                [
+                    ["Paies travailleurs", _format_fc(total_payroll_net)],
+                    ["Total des sorties", _format_fc(total_expenses + total_payroll_net)],
+                    ["Solde après paies", _format_fc(balance_after_payrolls)],
+                ]
+                if "workers" in allowed_sections
+                else []
+            ),
             ["Solde sur la période", _format_fc(balance)],
         ]
         elements.append(
@@ -1527,14 +1706,32 @@ def create_period_pdf_report(
             commission_section.append(_paragraph("Aucune commission n'a été enregistrée sur cette période.", styles["body"]))
         elements.append(KeepTogether(commission_section))
 
+    if "workers" in allowed_sections:
+        elements.extend(
+            _payroll_section_flowables(
+                "Travailleurs et paies sur la période",
+                payrolls,
+                payroll_summary,
+                styles,
+                include_date=True,
+                empty_message="Aucune paie de travailleur n'a été enregistrée sur cette période.",
+            )
+        )
+
     elements.append(Spacer(1, 6 * mm))
     elements.append(_paragraph("NB", styles["section"]))
     if "cash" in allowed_sections:
+        payroll_sentence = ""
+        if "workers" in allowed_sections:
+            payroll_sentence = (
+                f" Les paies des travailleurs représentent {_bold_markup(_format_fc(total_payroll_net))}; "
+                f"le solde réel après ces charges salariales est donc {_bold_markup(_format_fc(balance_after_payrolls))}."
+            )
         recap_text = (
             f"Pour la période allant du {_format_date(start_date)} au {_format_date(end_date)}, les entrées correspondent au montant reçu "
             f"({_bold_markup(_format_fc(total_received))}) additionné aux dettes payées ({_bold_markup(_format_fc(paid_debts_period))}), soit un total "
             f"des entrées de {_bold_markup(_format_fc(total_entries))}. Les sorties correspondent aux dépenses enregistrées sur cette période, "
-            f"soit {_bold_markup(_format_fc(total_expenses))}. Le solde ressort donc à {_bold_markup(_format_fc(balance))}."
+            f"soit {_bold_markup(_format_fc(total_expenses))}. Le solde ressort donc à {_bold_markup(_format_fc(balance))}.{payroll_sentence}"
         )
         elements.append(_rich_paragraph(recap_text, styles["body"]))
     else:
