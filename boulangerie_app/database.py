@@ -633,6 +633,37 @@ class DatabaseHelper:
                 NetAPayer REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS Travailleurs (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                NomComplet TEXT NOT NULL,
+                Fonction TEXT NOT NULL DEFAULT '',
+                Telephone TEXT NOT NULL DEFAULT '',
+                Adresse TEXT NOT NULL DEFAULT '',
+                DateEmbauche TEXT NOT NULL DEFAULT '',
+                SalaireMensuel REAL NOT NULL DEFAULT 0,
+                Statut TEXT NOT NULL DEFAULT 'Actif',
+                Observations TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS PaiesTravailleurs (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                TravailleurId INTEGER NOT NULL,
+                DatePaie TEXT NOT NULL,
+                Periode TEXT NOT NULL,
+                MontantBrut REAL NOT NULL DEFAULT 0,
+                Prime REAL NOT NULL DEFAULT 0,
+                Avance REAL NOT NULL DEFAULT 0,
+                Retenue REAL NOT NULL DEFAULT 0,
+                MontantNet REAL NOT NULL DEFAULT 0,
+                ModePaiement TEXT NOT NULL DEFAULT 'Espèces',
+                Statut TEXT NOT NULL DEFAULT 'Payée',
+                Observations TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (TravailleurId) REFERENCES Travailleurs(Id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_paies_travailleurs_date
+            ON PaiesTravailleurs (DatePaie);
+
             CREATE TABLE IF NOT EXISTS CloturesJournalieres (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 DateJour TEXT NOT NULL UNIQUE,
@@ -1114,6 +1145,8 @@ class DatabaseHelper:
             "CaisseJournaliere",
             "Commandes",
             "Commissions",
+            "PaiesTravailleurs",
+            "Travailleurs",
             "CloturesJournalieres",
             "HistoriqueActions",
         ]
@@ -1526,6 +1559,400 @@ class DatabaseHelper:
     @classmethod
     def count_users(cls) -> int:
         return int(cls._fetch_value("SELECT COUNT(*) FROM Utilisateurs"))
+
+    @classmethod
+    def list_workers(cls, include_inactive: bool = True) -> list[dict[str, Any]]:
+        status_filter = "" if include_inactive else "WHERE Statut = 'Actif'"
+        return cls._fetch_all(
+            f"""
+            SELECT
+                t.Id,
+                t.NomComplet,
+                t.Fonction,
+                t.Telephone,
+                t.Adresse,
+                t.DateEmbauche,
+                t.SalaireMensuel,
+                t.Statut,
+                t.Observations,
+                IFNULL((
+                    SELECT SUM(p.MontantNet)
+                    FROM PaiesTravailleurs p
+                    WHERE p.TravailleurId = t.Id
+                ), 0) AS TotalPaye,
+                IFNULL((
+                    SELECT MAX(p.DatePaie)
+                    FROM PaiesTravailleurs p
+                    WHERE p.TravailleurId = t.Id
+                ), '') AS DernierePaie
+            FROM Travailleurs t
+            {status_filter}
+            ORDER BY
+                CASE WHEN t.Statut = 'Actif' THEN 0 ELSE 1 END,
+                t.NomComplet COLLATE NOCASE
+            """
+        )
+
+    @classmethod
+    def get_worker(cls, worker_id: int) -> dict[str, Any]:
+        return cls._fetch_one(
+            """
+            SELECT
+                Id,
+                NomComplet,
+                Fonction,
+                Telephone,
+                Adresse,
+                DateEmbauche,
+                SalaireMensuel,
+                Statut,
+                Observations
+            FROM Travailleurs
+            WHERE Id = ?
+            """,
+            (int(worker_id),),
+        ) or {}
+
+    @classmethod
+    def add_worker(
+        cls,
+        full_name: str,
+        function: str,
+        phone: str,
+        address: str,
+        hire_date: date | str,
+        monthly_salary: float,
+        status: str,
+        observations: str = "",
+    ) -> int:
+        normalized_name = full_name.strip()
+        if not normalized_name:
+            raise ValueError("Veuillez saisir le nom complet du travailleur.")
+        normalized_salary = float(monthly_salary or 0)
+        if normalized_salary < 0:
+            raise ValueError("Le salaire mensuel ne peut pas être négatif.")
+        normalized_date = cls._coerce_date(hire_date)
+        with cls.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO Travailleurs (
+                    NomComplet,
+                    Fonction,
+                    Telephone,
+                    Adresse,
+                    DateEmbauche,
+                    SalaireMensuel,
+                    Statut,
+                    Observations
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_name,
+                    function.strip(),
+                    phone.strip(),
+                    address.strip(),
+                    normalized_date.strftime(DB_DATE_FORMAT),
+                    normalized_salary,
+                    status.strip() or "Actif",
+                    observations.strip(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    @classmethod
+    def update_worker(
+        cls,
+        worker_id: int,
+        full_name: str,
+        function: str,
+        phone: str,
+        address: str,
+        hire_date: date | str,
+        monthly_salary: float,
+        status: str,
+        observations: str = "",
+    ) -> int:
+        normalized_name = full_name.strip()
+        if not normalized_name:
+            raise ValueError("Veuillez saisir le nom complet du travailleur.")
+        normalized_salary = float(monthly_salary or 0)
+        if normalized_salary < 0:
+            raise ValueError("Le salaire mensuel ne peut pas être négatif.")
+        normalized_date = cls._coerce_date(hire_date)
+        return cls._execute(
+            """
+            UPDATE Travailleurs
+            SET NomComplet = ?,
+                Fonction = ?,
+                Telephone = ?,
+                Adresse = ?,
+                DateEmbauche = ?,
+                SalaireMensuel = ?,
+                Statut = ?,
+                Observations = ?
+            WHERE Id = ?
+            """,
+            (
+                normalized_name,
+                function.strip(),
+                phone.strip(),
+                address.strip(),
+                normalized_date.strftime(DB_DATE_FORMAT),
+                normalized_salary,
+                status.strip() or "Actif",
+                observations.strip(),
+                int(worker_id),
+            ),
+        )
+
+    @classmethod
+    def delete_worker(cls, worker_id: int) -> int:
+        worker_id = int(worker_id)
+        payroll_count = int(
+            cls._fetch_value(
+                "SELECT COUNT(*) FROM PaiesTravailleurs WHERE TravailleurId = ?",
+                (worker_id,),
+            )
+            or 0
+        )
+        if payroll_count > 0:
+            return cls._execute(
+                """
+                UPDATE Travailleurs
+                SET Statut = 'Inactif'
+                WHERE Id = ?
+                """,
+                (worker_id,),
+            )
+        return cls._execute("DELETE FROM Travailleurs WHERE Id = ?", (worker_id,))
+
+    @classmethod
+    def list_payrolls(
+        cls,
+        worker_id: int = 0,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT
+                p.Id,
+                p.TravailleurId,
+                t.NomComplet,
+                t.Fonction,
+                p.DatePaie,
+                p.Periode,
+                p.MontantBrut,
+                p.Prime,
+                p.Avance,
+                p.Retenue,
+                p.MontantNet,
+                p.ModePaiement,
+                p.Statut,
+                p.Observations
+            FROM PaiesTravailleurs p
+            INNER JOIN Travailleurs t ON t.Id = p.TravailleurId
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if int(worker_id or 0) > 0:
+            sql += " AND p.TravailleurId = ?"
+            params.append(int(worker_id))
+        if start_date is not None:
+            sql += " AND p.DatePaie >= ?"
+            params.append(cls._coerce_date(start_date).strftime(DB_DATE_FORMAT))
+        if end_date is not None:
+            sql += " AND p.DatePaie <= ?"
+            params.append(cls._coerce_date(end_date).strftime(DB_DATE_FORMAT))
+        sql += " ORDER BY p.DatePaie DESC, p.Id DESC"
+        return cls._fetch_all(sql, tuple(params))
+
+    @staticmethod
+    def _calculate_payroll_net(gross_amount: float, bonus: float, advance: float, withholding: float) -> float:
+        net_amount = float(gross_amount or 0) + float(bonus or 0) - float(advance or 0) - float(withholding or 0)
+        if net_amount < 0:
+            raise ValueError("Le net à payer ne peut pas être négatif.")
+        return net_amount
+
+    @classmethod
+    def add_payroll(
+        cls,
+        worker_id: int,
+        pay_date: date | str,
+        period: str,
+        gross_amount: float,
+        bonus: float = 0,
+        advance: float = 0,
+        withholding: float = 0,
+        payment_mode: str = "Espèces",
+        status: str = "Payée",
+        observations: str = "",
+    ) -> int:
+        target_date = cls._coerce_date(pay_date)
+        cls.ensure_day_open_for_write(target_date, "les paies")
+        if int(worker_id or 0) <= 0:
+            raise ValueError("Veuillez choisir un travailleur.")
+        if not cls.get_worker(int(worker_id)):
+            raise ValueError("Travailleur introuvable.")
+        gross = float(gross_amount or 0)
+        bonus_value = float(bonus or 0)
+        advance_value = float(advance or 0)
+        withholding_value = float(withholding or 0)
+        for label, value in (
+            ("Montant brut", gross),
+            ("Prime", bonus_value),
+            ("Avance", advance_value),
+            ("Retenue", withholding_value),
+        ):
+            if value < 0:
+                raise ValueError(f"{label} ne peut pas être négatif.")
+        net_amount = cls._calculate_payroll_net(gross, bonus_value, advance_value, withholding_value)
+        normalized_period = period.strip() or target_date.strftime("%m/%Y")
+        with cls.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO PaiesTravailleurs (
+                    TravailleurId,
+                    DatePaie,
+                    Periode,
+                    MontantBrut,
+                    Prime,
+                    Avance,
+                    Retenue,
+                    MontantNet,
+                    ModePaiement,
+                    Statut,
+                    Observations
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(worker_id),
+                    target_date.strftime(DB_DATE_FORMAT),
+                    normalized_period,
+                    gross,
+                    bonus_value,
+                    advance_value,
+                    withholding_value,
+                    net_amount,
+                    payment_mode.strip() or "Espèces",
+                    status.strip() or "Payée",
+                    observations.strip(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    @classmethod
+    def update_payroll(
+        cls,
+        payroll_id: int,
+        worker_id: int,
+        pay_date: date | str,
+        period: str,
+        gross_amount: float,
+        bonus: float = 0,
+        advance: float = 0,
+        withholding: float = 0,
+        payment_mode: str = "Espèces",
+        status: str = "Payée",
+        observations: str = "",
+    ) -> int:
+        original_date_text = cls._get_record_date_text("PaiesTravailleurs", "DatePaie", int(payroll_id))
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, "les paies")
+        target_date = cls._coerce_date(pay_date)
+        cls.ensure_day_open_for_write(target_date, "les paies")
+        if int(worker_id or 0) <= 0:
+            raise ValueError("Veuillez choisir un travailleur.")
+        if not cls.get_worker(int(worker_id)):
+            raise ValueError("Travailleur introuvable.")
+        gross = float(gross_amount or 0)
+        bonus_value = float(bonus or 0)
+        advance_value = float(advance or 0)
+        withholding_value = float(withholding or 0)
+        for label, value in (
+            ("Montant brut", gross),
+            ("Prime", bonus_value),
+            ("Avance", advance_value),
+            ("Retenue", withholding_value),
+        ):
+            if value < 0:
+                raise ValueError(f"{label} ne peut pas être négatif.")
+        net_amount = cls._calculate_payroll_net(gross, bonus_value, advance_value, withholding_value)
+        return cls._execute(
+            """
+            UPDATE PaiesTravailleurs
+            SET TravailleurId = ?,
+                DatePaie = ?,
+                Periode = ?,
+                MontantBrut = ?,
+                Prime = ?,
+                Avance = ?,
+                Retenue = ?,
+                MontantNet = ?,
+                ModePaiement = ?,
+                Statut = ?,
+                Observations = ?
+            WHERE Id = ?
+            """,
+            (
+                int(worker_id),
+                target_date.strftime(DB_DATE_FORMAT),
+                period.strip() or target_date.strftime("%m/%Y"),
+                gross,
+                bonus_value,
+                advance_value,
+                withholding_value,
+                net_amount,
+                payment_mode.strip() or "Espèces",
+                status.strip() or "Payée",
+                observations.strip(),
+                int(payroll_id),
+            ),
+        )
+
+    @classmethod
+    def delete_payroll(cls, payroll_id: int) -> int:
+        original_date_text = cls._get_record_date_text("PaiesTravailleurs", "DatePaie", int(payroll_id))
+        if original_date_text:
+            cls.ensure_day_open_for_write(original_date_text, "les paies")
+        return cls._execute("DELETE FROM PaiesTravailleurs WHERE Id = ?", (int(payroll_id),))
+
+    @classmethod
+    def get_workers_payroll_summary(
+        cls,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
+    ) -> dict[str, Any]:
+        workers = cls._fetch_one(
+            """
+            SELECT
+                COUNT(*) AS NombreTravailleurs,
+                SUM(CASE WHEN Statut = 'Actif' THEN 1 ELSE 0 END) AS TravailleursActifs,
+                IFNULL(SUM(CASE WHEN Statut = 'Actif' THEN SalaireMensuel ELSE 0 END), 0) AS MasseSalarialeMensuelle
+            FROM Travailleurs
+            """
+        ) or {}
+        sql = """
+            SELECT
+                COUNT(*) AS NombrePaies,
+                IFNULL(SUM(MontantBrut), 0) AS TotalBrut,
+                IFNULL(SUM(Prime), 0) AS TotalPrimes,
+                IFNULL(SUM(Avance), 0) AS TotalAvances,
+                IFNULL(SUM(Retenue), 0) AS TotalRetenues,
+                IFNULL(SUM(MontantNet), 0) AS TotalNet
+            FROM PaiesTravailleurs
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if start_date is not None:
+            sql += " AND DatePaie >= ?"
+            params.append(cls._coerce_date(start_date).strftime(DB_DATE_FORMAT))
+        if end_date is not None:
+            sql += " AND DatePaie <= ?"
+            params.append(cls._coerce_date(end_date).strftime(DB_DATE_FORMAT))
+        payroll = cls._fetch_one(sql, tuple(params)) or {}
+        return {**workers, **payroll}
 
     @classmethod
     def get_stock_configuration(cls) -> dict[str, Any]:

@@ -101,7 +101,7 @@ ROLES = [
     "Gestionnaire des commandes",
 ]
 ROLE_MODULE_ACCESS = {
-    "Admin": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Utilisateurs"},
+    "Admin": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
     "Caissier": {"Caisse", "Production", "Commandes", "Commissions"},
     "Gestionnaire de stock": {"Stock"},
     "Gestionnaire des commandes": {"Production", "Commandes", "Commissions"},
@@ -2268,6 +2268,7 @@ class DashboardWindow(tk.Toplevel):
             ("Production", self.open_production),
             ("Commandes", self.open_orders),
             ("Commissions", self.open_commissions),
+            ("Travailleurs", self.open_workers_payroll),
         ]
         if self.user.role == "Admin":
             buttons.append(("Utilisateurs", self.open_users))
@@ -2593,6 +2594,7 @@ class DashboardWindow(tk.Toplevel):
     def build_admin_summary(self) -> str:
         orders_summary = DatabaseHelper.get_global_orders_summary()
         production_summary = DatabaseHelper.get_global_production_summary()
+        payroll_summary = DatabaseHelper.get_workers_payroll_summary()
         today = date.today()
         stock_journal = DatabaseHelper.get_stock_journal(today)
         stock_line = "Journal stock du jour indisponible."
@@ -2612,7 +2614,8 @@ class DashboardWindow(tk.Toplevel):
             f"Production : {int(production_summary.get('TotalBacsProduits', 0) or 0)} bacs produits | "
             f"Écart avec commandes : {int(production_summary.get('EcartCommandes', 0) or 0)}\n"
             f"Total caisse : {format_fc(DatabaseHelper.get_total_cash())} | "
-            f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())}\n"
+            f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())} | "
+            f"Paies travailleurs : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}\n"
             f"{stock_line}"
         )
 
@@ -2716,6 +2719,7 @@ class DashboardWindow(tk.Toplevel):
             ]
         stock_summary = DatabaseHelper.get_stock_summary()
         production_global = DatabaseHelper.get_global_production_summary()
+        payroll_summary = DatabaseHelper.get_workers_payroll_summary()
         return [
             ("Stock", format_number(float(stock_summary.get("FarineRestante", 0) or 0)), "Farine restante"),
             ("Approvisionnements", str(DatabaseHelper.count_stock_supplies()), "Entrées de stock"),
@@ -2724,7 +2728,11 @@ class DashboardWindow(tk.Toplevel):
             ("Caisse", format_fc(cash_total), "Solde global"),
             ("Commissions", format_fc(commission_total), "Total à payer"),
             ("Dettes ouvertes", format_fc(float(orders_summary.get("TotalDettes", 0) or 0)), f"{len(debt_alerts)} alerte(s) prioritaires"),
-            ("Utilisateurs", str(DatabaseHelper.count_users()), f"{len(low_stock)} stock faible"),
+            (
+                "Travailleurs",
+                str(int(payroll_summary.get("TravailleursActifs", 0) or 0)),
+                f"Paies : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}",
+            ),
         ]
 
     def refresh_alerts(self) -> None:
@@ -3229,6 +3237,11 @@ class DashboardWindow(tk.Toplevel):
         if not self.can_access("Commissions"):
             return
         self.open_large_module(CommissionsWindow, "les commissions")
+
+    def open_workers_payroll(self) -> None:
+        if not self.can_access("Travailleurs"):
+            return
+        self.open_large_module(WorkersPayrollWindow, "les travailleurs et paies")
 
     def open_users(self) -> None:
         if self.user.role != "Admin":
@@ -4456,6 +4469,480 @@ class UsersWindow(BaseModuleWindow):
         self.original_identifiant = ""
         self.identifiant_entry.state(["!disabled"])
         self.name_entry.focus()
+
+
+class WorkersPayrollWindow(BaseModuleWindow):
+    def __init__(self, parent: DashboardWindow) -> None:
+        super().__init__(parent, "Travailleurs et paies", "1180x780")
+        self.worker_edit_id = 0
+        self.payroll_edit_id = 0
+        self.worker_options: dict[str, int] = {}
+        self.build_ui()
+        self.after_idle(self.refresh_all)
+
+    def build_ui(self) -> None:
+        container = self.body
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(2, weight=1)
+
+        self.summary_var = tk.StringVar(value="Chargement du résumé...")
+        ttk.Label(
+            container,
+            textvariable=self.summary_var,
+            foreground="#1f4e78",
+            justify="center",
+            wraplength=980,
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+        forms = ttk.Frame(container)
+        forms.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        forms.columnconfigure(0, weight=1)
+        forms.columnconfigure(1, weight=1)
+
+        worker_form = ttk.LabelFrame(forms, text="Fiche travailleur", style="Card.TLabelframe")
+        worker_form.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        worker_form.columnconfigure(1, weight=1)
+
+        self.worker_name_var = tk.StringVar()
+        self.worker_function_var = tk.StringVar()
+        self.worker_phone_var = tk.StringVar()
+        self.worker_address_var = tk.StringVar()
+        self.worker_salary_var = tk.StringVar(value="0")
+        self.worker_status_var = tk.StringVar(value="Actif")
+        self.worker_observations_var = tk.StringVar()
+
+        ttk.Label(worker_form, text="Nom complet").grid(row=0, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_name_var, width=34).grid(row=0, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Fonction").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_function_var).grid(row=1, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Téléphone").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_phone_var).grid(row=2, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Adresse").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_address_var).grid(row=3, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Date d'embauche").grid(row=4, column=0, sticky="w", pady=5)
+        self.hire_date_field = DateField(worker_form, today_iso())
+        self.hire_date_field.grid(row=4, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Salaire mensuel").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_salary_var).grid(row=5, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Statut").grid(row=6, column=0, sticky="w", pady=5)
+        ttk.Combobox(
+            worker_form,
+            textvariable=self.worker_status_var,
+            values=["Actif", "Suspendu", "Inactif"],
+            state="readonly",
+        ).grid(row=6, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Observations").grid(row=7, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_observations_var).grid(row=7, column=1, sticky="ew", pady=5)
+
+        worker_buttons = ttk.Frame(worker_form)
+        worker_buttons.grid(row=8, column=0, columnspan=2, pady=(12, 0))
+        ttk.Button(worker_buttons, text="Enregistrer", command=self.save_worker).grid(row=0, column=0, padx=4, pady=4)
+        ttk.Button(worker_buttons, text="Modifier", command=self.load_worker_for_edit).grid(row=0, column=1, padx=4, pady=4)
+        ttk.Button(worker_buttons, text="Supprimer / désactiver", command=self.delete_worker).grid(
+            row=0, column=2, padx=4, pady=4
+        )
+        ttk.Button(worker_buttons, text="Nouveau", command=self.reset_worker_form).grid(row=1, column=0, padx=4, pady=4)
+
+        payroll_form = ttk.LabelFrame(forms, text="Paie du travailleur", style="Card.TLabelframe")
+        payroll_form.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        payroll_form.columnconfigure(1, weight=1)
+
+        self.payroll_worker_var = tk.StringVar()
+        self.payroll_period_var = tk.StringVar(value=date.today().strftime("%m/%Y"))
+        self.payroll_gross_var = tk.StringVar(value="0")
+        self.payroll_bonus_var = tk.StringVar(value="0")
+        self.payroll_advance_var = tk.StringVar(value="0")
+        self.payroll_withholding_var = tk.StringVar(value="0")
+        self.payroll_net_var = tk.StringVar(value="0 FC")
+        self.payroll_mode_var = tk.StringVar(value="Espèces")
+        self.payroll_status_var = tk.StringVar(value="Payée")
+        self.payroll_observations_var = tk.StringVar()
+
+        ttk.Label(payroll_form, text="Travailleur").grid(row=0, column=0, sticky="w", pady=5)
+        self.payroll_worker_combo = ttk.Combobox(
+            payroll_form,
+            textvariable=self.payroll_worker_var,
+            values=[],
+            state="readonly",
+        )
+        self.payroll_worker_combo.grid(row=0, column=1, sticky="ew", pady=5)
+        ttk.Label(payroll_form, text="Date de paie").grid(row=1, column=0, sticky="w", pady=5)
+        self.payroll_date_field = DateField(payroll_form, today_iso())
+        self.payroll_date_field.grid(row=1, column=1, sticky="ew", pady=5)
+        ttk.Label(payroll_form, text="Période").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(payroll_form, textvariable=self.payroll_period_var).grid(row=2, column=1, sticky="ew", pady=5)
+        ttk.Label(payroll_form, text="Montant brut").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(payroll_form, textvariable=self.payroll_gross_var).grid(row=3, column=1, sticky="ew", pady=5)
+        ttk.Label(payroll_form, text="Prime").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Entry(payroll_form, textvariable=self.payroll_bonus_var).grid(row=4, column=1, sticky="ew", pady=5)
+        ttk.Label(payroll_form, text="Avance").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Entry(payroll_form, textvariable=self.payroll_advance_var).grid(row=5, column=1, sticky="ew", pady=5)
+        ttk.Label(payroll_form, text="Retenue").grid(row=6, column=0, sticky="w", pady=5)
+        ttk.Entry(payroll_form, textvariable=self.payroll_withholding_var).grid(row=6, column=1, sticky="ew", pady=5)
+        ttk.Label(payroll_form, text="Net à payer").grid(row=7, column=0, sticky="w", pady=5)
+        ttk.Label(payroll_form, textvariable=self.payroll_net_var, foreground="#8b0000").grid(
+            row=7, column=1, sticky="w", pady=5
+        )
+        ttk.Label(payroll_form, text="Mode paiement").grid(row=8, column=0, sticky="w", pady=5)
+        ttk.Combobox(
+            payroll_form,
+            textvariable=self.payroll_mode_var,
+            values=["Espèces", "Mobile money", "Virement", "Autre"],
+            state="readonly",
+        ).grid(row=8, column=1, sticky="ew", pady=5)
+        ttk.Label(payroll_form, text="Statut").grid(row=9, column=0, sticky="w", pady=5)
+        ttk.Combobox(
+            payroll_form,
+            textvariable=self.payroll_status_var,
+            values=["Payée", "En attente", "Avance seulement"],
+            state="readonly",
+        ).grid(row=9, column=1, sticky="ew", pady=5)
+        ttk.Label(payroll_form, text="Observations").grid(row=10, column=0, sticky="w", pady=5)
+        ttk.Entry(payroll_form, textvariable=self.payroll_observations_var).grid(row=10, column=1, sticky="ew", pady=5)
+
+        payroll_buttons = ttk.Frame(payroll_form)
+        payroll_buttons.grid(row=11, column=0, columnspan=2, pady=(12, 0))
+        ttk.Button(payroll_buttons, text="Enregistrer", command=self.save_payroll).grid(row=0, column=0, padx=4, pady=4)
+        ttk.Button(payroll_buttons, text="Modifier", command=self.load_payroll_for_edit).grid(row=0, column=1, padx=4, pady=4)
+        ttk.Button(payroll_buttons, text="Supprimer", command=self.delete_payroll).grid(row=0, column=2, padx=4, pady=4)
+        ttk.Button(payroll_buttons, text="Nouvelle paie", command=self.reset_payroll_form).grid(row=1, column=0, padx=4, pady=4)
+
+        for var in (
+            self.payroll_gross_var,
+            self.payroll_bonus_var,
+            self.payroll_advance_var,
+            self.payroll_withholding_var,
+        ):
+            var.trace_add("write", lambda *_args: self.update_payroll_net_preview())
+
+        tables = ttk.PanedWindow(container, orient="horizontal")
+        tables.grid(row=2, column=0, sticky="nsew")
+        workers_frame = ttk.LabelFrame(tables, text="Liste des travailleurs", style="Card.TLabelframe")
+        payrolls_frame = ttk.LabelFrame(tables, text="Historique des paies", style="Card.TLabelframe")
+        tables.add(workers_frame, weight=1)
+        tables.add(payrolls_frame, weight=1)
+
+        self.workers_table = DataTable(workers_frame, height=16)
+        self.workers_table.pack(fill="both", expand=True)
+        self.workers_table.tree.bind("<Double-1>", lambda _event: self.load_worker_for_edit())
+        self.payrolls_table = DataTable(payrolls_frame, height=16)
+        self.payrolls_table.pack(fill="both", expand=True)
+        self.payrolls_table.tree.bind("<Double-1>", lambda _event: self.load_payroll_for_edit())
+
+        self.message_var = tk.StringVar(value="")
+        ttk.Label(container, textvariable=self.message_var, foreground="#8b0000", wraplength=980).grid(
+            row=3, column=0, sticky="ew", pady=(12, 0)
+        )
+
+    def refresh_live_view(self) -> None:
+        self.refresh_all()
+
+    def refresh_all(self) -> None:
+        self.refresh_workers()
+        self.refresh_payrolls()
+        self.refresh_summary()
+
+    def refresh_workers(self) -> None:
+        rows = DatabaseHelper.list_workers(include_inactive=True)
+        self.workers_table.set_data(
+            rows,
+            columns=[
+                "Id",
+                "NomComplet",
+                "Fonction",
+                "Telephone",
+                "DateEmbauche",
+                "SalaireMensuel",
+                "Statut",
+                "TotalPaye",
+                "DernierePaie",
+            ],
+            headings={
+                "NomComplet": "Nom complet",
+                "Fonction": "Fonction",
+                "Telephone": "Téléphone",
+                "DateEmbauche": "Embauche",
+                "SalaireMensuel": "Salaire mensuel",
+                "Statut": "Statut",
+                "TotalPaye": "Total payé",
+                "DernierePaie": "Dernière paie",
+            },
+            hidden_columns=["Id"],
+            formatters={
+                "SalaireMensuel": lambda value: format_fc(float(value or 0)),
+                "TotalPaye": lambda value: format_fc(float(value or 0)),
+            },
+        )
+        self.worker_options = {
+            f"{row['Id']} - {row['NomComplet']}": int(row["Id"])
+            for row in rows
+            if str(row.get("Statut", "")) == "Actif"
+        }
+        self.payroll_worker_combo.configure(values=list(self.worker_options.keys()))
+        if not self.payroll_worker_var.get() and self.worker_options:
+            self.payroll_worker_var.set(next(iter(self.worker_options)))
+
+    def refresh_payrolls(self) -> None:
+        rows = DatabaseHelper.list_payrolls()
+        self.payrolls_table.set_data(
+            rows,
+            columns=[
+                "Id",
+                "TravailleurId",
+                "DatePaie",
+                "Periode",
+                "NomComplet",
+                "Fonction",
+                "MontantBrut",
+                "Prime",
+                "Avance",
+                "Retenue",
+                "MontantNet",
+                "ModePaiement",
+                "Statut",
+            ],
+            headings={
+                "DatePaie": "Date",
+                "Periode": "Période",
+                "NomComplet": "Travailleur",
+                "Fonction": "Fonction",
+                "MontantBrut": "Brut",
+                "Prime": "Prime",
+                "Avance": "Avance",
+                "Retenue": "Retenue",
+                "MontantNet": "Net",
+                "ModePaiement": "Mode",
+                "Statut": "Statut",
+            },
+            hidden_columns=["Id", "TravailleurId"],
+            formatters={
+                "MontantBrut": lambda value: format_fc(float(value or 0)),
+                "Prime": lambda value: format_fc(float(value or 0)),
+                "Avance": lambda value: format_fc(float(value or 0)),
+                "Retenue": lambda value: format_fc(float(value or 0)),
+                "MontantNet": lambda value: format_fc(float(value or 0)),
+            },
+        )
+
+    def refresh_summary(self) -> None:
+        summary = DatabaseHelper.get_workers_payroll_summary()
+        self.summary_var.set(
+            "Travailleurs : "
+            f"{int(summary.get('NombreTravailleurs', 0) or 0)} | "
+            f"Actifs : {int(summary.get('TravailleursActifs', 0) or 0)} | "
+            f"Masse salariale mensuelle : {format_fc(float(summary.get('MasseSalarialeMensuelle', 0) or 0))} | "
+            f"Total net payé : {format_fc(float(summary.get('TotalNet', 0) or 0))}"
+        )
+
+    def selected_worker_id_for_payroll(self) -> int:
+        label = self.payroll_worker_var.get().strip()
+        return int(self.worker_options.get(label, 0))
+
+    def update_payroll_net_preview(self) -> None:
+        try:
+            gross = parse_optional_float(self.payroll_gross_var.get())
+            bonus = parse_optional_float(self.payroll_bonus_var.get())
+            advance = parse_optional_float(self.payroll_advance_var.get())
+            withholding = parse_optional_float(self.payroll_withholding_var.get())
+            self.payroll_net_var.set(format_fc(gross + bonus - advance - withholding))
+        except Exception:
+            self.payroll_net_var.set("Calcul impossible")
+
+    def save_worker(self) -> None:
+        try:
+            salary = parse_optional_float(self.worker_salary_var.get())
+            if self.worker_edit_id:
+                updated = DatabaseHelper.update_worker(
+                    self.worker_edit_id,
+                    self.worker_name_var.get(),
+                    self.worker_function_var.get(),
+                    self.worker_phone_var.get(),
+                    self.worker_address_var.get(),
+                    self.hire_date_field.get_date(),
+                    salary,
+                    self.worker_status_var.get(),
+                    self.worker_observations_var.get(),
+                )
+                message = "Travailleur modifié avec succès." if updated else "Aucune modification effectuée."
+                action = "Travailleur modifié"
+            else:
+                worker_id = DatabaseHelper.add_worker(
+                    self.worker_name_var.get(),
+                    self.worker_function_var.get(),
+                    self.worker_phone_var.get(),
+                    self.worker_address_var.get(),
+                    self.hire_date_field.get_date(),
+                    salary,
+                    self.worker_status_var.get(),
+                    self.worker_observations_var.get(),
+                )
+                message = "Travailleur ajouté avec succès."
+                action = "Travailleur ajouté"
+                self.worker_edit_id = worker_id
+            log_user_action(self, "Travailleurs", action, self.worker_name_var.get().strip())
+            self.reset_worker_form()
+            self.refresh_all()
+            self.message_var.set(message)
+        except Exception as exc:
+            self.message_var.set(str(exc))
+
+    def load_worker_for_edit(self) -> None:
+        row = self.workers_table.selected_row()
+        if row is None:
+            messagebox.showwarning("Travailleurs", "Veuillez sélectionner un travailleur.")
+            return
+        self.worker_edit_id = int(row["Id"])
+        self.worker_name_var.set(str(row.get("NomComplet", "")))
+        self.worker_function_var.set(str(row.get("Fonction", "")))
+        self.worker_phone_var.set(str(row.get("Telephone", "")))
+        self.worker_address_var.set(str(row.get("Adresse", "")))
+        self.hire_date_field.set_date(str(row.get("DateEmbauche", today_iso()) or today_iso()))
+        self.worker_salary_var.set(format_number(float(row.get("SalaireMensuel", 0) or 0)))
+        self.worker_status_var.set(str(row.get("Statut", "Actif") or "Actif"))
+        self.worker_observations_var.set(str(row.get("Observations", "")))
+        self.set_payroll_worker(int(row["Id"]))
+        self.message_var.set("Travailleur chargé. Modifiez les informations puis enregistrez.")
+
+    def delete_worker(self) -> None:
+        row = self.workers_table.selected_row()
+        if row is None:
+            messagebox.showwarning("Travailleurs", "Veuillez sélectionner un travailleur.")
+            return
+        if not messagebox.askyesno(
+            "Travailleurs",
+            "Voulez-vous vraiment supprimer ce travailleur ?\n\n"
+            "S'il possède déjà un historique de paie, il sera plutôt marqué comme inactif pour conserver les traces.",
+        ):
+            return
+        try:
+            deleted = DatabaseHelper.delete_worker(int(row["Id"]))
+            if deleted:
+                log_user_action(self, "Travailleurs", "Travailleur supprimé ou désactivé", str(row.get("NomComplet", "")))
+                self.reset_worker_form()
+                self.reset_payroll_form()
+                self.refresh_all()
+                self.message_var.set("Travailleur supprimé ou désactivé avec succès.")
+            else:
+                self.message_var.set("Aucun travailleur supprimé.")
+        except Exception as exc:
+            self.message_var.set(str(exc))
+
+    def reset_worker_form(self) -> None:
+        self.worker_edit_id = 0
+        self.worker_name_var.set("")
+        self.worker_function_var.set("")
+        self.worker_phone_var.set("")
+        self.worker_address_var.set("")
+        self.hire_date_field.set_date(today_iso())
+        self.worker_salary_var.set("0")
+        self.worker_status_var.set("Actif")
+        self.worker_observations_var.set("")
+
+    def set_payroll_worker(self, worker_id: int) -> None:
+        for label, current_id in self.worker_options.items():
+            if current_id == worker_id:
+                self.payroll_worker_var.set(label)
+                return
+
+    def save_payroll(self) -> None:
+        try:
+            worker_id = self.selected_worker_id_for_payroll()
+            gross = parse_optional_float(self.payroll_gross_var.get())
+            bonus = parse_optional_float(self.payroll_bonus_var.get())
+            advance = parse_optional_float(self.payroll_advance_var.get())
+            withholding = parse_optional_float(self.payroll_withholding_var.get())
+            if self.payroll_edit_id:
+                updated = DatabaseHelper.update_payroll(
+                    self.payroll_edit_id,
+                    worker_id,
+                    self.payroll_date_field.get_date(),
+                    self.payroll_period_var.get(),
+                    gross,
+                    bonus,
+                    advance,
+                    withholding,
+                    self.payroll_mode_var.get(),
+                    self.payroll_status_var.get(),
+                    self.payroll_observations_var.get(),
+                )
+                message = "Paie modifiée avec succès." if updated else "Aucune modification effectuée."
+                action = "Paie modifiée"
+            else:
+                DatabaseHelper.add_payroll(
+                    worker_id,
+                    self.payroll_date_field.get_date(),
+                    self.payroll_period_var.get(),
+                    gross,
+                    bonus,
+                    advance,
+                    withholding,
+                    self.payroll_mode_var.get(),
+                    self.payroll_status_var.get(),
+                    self.payroll_observations_var.get(),
+                )
+                message = "Paie enregistrée avec succès."
+                action = "Paie enregistrée"
+            log_user_action(self, "Travailleurs", action, self.payroll_worker_var.get())
+            self.reset_payroll_form()
+            self.refresh_all()
+            self.message_var.set(message)
+        except Exception as exc:
+            self.message_var.set(str(exc))
+
+    def load_payroll_for_edit(self) -> None:
+        row = self.payrolls_table.selected_row()
+        if row is None:
+            messagebox.showwarning("Paies", "Veuillez sélectionner une paie.")
+            return
+        self.payroll_edit_id = int(row["Id"])
+        self.set_payroll_worker(int(row["TravailleurId"]))
+        self.payroll_date_field.set_date(str(row.get("DatePaie", today_iso()) or today_iso()))
+        self.payroll_period_var.set(str(row.get("Periode", "")))
+        self.payroll_gross_var.set(format_number(float(row.get("MontantBrut", 0) or 0)))
+        self.payroll_bonus_var.set(format_number(float(row.get("Prime", 0) or 0)))
+        self.payroll_advance_var.set(format_number(float(row.get("Avance", 0) or 0)))
+        self.payroll_withholding_var.set(format_number(float(row.get("Retenue", 0) or 0)))
+        self.payroll_mode_var.set(str(row.get("ModePaiement", "Espèces") or "Espèces"))
+        self.payroll_status_var.set(str(row.get("Statut", "Payée") or "Payée"))
+        self.payroll_observations_var.set(str(row.get("Observations", "")))
+        self.update_payroll_net_preview()
+        self.message_var.set("Paie chargée. Modifiez les informations puis enregistrez.")
+
+    def delete_payroll(self) -> None:
+        row = self.payrolls_table.selected_row()
+        if row is None:
+            messagebox.showwarning("Paies", "Veuillez sélectionner une paie.")
+            return
+        if not messagebox.askyesno("Paies", "Voulez-vous vraiment supprimer cette paie ?"):
+            return
+        try:
+            deleted = DatabaseHelper.delete_payroll(int(row["Id"]))
+            if deleted:
+                log_user_action(self, "Travailleurs", "Paie supprimée", str(row.get("NomComplet", "")))
+                self.reset_payroll_form()
+                self.refresh_all()
+                self.message_var.set("Paie supprimée avec succès.")
+            else:
+                self.message_var.set("Aucune paie supprimée.")
+        except Exception as exc:
+            self.message_var.set(str(exc))
+
+    def reset_payroll_form(self) -> None:
+        self.payroll_edit_id = 0
+        if self.worker_options:
+            self.payroll_worker_var.set(next(iter(self.worker_options)))
+        else:
+            self.payroll_worker_var.set("")
+        self.payroll_date_field.set_date(today_iso())
+        self.payroll_period_var.set(date.today().strftime("%m/%Y"))
+        self.payroll_gross_var.set("0")
+        self.payroll_bonus_var.set("0")
+        self.payroll_advance_var.set("0")
+        self.payroll_withholding_var.set("0")
+        self.payroll_mode_var.set("Espèces")
+        self.payroll_status_var.set("Payée")
+        self.payroll_observations_var.set("")
+        self.update_payroll_net_preview()
 
 
 class StockWindow(BaseModuleWindow):
