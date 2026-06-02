@@ -33,21 +33,21 @@ from .version import APP_NAME
 
 REPORT_SECTIONS_BY_ROLE: dict[str, tuple[str, ...]] = {
     "Admin": ("stock", "production", "orders", "cash", "commissions", "workers"),
-    "Caissier": ("orders", "cash", "commissions"),
+    "Caissier": ("orders", "cash", "commissions", "workers"),
     "Gestionnaire de stock": ("stock",),
     "Gestionnaire des commandes": ("production", "orders", "commissions"),
 }
 
 REPORT_SCOPE_LABELS = {
     "Admin": "Rapport complet",
-    "Caissier": "Rapport commandes, commissions et caisse",
+    "Caissier": "Rapport commandes, commissions, caisse et travailleurs",
     "Gestionnaire de stock": "Rapport stock",
     "Gestionnaire des commandes": "Rapport production, commandes et commissions",
 }
 
 REPORT_SCOPE_DESCRIPTIONS = {
     "Admin": "Toutes les sections sont incluses dans ce rapport, y compris les travailleurs et les paies.",
-    "Caissier": "Ce rapport contient uniquement les commandes, les commissions et la caisse.",
+    "Caissier": "Ce rapport contient les commandes, les commissions, la caisse, les travailleurs et les paies.",
     "Gestionnaire de stock": "Ce rapport contient uniquement les informations de stock.",
     "Gestionnaire des commandes": "Ce rapport contient la production, les commandes et les commissions.",
 }

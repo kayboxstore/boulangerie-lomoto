@@ -102,7 +102,7 @@ ROLES = [
 ]
 ROLE_MODULE_ACCESS = {
     "Admin": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
-    "Caissier": {"Caisse", "Production", "Commandes", "Commissions"},
+    "Caissier": {"Caisse", "Production", "Commandes", "Commissions", "Travailleurs"},
     "Gestionnaire de stock": {"Stock"},
     "Gestionnaire des commandes": {"Production", "Commandes", "Commissions"},
 }
@@ -2669,8 +2669,14 @@ class DashboardWindow(tk.Toplevel):
         if include_cash:
             cash_today = DatabaseHelper.get_cash_for_date(date.today())
             expenses_today = float(cash_today.get("MontantTotalDepenses", 0) or 0)
+            payroll_summary = DatabaseHelper.get_workers_payroll_summary()
             lines.append(
                 f"Dépenses du jour : {format_fc(expenses_today)} | Solde global : {format_fc(DatabaseHelper.get_total_cash())}"
+            )
+            lines.append(
+                "Travailleurs : "
+                f"{int(payroll_summary.get('TravailleursActifs', 0) or 0)} actif(s) | "
+                f"Paies : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}"
             )
         return "\n".join(lines)
 
@@ -2711,11 +2717,17 @@ class DashboardWindow(tk.Toplevel):
                 ("Commissions", format_fc(commission_total), "Total cumulé"),
             ]
         if self.user.role == "Caissier":
+            payroll_summary = DatabaseHelper.get_workers_payroll_summary()
             return [
                 ("Montant reçu", format_fc(float(orders_summary.get("MontantRecu", 0) or 0)), "Reçus cumulés"),
                 ("Dettes payées", format_fc(sum(float(row.get("DettesPayeesAujourdHui", 0) or 0) for row in DatabaseHelper.list_cash_days())), "Historique des paiements"),
                 ("Caisse globale", format_fc(cash_total), "Entrées moins dépenses"),
                 ("Dettes ouvertes", format_fc(float(orders_summary.get("TotalDettes", 0) or 0)), f"{len(debt_alerts)} client(s) prioritaire(s)"),
+                (
+                    "Travailleurs",
+                    str(int(payroll_summary.get("TravailleursActifs", 0) or 0)),
+                    f"Paies : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}",
+                ),
             ]
         stock_summary = DatabaseHelper.get_stock_summary()
         production_global = DatabaseHelper.get_global_production_summary()

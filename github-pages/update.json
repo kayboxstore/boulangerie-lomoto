@@ -1,6 +1,6 @@
 {
-  "version": "1.3.12",
-  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.12/BoulangerieLomotoSetup.exe",
+  "version": "1.3.13",
+  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.13/BoulangerieLomotoSetup.exe",
   "published_at": "2026-06-02",
-  "notes": "Version 1.3.12 : rapports plus lisibles, solde après paiement des commissions, tableaux améliorés et bouton Fermer dans Travailleurs."
+  "notes": "Version 1.3.13 : le module Travailleurs est accessible uniquement à l'Admin et au Caissier, avec rapports cohérents pour le caissier."
 }
