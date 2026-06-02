@@ -37,7 +37,7 @@ from .version import APP_NAME
 
 TITLE_FILL = PatternFill("solid", fgColor="1F4E78")
 SECTION_FILL = PatternFill("solid", fgColor="D9EAF7")
-HEADER_FILL = PatternFill("solid", fgColor="DCE8F4")
+HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 THIN_BORDER = Border(
     left=Side(style="thin", color="AEBFD0"),
     right=Side(style="thin", color="AEBFD0"),
@@ -46,7 +46,7 @@ THIN_BORDER = Border(
 )
 TITLE_FONT = Font(name="Poppins", size=16, bold=True, color="FFFFFF")
 SECTION_FONT = Font(name="Poppins", size=12, bold=True, color="1F3D5B")
-HEADER_FONT = Font(name="Poppins", size=11, bold=True, color="102840")
+HEADER_FONT = Font(name="Poppins", size=11, bold=True, color="FFFFFF")
 BODY_FONT = Font(name="Poppins", size=11)
 NOTE_FONT = Font(name="Poppins", size=10, italic=True, color="505050")
 CASH_BOLD_FONT = Font(name="Poppins", size=11, bold=True)
@@ -181,6 +181,48 @@ def _production_field_rows(summary: dict[str, Any]) -> list[tuple[str, Any]]:
     ]
 
 
+def _order_status_summary_rows(rows: list[dict[str, Any]]) -> list[tuple[str, int, int, float, float, float]]:
+    summary: dict[str, dict[str, int | float]] = {}
+    for row in rows:
+        status = normalize_status_form_label(row.get("Statut")) or "Non précisé"
+        bucket = summary.setdefault(
+            status,
+            {"count": 0, "trays": 0, "expected": 0.0, "received": 0.0, "debt": 0.0},
+        )
+        bucket["count"] = int(bucket["count"]) + 1
+        bucket["trays"] = int(bucket["trays"]) + int(row.get("NombreBacs", 0) or 0)
+        bucket["expected"] = float(bucket["expected"]) + float(row.get("MontantAPercevoir", 0) or 0)
+        bucket["received"] = float(bucket["received"]) + float(row.get("MontantRecu", 0) or 0)
+        bucket["debt"] = float(bucket["debt"]) + float(row.get("Dette", 0) or 0)
+
+    summary_rows: list[tuple[str, int, int, float, float, float]] = []
+    for status in sorted(summary):
+        bucket = summary[status]
+        summary_rows.append(
+            (
+                status,
+                int(bucket["count"]),
+                int(bucket["trays"]),
+                float(bucket["expected"]),
+                float(bucket["received"]),
+                float(bucket["debt"]),
+            )
+        )
+
+    if summary_rows:
+        summary_rows.append(
+            (
+                "Total",
+                sum(row[1] for row in summary_rows),
+                sum(row[2] for row in summary_rows),
+                sum(row[3] for row in summary_rows),
+                sum(row[4] for row in summary_rows),
+                sum(row[5] for row in summary_rows),
+            )
+        )
+    return summary_rows
+
+
 def _apply_cell_style(
     cell: Any,
     *,
@@ -216,7 +258,7 @@ def _add_table(sheet: Worksheet, start_row: int, end_row: int, end_col: int, nam
     end_col_letter = get_column_letter(end_col)
     table = Table(displayName=name, ref=f"A{start_row}:{end_col_letter}{end_row}")
     table.tableStyleInfo = TableStyleInfo(
-        name="TableStyleMedium2",
+        name="TableStyleMedium9",
         showFirstColumn=False,
         showLastColumn=False,
         showRowStripes=True,
@@ -326,11 +368,18 @@ def _apply_cash_emphasis(sheet: Worksheet, row_index: int, label: str, end_colum
         "Dettes payées du mois",
         "Dettes payées sur la période",
         "Total des entrées",
+        "Net à payer des commissions",
     }:
         font = CASH_BOLD_FONT
     elif label in {"Dépenses", "Dépenses du mois", "Dépenses sur la période", "Paies travailleurs", "Total des sorties"}:
         font = CASH_GREEN_FONT
-    elif label in {"Solde du jour", "Solde du mois", "Solde sur la période", "Solde après paies"}:
+    elif label in {
+        "Solde du jour",
+        "Solde du mois",
+        "Solde sur la période",
+        "Solde après paiement des commissions",
+        "Solde après paies",
+    }:
         font = CASH_RED_FONT
     else:
         return
@@ -370,6 +419,7 @@ def _build_report_context(
     total_payroll_net = _payroll_total(payrolls, "MontantNet")
     total_entries = float(orders_summary.get("MontantRecu", 0) or 0) + paid_debts_today
     balance = total_entries - float(cash.get("MontantTotalDepenses", 0) or 0)
+    total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
 
     return {
         "target_date": target_date,
@@ -403,7 +453,8 @@ def _build_report_context(
         "accumulated_debts_before": accumulated_debts_before,
         "accumulated_debts_remaining": max(accumulated_debts_before - paid_debts_today, 0.0),
         "total_commissions": sum(float(row.get("Commissions", 0) or 0) for row in commissions),
-        "total_net_commissions": sum(float(row.get("NetAPayer", 0) or 0) for row in commissions),
+        "total_net_commissions": total_net_commissions,
+        "balance_after_commissions": balance - total_net_commissions,
         "total_payroll_net": total_payroll_net,
         "total_entries": total_entries,
         "balance": balance,
@@ -480,7 +531,12 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         rows.extend(
             [
                 ("Commissions", context["total_commissions"], "monnaie"),
-                ("Net commissions", context["total_net_commissions"], "monnaie"),
+                ("Net à payer des commissions", context["total_net_commissions"], "monnaie"),
+                *(
+                    [("Solde après paiement des commissions", context["balance_after_commissions"], "monnaie")]
+                    if "cash" in context["allowed_sections"]
+                    else []
+                ),
             ]
         )
     if "workers" in context["allowed_sections"]:
@@ -1059,6 +1115,7 @@ def _build_monthly_report_context(
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
     total_payroll_net = _payroll_total(payrolls, "MontantNet")
+    balance_after_commissions = balance - total_net_commissions
     remaining_accumulated_debts = float(cash_days[-1].get("DettesAccumuleesRestantes", 0) or 0) if cash_days else 0.0
 
     return {
@@ -1097,6 +1154,7 @@ def _build_monthly_report_context(
         "remaining_accumulated_debts": remaining_accumulated_debts,
         "total_commissions": total_commissions,
         "total_net_commissions": total_net_commissions,
+        "balance_after_commissions": balance_after_commissions,
         "total_payroll_net": total_payroll_net,
         "balance_after_payrolls": balance - total_payroll_net,
         "total_farine": sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits),
@@ -1168,6 +1226,7 @@ def _build_period_report_context(
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
     total_payroll_net = _payroll_total(payrolls, "MontantNet")
+    balance_after_commissions = balance - total_net_commissions
     remaining_accumulated_debts = float(cash_days[-1].get("DettesAccumuleesRestantes", 0) or 0) if cash_days else 0.0
 
     return {
@@ -1204,6 +1263,7 @@ def _build_period_report_context(
         "remaining_accumulated_debts": remaining_accumulated_debts,
         "total_commissions": total_commissions,
         "total_net_commissions": total_net_commissions,
+        "balance_after_commissions": balance_after_commissions,
         "total_payroll_net": total_payroll_net,
         "balance_after_payrolls": balance - total_payroll_net,
         "total_farine": sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits),
@@ -1281,7 +1341,12 @@ def _build_monthly_summary_sheet(workbook: Workbook, context: dict[str, Any]) ->
         rows.extend(
             [
                 ("Commissions", context["total_commissions"], "monnaie"),
-                ("Net commissions", context["total_net_commissions"], "monnaie"),
+                ("Net à payer des commissions", context["total_net_commissions"], "monnaie"),
+                *(
+                    [("Solde après paiement des commissions", context["balance_after_commissions"], "monnaie")]
+                    if "cash" in context["allowed_sections"]
+                    else []
+                ),
             ]
         )
     if "workers" in context["allowed_sections"]:
@@ -1473,45 +1538,55 @@ def _build_monthly_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> 
     sheet.freeze_panes = "A4"
     _add_sheet_watermark(sheet, "G5", 220, 220)
 
-    sheet["A1"] = "Commandes du mois"
+    sheet["A1"] = "Synthèse des commandes du mois"
     _apply_cell_style(sheet["A1"], fill=TITLE_FILL, alignment=Alignment(horizontal="left"), font=TITLE_FONT)
     sheet["A2"] = f"Période : {context['period_label']}"
     _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
 
-    headers = ["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]
+    headers = ["Statut", "Commandes", "Bacs", "À percevoir", "Reçu", "Dette"]
     for col_index, header in enumerate(headers, start=1):
         _apply_cell_style(sheet.cell(3, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
 
     current_row = 3
-    if context["orders"]:
-        for item in context["orders"]:
+    summary_rows = _order_status_summary_rows(context["orders"])
+    if summary_rows:
+        for status, count, trays, expected, received, debt in summary_rows:
             current_row += 1
-            row_date = _parse_row_date(item.get("DateCommande"))
             values = [
-                _format_date(row_date) if row_date is not None else _safe_text(item.get("DateCommande")),
-                _safe_text(item.get("Client")),
-                normalize_status_form_label(item.get("Statut")),
-                int(item.get("NombreBacs", 0) or 0),
-                float(item.get("MontantAPercevoir", 0) or 0),
-                float(item.get("MontantRecu", 0) or 0),
-                float(item.get("Dette", 0) or 0),
+                status,
+                count,
+                trays,
+                expected,
+                received,
+                debt,
             ]
             for col_index, value in enumerate(values, start=1):
                 _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
-            for col in range(5, 8):
+            for col in range(4, 7):
                 sheet.cell(current_row, col).number_format = MONEY_FORMAT
+            if status == "Total":
+                for col_index in range(1, 7):
+                    _apply_cell_style(
+                        sheet.cell(current_row, col_index),
+                        fill=SECTION_FILL,
+                        alignment=Alignment(horizontal="left"),
+                        font=SECTION_FONT if col_index == 1 else BODY_FONT,
+                    )
+                for col in range(4, 7):
+                    sheet.cell(current_row, col).number_format = MONEY_FORMAT
+        _add_table(sheet, 3, current_row, 6, "CommandesMensuellesSynthese")
 
-        totals_row = current_row + 1
-        sheet.cell(totals_row, 1, "Totaux")
-        sheet.cell(totals_row, 4, f"=SUM(D4:D{current_row})")
-        sheet.cell(totals_row, 5, f"=SUM(E4:E{current_row})")
-        sheet.cell(totals_row, 6, f"=SUM(F4:F{current_row})")
-        sheet.cell(totals_row, 7, f"=SUM(G4:G{current_row})")
-        for col_index in range(1, 8):
-            _apply_cell_style(sheet.cell(totals_row, col_index), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT if col_index == 1 else BODY_FONT)
-        for col in range(5, 8):
-            sheet.cell(totals_row, col).number_format = MONEY_FORMAT
-        _add_table(sheet, 3, current_row, 7, "CommandesMensuelles")
+        current_row += 2
+        sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 1, end_column=6)
+        note = (
+            "La liste détaillée de toutes les commandes du mois n'est pas affichée ici afin de garder "
+            "le rapport mensuel lisible. Le détail reste disponible dans les rapports journaliers ou de période."
+        )
+        _apply_cell_style(
+            sheet.cell(current_row, 1, note),
+            alignment=Alignment(horizontal="left", vertical="top", wrap_text=True),
+            font=NOTE_FONT,
+        )
     else:
         _apply_cell_style(sheet["A4"], alignment=Alignment(horizontal="left"), font=NOTE_FONT)
         sheet["A4"] = "Aucune commande enregistrée pour ce mois."
@@ -1607,25 +1682,6 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
     else:
         current_row += 1
         _apply_cell_style(sheet.cell(current_row, 1, "Aucune dépense détaillée enregistrée pour ce mois."), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
-
-    current_row += 3
-    sheet.cell(current_row, 1, "Ceux qui ont payé leurs dettes")
-    _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
-    current_row += 1
-    paid_headers = ["Date", "Nom", "Montant payé"]
-    for col_index, header in enumerate(paid_headers, start=1):
-        _apply_cell_style(sheet.cell(current_row, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
-    start_paid = current_row
-    if context["paid_debts_items_by_day"]:
-        for row_date, name, amount in context["paid_debts_items_by_day"]:
-            current_row += 1
-            _apply_cell_style(sheet.cell(current_row, 1, row_date), alignment=Alignment(horizontal="left"))
-            _apply_cell_style(sheet.cell(current_row, 2, name), alignment=Alignment(horizontal="left", wrap_text=True))
-            _apply_cell_style(sheet.cell(current_row, 3, amount), alignment=Alignment(horizontal="left"))
-        _add_table(sheet, start_paid, current_row, 3, "DettesPayeesMensuelles")
-    else:
-        current_row += 1
-        _apply_cell_style(sheet.cell(current_row, 1, "Aucun paiement de dette détaillé pour ce mois."), alignment=Alignment(horizontal="left"), font=NOTE_FONT)
 
     current_row += 3
     sheet.cell(current_row, 1, "NB")
@@ -1768,7 +1824,12 @@ def _build_period_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> 
         rows.extend(
             [
                 ("Commissions", context["total_commissions"], "monnaie"),
-                ("Net commissions", context["total_net_commissions"], "monnaie"),
+                ("Net à payer des commissions", context["total_net_commissions"], "monnaie"),
+                *(
+                    [("Solde après paiement des commissions", context["balance_after_commissions"], "monnaie")]
+                    if "cash" in context["allowed_sections"]
+                    else []
+                ),
             ]
         )
     if "workers" in context["allowed_sections"]:

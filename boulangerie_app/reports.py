@@ -264,6 +264,7 @@ def _cash_highlight_table_styles(rows: list[list[Any]]) -> list[tuple[Any, ...]]
             "Dettes payées du mois",
             "Dettes payées sur la période",
             "Total des entrées",
+            "Net à payer des commissions",
         }:
             styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
         elif label in {
@@ -275,7 +276,13 @@ def _cash_highlight_table_styles(rows: list[list[Any]]) -> list[tuple[Any, ...]]
         }:
             styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
             styles.append(("TEXTCOLOR", (0, row_index), (-1, row_index), colors.HexColor("#1E7D32")))
-        elif label in {"Solde du jour", "Solde du mois", "Solde sur la période", "Solde après paies"}:
+        elif label in {
+            "Solde du jour",
+            "Solde du mois",
+            "Solde sur la période",
+            "Solde après paiement des commissions",
+            "Solde après paies",
+        }:
             styles.append(("FONTNAME", (0, row_index), (-1, row_index), PDF_FONT_BOLD))
             styles.append(("TEXTCOLOR", (0, row_index), (-1, row_index), colors.HexColor(REPORT_RED)))
     return styles
@@ -458,20 +465,21 @@ def _make_table(
 ) -> Table:
     table = Table(rows, colWidths=column_widths, repeatRows=1)
     table_styles: list[tuple[Any, ...]] = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE8F4")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(REPORT_NAVY)),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(REPORT_NAVY)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), PDF_FONT_BOLD),
         ("FONTNAME", (0, 1), (-1, -1), PDF_FONT_REGULAR),
         ("FONTSIZE", (0, 0), (-1, -1), 9.5),
         ("LEADING", (0, 0), (-1, -1), 11.5),
-        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#AEBFD0")),
+        ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor(REPORT_NAVY)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#CAD6E2")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7FAFC")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#FFFFFF"), colors.HexColor("#F4F8FC")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]
     if extra_styles:
         table_styles.extend(extra_styles)
@@ -552,6 +560,46 @@ def _order_table_flowables(
             blocks.append(_paragraph(group_empty_message, styles["note"]))
         blocks.append(Spacer(1, 3 * mm))
     return blocks
+
+
+def _order_status_summary_rows(orders: list[dict[str, Any]]) -> list[list[Any]]:
+    grouped: dict[str, dict[str, float]] = {}
+    for row in orders:
+        status = normalize_status_label(row.get("Statut")) or "Non précisé"
+        summary = grouped.setdefault(
+            status,
+            {"Commandes": 0.0, "Bacs": 0.0, "Attendu": 0.0, "Recu": 0.0, "Dette": 0.0},
+        )
+        summary["Commandes"] += 1
+        summary["Bacs"] += float(row.get("NombreBacs", 0) or 0)
+        summary["Attendu"] += float(row.get("MontantAPercevoir", 0) or 0)
+        summary["Recu"] += float(row.get("MontantRecu", 0) or 0)
+        summary["Dette"] += float(row.get("Dette", 0) or 0)
+
+    table_rows: list[list[Any]] = [["Statut", "Commandes", "Bacs", "À percevoir", "Reçu", "Dette"]]
+    for status, summary in sorted(grouped.items(), key=lambda item: item[0].lower()):
+        table_rows.append(
+            [
+                status,
+                _format_number(summary["Commandes"]),
+                _format_number(summary["Bacs"]),
+                _format_fc(summary["Attendu"]),
+                _format_fc(summary["Recu"]),
+                _format_fc(summary["Dette"]),
+            ]
+        )
+    if len(table_rows) > 1:
+        table_rows.append(
+            [
+                "Total",
+                _format_number(sum(row["Commandes"] for row in grouped.values())),
+                _format_number(sum(row["Bacs"] for row in grouped.values())),
+                _format_fc(sum(row["Attendu"] for row in grouped.values())),
+                _format_fc(sum(row["Recu"] for row in grouped.values())),
+                _format_fc(sum(row["Dette"] for row in grouped.values())),
+            ]
+        )
+    return table_rows
 
 
 def _payroll_table_rows(payrolls: list[dict[str, Any]], include_date: bool) -> list[list[Any]]:
@@ -696,6 +744,7 @@ def create_daily_pdf_report(
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
     total_payroll_net = _payroll_total(payrolls, "MontantNet")
     balance = total_entries - total_expenses
+    balance_after_commissions = balance - total_net_commissions
     balance_after_payrolls = balance - total_payroll_net
 
     styles = _build_styles()
@@ -766,7 +815,12 @@ def create_daily_pdf_report(
         overview_rows.extend(
             [
                 ["Commissions", _format_fc(total_commissions)],
-                ["Net commissions", _format_fc(total_net_commissions)],
+                ["Net à payer des commissions", _format_fc(total_net_commissions)],
+                *(
+                    [["Solde après paiement des commissions", _format_fc(balance_after_commissions)]]
+                    if "cash" in allowed_sections
+                    else []
+                ),
             ]
         )
     if "workers" in allowed_sections:
@@ -1039,6 +1093,7 @@ def create_monthly_pdf_report(
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
     total_payroll_net = _payroll_total(payrolls, "MontantNet")
+    balance_after_commissions = balance - total_net_commissions
     balance_after_payrolls = balance - total_payroll_net
 
     total_farine = sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits)
@@ -1130,7 +1185,12 @@ def create_monthly_pdf_report(
         overview_rows.extend(
             [
                 ["Commissions", _format_fc(total_commissions)],
-                ["Net commissions", _format_fc(total_net_commissions)],
+                ["Net à payer des commissions", _format_fc(total_net_commissions)],
+                *(
+                    [["Solde après paiement des commissions", _format_fc(balance_after_commissions)]]
+                    if "cash" in allowed_sections
+                    else []
+                ),
             ]
         )
     if "workers" in allowed_sections:
@@ -1220,15 +1280,18 @@ def create_monthly_pdf_report(
         elements.append(Spacer(1, 6 * mm))
 
     if "orders" in allowed_sections:
-        elements.append(_paragraph("Commandes du mois", styles["section"]))
-        elements.extend(
-            _order_table_flowables(
-                orders,
-                styles,
-                include_date=True,
-                empty_message="Aucune commande n'a été enregistrée pour ce mois.",
+        order_section: list[Any] = [_paragraph("Synthèse des commandes du mois", styles["section"])]
+        if orders:
+            order_section.append(_make_table(_order_status_summary_rows(orders), [42 * mm, 24 * mm, 18 * mm, 28 * mm, 25 * mm, 23 * mm]))
+            order_section.append(
+                _paragraph(
+                    "La liste détaillée de toutes les commandes n'est pas reprise dans le rapport mensuel afin de garder le document clair et présentable.",
+                    styles["note"],
+                )
             )
-        )
+        else:
+            order_section.append(_paragraph("Aucune commande n'a été enregistrée pour ce mois.", styles["body"]))
+        elements.append(KeepTogether(order_section))
         elements.append(Spacer(1, 6 * mm))
 
     if "cash" in allowed_sections:
@@ -1282,13 +1345,6 @@ def create_monthly_pdf_report(
             for row_date, detail in expense_items_by_day:
                 expense_rows.append([row_date, detail])
             elements.append(_make_table(expense_rows, [28 * mm, 132 * mm]))
-        if paid_debts_items_by_day:
-            elements.append(Spacer(1, 4 * mm))
-            elements.append(_paragraph("Personnes ayant payé leurs dettes", styles["subsection"]))
-            paid_rows: list[list[Any]] = [["Date", "Nom", "Montant payé"]]
-            for row_date, name, amount in paid_debts_items_by_day:
-                paid_rows.append([row_date, name, amount])
-            elements.append(_make_table(paid_rows, [24 * mm, 92 * mm, 44 * mm]))
         elements.append(Spacer(1, 6 * mm))
 
     if "commissions" in allowed_sections:
@@ -1426,6 +1482,7 @@ def create_period_pdf_report(
     total_commissions = sum(float(row.get("Commissions", 0) or 0) for row in commissions)
     total_net_commissions = sum(float(row.get("NetAPayer", 0) or 0) for row in commissions)
     total_payroll_net = _payroll_total(payrolls, "MontantNet")
+    balance_after_commissions = balance - total_net_commissions
     balance_after_payrolls = balance - total_payroll_net
 
     total_farine = sum(float(row.get("SacsUtilises", 0) or 0) for row in stock_exits)
@@ -1517,7 +1574,12 @@ def create_period_pdf_report(
         overview_rows.extend(
             [
                 ["Commissions", _format_fc(total_commissions)],
-                ["Net commissions", _format_fc(total_net_commissions)],
+                ["Net à payer des commissions", _format_fc(total_net_commissions)],
+                *(
+                    [["Solde après paiement des commissions", _format_fc(balance_after_commissions)]]
+                    if "cash" in allowed_sections
+                    else []
+                ),
             ]
         )
     if "workers" in allowed_sections:

@@ -4633,6 +4633,9 @@ class WorkersPayrollWindow(BaseModuleWindow):
         ttk.Label(container, textvariable=self.message_var, foreground="#8b0000", wraplength=980).grid(
             row=3, column=0, sticky="ew", pady=(12, 0)
         )
+        actions = ttk.Frame(container)
+        actions.grid(row=4, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=0)
 
     def refresh_live_view(self) -> None:
         self.refresh_all()
