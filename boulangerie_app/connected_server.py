@@ -131,6 +131,22 @@ _CASH_WRITE_METHODS = {
     "delete_cash_day",
 }
 
+_WORKER_READ_METHODS = {
+    "list_workers",
+    "get_worker",
+    "list_payrolls",
+    "get_workers_payroll_summary",
+}
+
+_WORKER_WRITE_METHODS = {
+    "add_worker",
+    "update_worker",
+    "delete_worker",
+    "add_payroll",
+    "update_payroll",
+    "delete_payroll",
+}
+
 _ADMIN_METHODS = {
     "get_backups_directory",
     "list_backup_files",
@@ -148,20 +164,10 @@ _ADMIN_METHODS = {
     "log_activity",
     "list_activity_logs",
     "get_recent_activity_summary",
-    "list_workers",
-    "get_worker",
-    "add_worker",
-    "update_worker",
-    "delete_worker",
-    "list_payrolls",
-    "add_payroll",
-    "update_payroll",
-    "delete_payroll",
-    "get_workers_payroll_summary",
     "close_day",
     "reopen_day",
     "update_stock_configuration",
-}
+} | _WORKER_READ_METHODS | _WORKER_WRITE_METHODS
 
 
 def _database_helper():
@@ -246,12 +252,15 @@ def _is_method_allowed_for_session(method_name: str, args: list[Any], session: d
             return "stock" in method_text or method_name in {"get_day_closure", "is_day_closed", "list_day_closures"}
         return True
 
+    if method_name in _WORKER_READ_METHODS:
+        return role == "Caissier"
+
     if role == "Gestionnaire de stock":
         return method_name in _STOCK_WRITE_METHODS
     if role == "Gestionnaire des commandes":
         return method_name in _ORDER_WRITE_METHODS
     if role == "Caissier":
-        return method_name in _CASH_WRITE_METHODS
+        return method_name in _CASH_WRITE_METHODS or method_name in _WORKER_WRITE_METHODS
     return False
 
 

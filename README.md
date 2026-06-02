@@ -22,7 +22,7 @@ python main.py
 
 ## Compte par défaut
 
-- identifiant : `admin`
+- identifiant : `a.kayembe`
 - mot de passe : `010203`
 
 ## Base de données
