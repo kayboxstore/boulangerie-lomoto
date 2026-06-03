@@ -88,7 +88,7 @@ DASHBOARD_LOGO_SIZE = 80
 SETTINGS_LOGO_SIZE = 70
 STOCK_DIALOG_LOGO_SIZE = 60
 AUTO_LOCK_TIMEOUT_MS = 10 * 60 * 1000
-AUTO_LOCK_EVENT_SEQUENCES = ("<KeyPress>", "<Button>", "<MouseWheel>")
+AUTO_LOCK_EVENT_SEQUENCES = ("<KeyPress>", "<Button>", "<MouseWheel>", "<B1-Motion>")
 NO_DEBT_PAYMENT_MESSAGE = "Personne n'a payé aujourd'hui parce qu'il n'y a pas de dettes accumulées."
 
 _BRAND_IMAGE_CACHE: dict[tuple[str, int, int], ImageTk.PhotoImage] = {}
@@ -730,6 +730,9 @@ class DateField(ttk.Frame):
 
 
 class DataTable(ttk.Frame):
+    _TOUCH_SCROLL_THRESHOLD = 8
+    _TOUCH_SCROLL_PIXELS_PER_UNIT = 18
+
     def __init__(self, parent: tk.Misc, height: int = 12) -> None:
         super().__init__(parent)
         self.tree = ttk.Treeview(self, show="headings", height=height, selectmode="browse")
@@ -742,8 +745,19 @@ class DataTable(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         self.rows_by_item: dict[str, dict[str, Any]] = {}
+        self._touch_scroll_active = False
+        self._touch_scroll_dragging = False
+        self._touch_start_x_root = 0
+        self._touch_start_y_root = 0
+        self._touch_last_x_root = 0
+        self._touch_last_y_root = 0
+        self._touch_x_remainder = 0
+        self._touch_y_remainder = 0
         self.tree.bind("<MouseWheel>", self._on_mousewheel, add="+")
         self.tree.bind("<Shift-MouseWheel>", self._on_shift_mousewheel, add="+")
+        self.tree.bind("<ButtonPress-1>", self._on_touch_press, add="+")
+        self.tree.bind("<B1-Motion>", self._on_touch_motion, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._on_touch_release, add="+")
 
     def set_data(
         self,
@@ -804,9 +818,91 @@ class DataTable(ttk.Frame):
         self.tree.xview_scroll(units, "units")
         return "break"
 
+    def _on_touch_press(self, event: tk.Event[tk.Misc]) -> str | None:
+        region = self.tree.identify_region(int(getattr(event, "x", 0)), int(getattr(event, "y", 0)))
+        if region in {"heading", "separator"}:
+            self._reset_touch_scroll()
+            return None
+        self._touch_scroll_active = True
+        self._touch_scroll_dragging = False
+        self._touch_start_x_root = int(getattr(event, "x_root", 0) or 0)
+        self._touch_start_y_root = int(getattr(event, "y_root", 0) or 0)
+        self._touch_last_x_root = self._touch_start_x_root
+        self._touch_last_y_root = self._touch_start_y_root
+        self._touch_x_remainder = 0
+        self._touch_y_remainder = 0
+        return None
+
+    def _on_touch_motion(self, event: tk.Event[tk.Misc]) -> str | None:
+        if not self._touch_scroll_active:
+            return None
+        current_x = int(getattr(event, "x_root", 0) or 0)
+        current_y = int(getattr(event, "y_root", 0) or 0)
+        total_dx = current_x - self._touch_start_x_root
+        total_dy = current_y - self._touch_start_y_root
+        if not self._touch_scroll_dragging:
+            if max(abs(total_dx), abs(total_dy)) < self._TOUCH_SCROLL_THRESHOLD:
+                return None
+            self._touch_scroll_dragging = True
+
+        dx = current_x - self._touch_last_x_root
+        dy = current_y - self._touch_last_y_root
+        self._touch_last_x_root = current_x
+        self._touch_last_y_root = current_y
+        self._scroll_from_touch_delta(dx, dy)
+        return "break"
+
+    def _on_touch_release(self, _event: tk.Event[tk.Misc]) -> str | None:
+        was_dragging = self._touch_scroll_dragging
+        self._reset_touch_scroll()
+        return "break" if was_dragging else None
+
+    def _reset_touch_scroll(self) -> None:
+        self._touch_scroll_active = False
+        self._touch_scroll_dragging = False
+        self._touch_x_remainder = 0
+        self._touch_y_remainder = 0
+
+    def _scroll_from_touch_delta(self, dx: int, dy: int) -> None:
+        self._touch_y_remainder += dy
+        y_units = int(self._touch_y_remainder / self._TOUCH_SCROLL_PIXELS_PER_UNIT)
+        if y_units:
+            self.tree.yview_scroll(-y_units, "units")
+            self._touch_y_remainder -= y_units * self._TOUCH_SCROLL_PIXELS_PER_UNIT
+
+        self._touch_x_remainder += dx
+        x_units = int(self._touch_x_remainder / self._TOUCH_SCROLL_PIXELS_PER_UNIT)
+        if x_units:
+            self.tree.xview_scroll(-x_units, "units")
+            self._touch_x_remainder -= x_units * self._TOUCH_SCROLL_PIXELS_PER_UNIT
+
 
 class ScrollableContent(ttk.Frame):
     _mousewheel_bindings_ready = False
+    _touch_bindings_ready = False
+    _active_touch_owner: "ScrollableContent | None" = None
+    _TOUCH_SCROLL_THRESHOLD = 8
+    _TOUCH_SCROLL_BLOCKED_CLASSES = {
+        "Button",
+        "Checkbutton",
+        "Combobox",
+        "Entry",
+        "Listbox",
+        "Radiobutton",
+        "Scale",
+        "Scrollbar",
+        "Spinbox",
+        "TButton",
+        "TCheckbutton",
+        "TCombobox",
+        "TEntry",
+        "Treeview",
+        "TRadiobutton",
+        "TScale",
+        "TScrollbar",
+        "TSpinbox",
+        "Text",
+    }
 
     def __init__(
         self,
@@ -843,6 +939,10 @@ class ScrollableContent(ttk.Frame):
 
         self.content = ttk.Frame(self.canvas, padding=padding)
         self._content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+        self._touch_scroll_active = False
+        self._touch_scroll_dragging = False
+        self._touch_start_x_root = 0
+        self._touch_start_y_root = 0
         setattr(self, "_scrollable_owner", self)
         setattr(self.canvas, "_scrollable_owner", self)
         setattr(self.content, "_scrollable_owner", self)
@@ -853,12 +953,16 @@ class ScrollableContent(ttk.Frame):
         self.after_idle(self._refresh_scroll_region)
 
     def _install_global_mousewheel_bindings(self) -> None:
-        if ScrollableContent._mousewheel_bindings_ready:
-            return
         root = self.winfo_toplevel()
-        root.bind_all("<MouseWheel>", ScrollableContent._dispatch_mousewheel, add="+")
-        root.bind_all("<Shift-MouseWheel>", ScrollableContent._dispatch_shift_mousewheel, add="+")
-        ScrollableContent._mousewheel_bindings_ready = True
+        if not ScrollableContent._mousewheel_bindings_ready:
+            root.bind_all("<MouseWheel>", ScrollableContent._dispatch_mousewheel, add="+")
+            root.bind_all("<Shift-MouseWheel>", ScrollableContent._dispatch_shift_mousewheel, add="+")
+            ScrollableContent._mousewheel_bindings_ready = True
+        if not ScrollableContent._touch_bindings_ready:
+            root.bind_all("<ButtonPress-1>", ScrollableContent._dispatch_touch_press, add="+")
+            root.bind_all("<B1-Motion>", ScrollableContent._dispatch_touch_motion, add="+")
+            root.bind_all("<ButtonRelease-1>", ScrollableContent._dispatch_touch_release, add="+")
+            ScrollableContent._touch_bindings_ready = True
 
     def _on_content_configure(self, _event: tk.Event[tk.Misc]) -> None:
         self._refresh_scroll_region()
@@ -902,6 +1006,31 @@ class ScrollableContent(ttk.Frame):
         if owner is None:
             return None
         return owner._on_shift_mousewheel(event)
+
+    @staticmethod
+    def _dispatch_touch_press(event: tk.Event[tk.Misc]) -> str | None:
+        owner = ScrollableContent._resolve_owner_from_event(event)
+        if owner is None or not owner._can_start_touch_scroll(event):
+            ScrollableContent._active_touch_owner = None
+            return None
+        ScrollableContent._active_touch_owner = owner
+        owner._begin_touch_scroll(event)
+        return None
+
+    @staticmethod
+    def _dispatch_touch_motion(event: tk.Event[tk.Misc]) -> str | None:
+        owner = ScrollableContent._active_touch_owner
+        if owner is None:
+            return None
+        return owner._on_touch_motion(event)
+
+    @staticmethod
+    def _dispatch_touch_release(_event: tk.Event[tk.Misc]) -> str | None:
+        owner = ScrollableContent._active_touch_owner
+        ScrollableContent._active_touch_owner = None
+        if owner is None:
+            return None
+        return owner._on_touch_release()
 
     @staticmethod
     def _resolve_owner_from_event(event: tk.Event[tk.Misc]) -> "ScrollableContent | None":
@@ -954,6 +1083,70 @@ class ScrollableContent(ttk.Frame):
             return None
         self.canvas.xview_scroll(units, "units")
         return "break"
+
+    def _can_start_touch_scroll(self, event: tk.Event[tk.Misc]) -> bool:
+        if not self.vertical_scrollbar.winfo_ismapped() and not self.horizontal_scrollbar.winfo_ismapped():
+            return False
+        widget = getattr(event, "widget", None)
+        if widget is None:
+            return False
+        return not self._is_interactive_touch_widget(widget)
+
+    def _is_interactive_touch_widget(self, widget: tk.Misc) -> bool:
+        current: tk.Misc | None = widget
+        while current is not None:
+            owner = getattr(current, "_scrollable_owner", None)
+            if isinstance(owner, ScrollableContent):
+                return False
+            try:
+                widget_class = current.winfo_class()
+            except tk.TclError:
+                return False
+            if widget_class in self._TOUCH_SCROLL_BLOCKED_CLASSES:
+                return True
+            try:
+                parent_name = current.winfo_parent()
+            except tk.TclError:
+                return False
+            if not parent_name:
+                return False
+            try:
+                current = current.nametowidget(parent_name)
+            except KeyError:
+                return False
+        return False
+
+    def _begin_touch_scroll(self, event: tk.Event[tk.Misc]) -> None:
+        self._touch_scroll_active = True
+        self._touch_scroll_dragging = False
+        self._touch_start_x_root = int(getattr(event, "x_root", 0) or 0)
+        self._touch_start_y_root = int(getattr(event, "y_root", 0) or 0)
+        self.canvas.scan_mark(*self._event_canvas_coordinates(event))
+
+    def _on_touch_motion(self, event: tk.Event[tk.Misc]) -> str | None:
+        if not self._touch_scroll_active:
+            return None
+        current_x = int(getattr(event, "x_root", 0) or 0)
+        current_y = int(getattr(event, "y_root", 0) or 0)
+        dx = current_x - self._touch_start_x_root
+        dy = current_y - self._touch_start_y_root
+        if not self._touch_scroll_dragging:
+            if max(abs(dx), abs(dy)) < self._TOUCH_SCROLL_THRESHOLD:
+                return None
+            self._touch_scroll_dragging = True
+        self.canvas.scan_dragto(*self._event_canvas_coordinates(event), gain=1)
+        return "break"
+
+    def _on_touch_release(self) -> str | None:
+        was_dragging = self._touch_scroll_dragging
+        self._touch_scroll_active = False
+        self._touch_scroll_dragging = False
+        return "break" if was_dragging else None
+
+    def _event_canvas_coordinates(self, event: tk.Event[tk.Misc]) -> tuple[int, int]:
+        x_root = int(getattr(event, "x_root", 0) or 0)
+        y_root = int(getattr(event, "y_root", 0) or 0)
+        return x_root - self.canvas.winfo_rootx(), y_root - self.canvas.winfo_rooty()
 
 
 class LoginWindow(ttk.Frame):

@@ -1,6 +1,6 @@
 {
-  "version": "1.3.14",
-  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.14/BoulangerieLomotoSetup.exe",
-  "published_at": "2026-06-02",
-  "notes": "Version 1.3.14 : le Caissier peut utiliser le module Travailleurs aussi en mode connecté, avec droits serveur, rapports et tableau de bord cohérents."
+  "version": "1.3.15",
+  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.15/BoulangerieLomotoSetup.exe",
+  "published_at": "2026-06-03",
+  "notes": "Version 1.3.15 : ajout du défilement tactile dans les grands formulaires et les tableaux pour les écrans tactiles."
 }
