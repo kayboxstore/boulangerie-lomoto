@@ -1,6 +1,6 @@
 {
-  "version": "1.3.17",
-  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.17/BoulangerieLomotoSetup.exe",
+  "version": "1.3.18",
+  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.18/BoulangerieLomotoSetup.exe",
   "published_at": "2026-06-03",
-  "notes": "Version 1.3.17 : thème visuel repris dans un style plus professionnel, bouton Fermer ajouté dans Travailleurs, copyright dynamique et fenêtre À propos avec contacts."
+  "notes": "Version 1.3.18 : retour à l'ancien design, affichage optionnel du mot de passe à la connexion, rapports mensuels obligatoires après une semaine et mise à jour obligatoire après 10 jours."
 }

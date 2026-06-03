@@ -13,7 +13,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .database import DatabaseHelper
-from .version import APP_VERSION, DEFAULT_UPDATE_MANIFEST_URL, UPDATE_CHECK_INTERVAL_DAYS
+from .version import (
+    APP_VERSION,
+    DEFAULT_UPDATE_MANIFEST_URL,
+    UPDATE_CHECK_INTERVAL_DAYS,
+    UPDATE_MANDATORY_AFTER_DAYS,
+)
 
 
 UTC = timezone.utc
@@ -32,6 +37,10 @@ class UpdateCheckResult:
     status: str
     update_info: UpdateInfo | None = None
     error_message: str = ""
+    mandatory: bool = False
+    first_seen_at: str = ""
+    days_since_available: int = 0
+    mandatory_after_days: int = UPDATE_MANDATORY_AFTER_DAYS
 
 
 @dataclass
@@ -203,6 +212,17 @@ class UpdateChecker:
         if not cls.should_check_now():
             return False
 
+        return cls._start_worker(result_queue)
+
+    @classmethod
+    def run_startup_check_async(cls, result_queue: Queue[UpdateCheckResult]) -> bool:
+        if not cls.get_manifest_url():
+            return False
+
+        return cls._start_worker(result_queue)
+
+    @classmethod
+    def _start_worker(cls, result_queue: Queue[UpdateCheckResult]) -> bool:
         worker = threading.Thread(
             target=cls._worker,
             args=(result_queue,),
@@ -210,6 +230,40 @@ class UpdateChecker:
         )
         worker.start()
         return True
+
+    @classmethod
+    def _build_update_result(
+        cls,
+        state: dict[str, Any],
+        update_info: UpdateInfo,
+        now: datetime,
+    ) -> UpdateCheckResult:
+        available_versions = state.get("available_versions")
+        if not isinstance(available_versions, dict):
+            available_versions = {}
+
+        version_state = available_versions.get(update_info.version)
+        if not isinstance(version_state, dict):
+            version_state = {}
+
+        first_seen = cls.parse_datetime(str(version_state.get("first_seen_at", "")))
+        if first_seen is None:
+            first_seen = now
+            version_state["first_seen_at"] = first_seen.isoformat()
+
+        version_state["last_seen_at"] = now.isoformat()
+        available_versions[update_info.version] = version_state
+        state["available_versions"] = available_versions
+
+        days_since_available = max((now.date() - first_seen.date()).days, 0)
+        return UpdateCheckResult(
+            status="update_available",
+            update_info=update_info,
+            mandatory=days_since_available >= UPDATE_MANDATORY_AFTER_DAYS,
+            first_seen_at=first_seen.isoformat(),
+            days_since_available=days_since_available,
+            mandatory_after_days=UPDATE_MANDATORY_AFTER_DAYS,
+        )
 
     @classmethod
     def _worker(cls, result_queue: Queue[UpdateCheckResult]) -> None:
@@ -224,11 +278,13 @@ class UpdateChecker:
             update_info = cls.fetch_update_info(manifest_url)
             state["last_success_at"] = now.isoformat()
             state["last_available_version"] = update_info.version
-            cls.save_state(state)
 
             if cls.is_newer_version(update_info.version, APP_VERSION):
-                result_queue.put(UpdateCheckResult(status="update_available", update_info=update_info))
+                update_result = cls._build_update_result(state, update_info, now)
+                cls.save_state(state)
+                result_queue.put(update_result)
             else:
+                cls.save_state(state)
                 result_queue.put(UpdateCheckResult(status="up_to_date"))
         except Exception as exc:
             state["last_error"] = str(exc)

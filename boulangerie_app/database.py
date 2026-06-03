@@ -681,6 +681,21 @@ class DatabaseHelper:
                 MotifReouverture TEXT NOT NULL DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS RapportsMensuels (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                AnneeMois TEXT NOT NULL,
+                TypeRapport TEXT NOT NULL,
+                FormatRapport TEXT NOT NULL,
+                DateGeneration TEXT NOT NULL,
+                Identifiant TEXT NOT NULL,
+                NomComplet TEXT NOT NULL,
+                Role TEXT NOT NULL,
+                CheminFichier TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_rapports_mensuels_mois_role
+            ON RapportsMensuels (AnneeMois, Role, TypeRapport, FormatRapport);
+
             CREATE TABLE IF NOT EXISTS HistoriqueActions (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 DateAction TEXT NOT NULL,
@@ -4279,6 +4294,119 @@ class DatabaseHelper:
     @classmethod
     def get_recent_activity_summary(cls, limit: int = 8) -> list[dict[str, Any]]:
         return cls.list_activity_logs(limit=limit)
+
+    @classmethod
+    def _month_label_from_key(cls, year_month: str) -> str:
+        try:
+            parsed = datetime.strptime(f"{year_month}-01", DB_DATE_FORMAT).date()
+        except ValueError:
+            return year_month
+        return parsed.strftime("%m/%Y")
+
+    @classmethod
+    def _previous_month_key(cls, reference_date: date) -> str:
+        first_day = reference_date.replace(day=1)
+        previous_month = first_day - timedelta(days=1)
+        return previous_month.strftime("%Y-%m")
+
+    @classmethod
+    def record_monthly_report_generation(
+        cls,
+        year_month: str,
+        report_type: str,
+        report_format: str,
+        identifiant: str,
+        full_name: str,
+        role: str,
+        file_path: str,
+    ) -> int:
+        normalized_month = str(year_month or "").strip()
+        if not normalized_month:
+            raise ValueError("Le mois du rapport est obligatoire.")
+
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        return cls._execute(
+            """
+            INSERT INTO RapportsMensuels
+                (
+                    AnneeMois,
+                    TypeRapport,
+                    FormatRapport,
+                    DateGeneration,
+                    Identifiant,
+                    NomComplet,
+                    Role,
+                    CheminFichier
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_month,
+                str(report_type or "").strip().lower(),
+                str(report_format or "").strip().upper(),
+                timestamp,
+                identifiant.strip(),
+                full_name.strip() or identifiant.strip(),
+                role.strip(),
+                str(file_path or "").strip(),
+            ),
+        )
+
+    @classmethod
+    def has_monthly_report_for_role(cls, year_month: str, role: str) -> bool:
+        normalized_month = str(year_month or "").strip()
+        normalized_role = str(role or "").strip()
+        if not normalized_month:
+            return False
+
+        if normalized_role == "Admin":
+            value = cls._fetch_value(
+                """
+                SELECT COUNT(*)
+                FROM RapportsMensuels
+                WHERE AnneeMois = ?
+                  AND Role = 'Admin'
+                  AND TypeRapport IN ('monthly', 'cash_monthly')
+                """,
+                (normalized_month,),
+            )
+        else:
+            value = cls._fetch_value(
+                """
+                SELECT COUNT(*)
+                FROM RapportsMensuels
+                WHERE AnneeMois = ?
+                  AND Role IN (?, 'Admin')
+                  AND TypeRapport IN ('monthly', 'cash_monthly')
+                """,
+                (normalized_month, normalized_role),
+            )
+        return int(value or 0) > 0
+
+    @classmethod
+    def get_monthly_report_obligation(
+        cls,
+        role: str,
+        reference_date: date | str | None = None,
+    ) -> dict[str, Any]:
+        if reference_date in (None, ""):
+            normalized_reference = date.today()
+        else:
+            normalized_reference = cls._coerce_date(reference_date)
+
+        target_month = cls._previous_month_key(normalized_reference)
+        due_date = normalized_reference.replace(day=8)
+        already_generated = cls.has_monthly_report_for_role(target_month, role)
+        required = normalized_reference.day >= 8 and not already_generated
+        return {
+            "Required": required,
+            "AlreadyGenerated": already_generated,
+            "YearMonth": target_month,
+            "MonthLabel": cls._month_label_from_key(target_month),
+            "DueDate": due_date.strftime(DB_DATE_FORMAT),
+            "DaysLate": max((normalized_reference - due_date).days, 0) if required else 0,
+            "Role": str(role or "").strip(),
+        }
 
     @classmethod
     def _fetch_all(

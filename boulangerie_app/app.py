@@ -81,21 +81,21 @@ from .version import APP_DEMO, APP_NAME, APP_VERSION
 UI_FONT_FAMILY = "Poppins"
 UI_FONT_SIZE = 11
 UI_FONT = (UI_FONT_FAMILY, UI_FONT_SIZE)
-APP_BACKGROUND = "#eef3f7"
-MODULE_BACKGROUND = "#f7f9fc"
-SURFACE_BACKGROUND = "#ffffff"
-SURFACE_ALT_BACKGROUND = "#e6edf5"
-PRIMARY_COLOR = "#16324f"
-PRIMARY_DARK_COLOR = "#0b1f33"
-ACCENT_COLOR = "#0f766e"
-ACCENT_DARK_COLOR = "#0f4f4a"
-WARNING_COLOR = "#b45309"
-TEXT_COLOR = "#18212f"
-MUTED_TEXT_COLOR = "#667085"
-SUCCESS_COLOR = "#15803d"
-DANGER_COLOR = "#b42318"
-BORDER_COLOR = "#d6dee8"
-TABLE_SELECTED_COLOR = "#d7ebff"
+APP_BACKGROUND = "#dfeaf4"
+MODULE_BACKGROUND = "#eef3f8"
+SURFACE_BACKGROUND = "#fff8ed"
+SURFACE_ALT_BACKGROUND = "#eef3f8"
+PRIMARY_COLOR = "#b22222"
+PRIMARY_DARK_COLOR = "#8b0000"
+ACCENT_COLOR = "#1f4e78"
+ACCENT_DARK_COLOR = "#1b2d5d"
+WARNING_COLOR = "#b36b00"
+TEXT_COLOR = "#111827"
+MUTED_TEXT_COLOR = "#5a6570"
+SUCCESS_COLOR = "#2f5d3a"
+DANGER_COLOR = "#8b0000"
+BORDER_COLOR = "#c8d4df"
+TABLE_SELECTED_COLOR = "#d9ecff"
 OWNER_NAME = "Augustin Kayembe"
 OWNER_PHONE = "+243 991 599 600"
 OWNER_EMAIL_PRIMARY = "kayboxstore@gmail.com"
@@ -402,147 +402,21 @@ def configure_styles() -> None:
         default_root.option_add("*Font", UI_FONT)
         default_root.option_add("*TCombobox*Listbox.font", UI_FONT)
         default_root.option_add("*Text.font", UI_FONT)
-    style.configure(".", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR)
-    style.configure("TFrame", background=APP_BACKGROUND)
-    style.configure("TLabel", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR)
-    style.configure("Card.TFrame", background=SURFACE_BACKGROUND)
-    style.configure(
-        "TButton",
-        font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"),
-        padding=(15, 9),
-        background=SURFACE_ALT_BACKGROUND,
-        foreground=TEXT_COLOR,
-        bordercolor=BORDER_COLOR,
-        lightcolor="#ffffff",
-        darkcolor="#c7d2df",
-        relief="flat",
-    )
-    style.map(
-        "TButton",
-        background=[("pressed", "#ccd8e5"), ("active", "#dce8f3"), ("disabled", "#e7ecf2")],
-        foreground=[("disabled", "#98a2b3")],
-        relief=[("pressed", "sunken"), ("!pressed", "flat")],
-    )
-    style.configure(
-        "TEntry",
-        font=UI_FONT,
-        padding=(10, 7),
-        fieldbackground="#ffffff",
-        foreground=TEXT_COLOR,
-        bordercolor=BORDER_COLOR,
-        lightcolor="#ffffff",
-        darkcolor=BORDER_COLOR,
-    )
-    style.configure(
-        "TCombobox",
-        font=UI_FONT,
-        padding=(10, 7),
-        fieldbackground="#ffffff",
-        foreground=TEXT_COLOR,
-        bordercolor=BORDER_COLOR,
-        arrowcolor=PRIMARY_COLOR,
-        selectbackground=TABLE_SELECTED_COLOR,
-        selectforeground=TEXT_COLOR,
-    )
-    style.configure("TCheckbutton", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR, padding=(4, 4))
-    style.configure("TRadiobutton", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR, padding=(4, 4))
-    style.configure(
-        "TSpinbox",
-        font=UI_FONT,
-        padding=(10, 7),
-        fieldbackground="#ffffff",
-        foreground=TEXT_COLOR,
-        bordercolor=BORDER_COLOR,
-    )
-    style.configure(
-        "Treeview",
-        font=UI_FONT,
-        rowheight=34,
-        background="#ffffff",
-        fieldbackground="#ffffff",
-        foreground=TEXT_COLOR,
-        bordercolor=BORDER_COLOR,
-        lightcolor=BORDER_COLOR,
-        darkcolor=BORDER_COLOR,
-    )
-    style.map(
-        "Treeview",
-        background=[("selected", TABLE_SELECTED_COLOR)],
-        foreground=[("selected", TEXT_COLOR)],
-    )
-    style.configure(
-        "Treeview.Heading",
-        font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"),
-        background=PRIMARY_DARK_COLOR,
-        foreground="#ffffff",
-        padding=(8, 8),
-        relief="flat",
-    )
-    style.map("Treeview.Heading", background=[("active", PRIMARY_COLOR)])
-    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 36, "bold"), foreground=PRIMARY_COLOR, background=APP_BACKGROUND)
-    style.configure("DayLock.TLabel", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"), foreground=DANGER_COLOR, background=APP_BACKGROUND)
-    style.configure(
-        "Card.TLabelframe",
-        padding=14,
-        background=SURFACE_BACKGROUND,
-        bordercolor=BORDER_COLOR,
-        lightcolor="#ffffff",
-        darkcolor="#c7d2df",
-        relief="solid",
-    )
-    style.configure(
-        "Card.TLabelframe.Label",
-        font=(UI_FONT_FAMILY, UI_FONT_SIZE + 1, "bold"),
-        foreground=PRIMARY_DARK_COLOR,
-        background=SURFACE_BACKGROUND,
-    )
-    style.configure(
-        "Primary.TButton",
-        padding=(18, 10),
-        background=ACCENT_COLOR,
-        foreground="#ffffff",
-        bordercolor=ACCENT_DARK_COLOR,
-        lightcolor="#2a9d94",
-        darkcolor=ACCENT_DARK_COLOR,
-    )
-    style.map(
-        "Primary.TButton",
-        background=[("pressed", ACCENT_DARK_COLOR), ("active", "#138a81"), ("disabled", "#aacfc9")],
-        foreground=[("disabled", "#eef8f6")],
-    )
-    style.configure(
-        "Module.TButton",
-        font=(UI_FONT_FAMILY, UI_FONT_SIZE + 1, "bold"),
-        padding=(22, 16),
-        background=PRIMARY_COLOR,
-        foreground="#ffffff",
-        bordercolor=PRIMARY_DARK_COLOR,
-        lightcolor="#244767",
-        darkcolor=PRIMARY_DARK_COLOR,
-    )
-    style.map(
-        "Module.TButton",
-        background=[("pressed", PRIMARY_DARK_COLOR), ("active", "#1f4568"), ("disabled", "#b7c3d1")],
-        foreground=[("disabled", "#f5f7fa")],
-    )
-    style.configure(
-        "Accent.TButton",
-        padding=(16, 10),
-        background=WARNING_COLOR,
-        foreground="#ffffff",
-        bordercolor="#7c2d12",
-        lightcolor="#d97706",
-        darkcolor="#7c2d12",
-    )
-    style.map("Accent.TButton", background=[("pressed", "#7c2d12"), ("active", "#c56612")])
-    style.configure(
-        "Danger.TButton",
-        padding=(16, 10),
-        background=DANGER_COLOR,
-        foreground="#ffffff",
-        bordercolor="#7a130c",
-    )
-    style.map("Danger.TButton", background=[("pressed", "#7a130c"), ("active", "#c43126")])
+    style.configure(".", font=UI_FONT)
+    style.configure("TLabel", font=UI_FONT)
+    style.configure("TButton", font=UI_FONT)
+    style.configure("TEntry", font=UI_FONT)
+    style.configure("TCombobox", font=UI_FONT)
+    style.configure("TCheckbutton", font=UI_FONT)
+    style.configure("TRadiobutton", font=UI_FONT)
+    style.configure("TSpinbox", font=UI_FONT)
+    style.configure("Treeview", font=UI_FONT, rowheight=28)
+    style.configure("Treeview.Heading", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
+    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 44, "bold"), foreground="#B30000")
+    style.configure("DayLock.TLabel", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"), foreground="#8b0000")
+    style.configure("Card.TLabelframe", padding=8)
+    style.configure("Card.TLabelframe.Label", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
+    style.configure("Primary.TButton", padding=(12, 8))
 
 
 def today_iso() -> str:
@@ -1042,11 +916,8 @@ class DataTable(ttk.Frame):
                 value = row.get(column, "")
                 formatter = formatters.get(column)
                 values.append(formatter(value) if formatter else value)
-            row_tag = "odd" if index % 2 else "even"
-            self.tree.insert("", "end", iid=item_id, values=values, tags=(row_tag,))
+            self.tree.insert("", "end", iid=item_id, values=values)
             self.rows_by_item[item_id] = row
-        self.tree.tag_configure("even", background="#ffffff")
-        self.tree.tag_configure("odd", background="#f5f8fc")
 
     def selected_row(self) -> dict[str, Any] | None:
         selection = self.tree.selection()
@@ -1474,8 +1345,18 @@ class LoginWindow(ttk.Frame):
 
         ttk.Label(card, text="Mot de passe").grid(row=row_index, column=0, sticky="w", pady=6)
         self.password_var = tk.StringVar()
-        self.password_entry = ttk.Entry(card, textvariable=self.password_var, width=30, show="*")
-        self.password_entry.grid(row=row_index, column=1, sticky="ew", pady=6)
+        self.show_password_var = tk.BooleanVar(value=False)
+        password_row = ttk.Frame(card)
+        password_row.grid(row=row_index, column=1, sticky="ew", pady=6)
+        password_row.columnconfigure(0, weight=1)
+        self.password_entry = ttk.Entry(password_row, textvariable=self.password_var, width=30, show="*")
+        self.password_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Checkbutton(
+            password_row,
+            text="Afficher",
+            variable=self.show_password_var,
+            command=self.toggle_password_visibility,
+        ).grid(row=0, column=1, padx=(8, 0))
         row_index += 1
 
         button_row = ttk.Frame(card)
@@ -1509,6 +1390,9 @@ class LoginWindow(ttk.Frame):
 
     def open_about(self) -> None:
         AboutWindow(self)
+
+    def toggle_password_visibility(self) -> None:
+        self.password_entry.configure(show="" if self.show_password_var.get() else "*")
 
     def _apply_session_connection_settings(self, settings: ConnectionSettings) -> None:
         DatabaseHelper.apply_connection_settings(settings, persist=False)
@@ -2478,42 +2362,38 @@ class DashboardMetricCard(tk.Frame):
     def __init__(self, parent: tk.Misc, accent: str) -> None:
         super().__init__(
             parent,
-            bg=SURFACE_BACKGROUND,
+            bg=accent,
             bd=0,
-            highlightthickness=1,
-            highlightbackground=BORDER_COLOR,
+            highlightthickness=0,
         )
         self.title_var = tk.StringVar(value="")
         self.value_var = tk.StringVar(value="")
         self.subtitle_var = tk.StringVar(value="")
 
-        self.configure(padx=0, pady=0)
-        tk.Frame(self, bg=accent, width=5, bd=0, highlightthickness=0).pack(side="left", fill="y")
-        content = tk.Frame(self, bg=SURFACE_BACKGROUND, bd=0, highlightthickness=0, padx=16, pady=14)
-        content.pack(side="left", fill="both", expand=True)
+        self.configure(padx=16, pady=14)
         tk.Label(
-            content,
+            self,
             textvariable=self.title_var,
-            bg=SURFACE_BACKGROUND,
-            fg=MUTED_TEXT_COLOR,
+            bg=accent,
+            fg="#ffffff",
             font=(UI_FONT_FAMILY, 11, "bold"),
             anchor="w",
             justify="left",
         ).pack(fill="x")
         tk.Label(
-            content,
+            self,
             textvariable=self.value_var,
-            bg=SURFACE_BACKGROUND,
-            fg=PRIMARY_DARK_COLOR,
+            bg=accent,
+            fg="#ffffff",
             font=(UI_FONT_FAMILY, 24, "bold"),
             anchor="w",
             justify="left",
         ).pack(fill="x", pady=(6, 2))
         tk.Label(
-            content,
+            self,
             textvariable=self.subtitle_var,
-            bg=SURFACE_BACKGROUND,
-            fg=TEXT_COLOR,
+            bg=accent,
+            fg="#f5f5f5",
             font=(UI_FONT_FAMILY, 10),
             anchor="w",
             justify="left",
@@ -2667,6 +2547,7 @@ class DashboardWindow(tk.Toplevel):
         self.module_opening = False
         self.module_opening_overlay: tk.Toplevel | None = None
         self.critical_alerts_shown = False
+        self.monthly_report_obligation: dict[str, Any] | None = None
         self.metric_cards: list[DashboardMetricCard] = []
         self.stock_alerts_var = tk.StringVar(value="Chargement des alertes de stock...")
         self.debt_alerts_var = tk.StringVar(value="Chargement des alertes de dettes...")
@@ -2686,8 +2567,9 @@ class DashboardWindow(tk.Toplevel):
         maximize_window(self, 980, 640)
         self.request_refresh_summary(50)
         self.bind("<FocusIn>", lambda _event: self.request_refresh_summary(150))
-        self.after(1000, self.start_weekly_update_check)
+        self.after(1000, self.start_startup_update_check)
         self.after(700, self.show_role_critical_alerts)
+        self.after(1200, self.check_monthly_report_obligation)
         if self.is_live_sync_enabled():
             self.schedule_live_refresh()
         self.install_auto_lock()
@@ -2744,8 +2626,8 @@ class DashboardWindow(tk.Toplevel):
         self.module_buttons: dict[str, ttk.Button] = {}
         visible_buttons = [(label, callback) for label, callback in buttons if self.can_access(label, show_warning=False)]
         for index, (label, callback) in enumerate(visible_buttons):
-            button = ttk.Button(grid, text=label, style="Module.TButton", command=deferred_ui_command(self, callback))
-            button.grid(row=index // 2, column=index % 2, padx=10, pady=10, sticky="ew")
+            button = ttk.Button(grid, text=label, command=deferred_ui_command(self, callback))
+            button.grid(row=index // 2, column=index % 2, padx=8, pady=8, sticky="ew")
             self.module_buttons[label] = button
 
         grid.columnconfigure(0, weight=1)
@@ -2762,14 +2644,14 @@ class DashboardWindow(tk.Toplevel):
         cards_grid.pack(fill="x")
         self.metric_cards = []
         metric_colors = (
-            PRIMARY_COLOR,
-            "#275c7a",
-            SUCCESS_COLOR,
-            ACCENT_COLOR,
-            WARNING_COLOR,
-            "#475467",
-            "#2563eb",
-            "#7c3aed",
+            "#b22222",
+            "#1f4e78",
+            "#0a7d53",
+            "#6b3fa0",
+            "#b36b00",
+            "#6d4c41",
+            "#00796b",
+            "#455a64",
         )
         for index, color in enumerate(metric_colors):
             card = DashboardMetricCard(cards_grid, color)
@@ -3461,10 +3343,51 @@ class DashboardWindow(tk.Toplevel):
         )
         self.security_label.configure(foreground=SUCCESS_COLOR)
 
-    def start_weekly_update_check(self) -> None:
+    def check_monthly_report_obligation(self, *, silent: bool = False) -> bool:
+        try:
+            obligation = DatabaseHelper.get_monthly_report_obligation(self.user.role)
+        except Exception as exc:
+            if not silent:
+                messagebox.showwarning("Rapport mensuel", str(exc), parent=self)
+            return False
+
+        self.monthly_report_obligation = obligation if bool(obligation.get("Required")) else None
+        if self.monthly_report_obligation is None:
+            return False
+
+        if not silent:
+            month_label = str(obligation.get("MonthLabel") or obligation.get("YearMonth") or "")
+            messagebox.showwarning(
+                "Rapport mensuel obligatoire",
+                (
+                    f"Le rapport mensuel de {month_label} doit être généré.\n\n"
+                    "À partir du 8 du mois, l'impression/génération du rapport mensuel du mois précédent "
+                    "devient obligatoire. Les grands modules resteront bloqués jusqu'à la génération du rapport."
+                ),
+                parent=self,
+            )
+            self.open_pdf_report(required_monthly=True)
+        return True
+
+    def enforce_monthly_report_obligation(self) -> bool:
+        if self.check_monthly_report_obligation(silent=True):
+            month_label = str(self.monthly_report_obligation.get("MonthLabel") or "") if self.monthly_report_obligation else ""
+            messagebox.showwarning(
+                "Rapport mensuel obligatoire",
+                (
+                    f"Veuillez générer le rapport mensuel de {month_label} avant de continuer.\n\n"
+                    "La fenêtre des rapports PDF va s'ouvrir en mode mensuel."
+                ),
+                parent=self,
+            )
+            self.open_pdf_report(required_monthly=True)
+            return True
+        return False
+
+    def start_startup_update_check(self) -> None:
         if self.update_check_running:
             return
-        self.update_check_running = UpdateChecker.run_weekly_check_async(self.update_result_queue)
+        self.update_check_running = UpdateChecker.run_startup_check_async(self.update_result_queue)
         if self.update_check_running:
             self.after(300, self.poll_update_results)
 
@@ -3480,7 +3403,7 @@ class DashboardWindow(tk.Toplevel):
 
         self.update_check_running = False
         if result.status == "update_available" and result.update_info is not None:
-            self.show_update_dialog(result.update_info)
+            self.show_update_dialog(result)
 
     def backup_database(self) -> None:
         try:
@@ -3587,18 +3510,22 @@ class DashboardWindow(tk.Toplevel):
         self.wait_window(window)
         self.refresh_summary()
 
-    def open_pdf_report(self) -> None:
-        window = PdfReportWindow(self)
+    def open_pdf_report(self, required_monthly: bool = False) -> None:
+        window = PdfReportWindow(self, required_monthly=required_monthly)
         self.wait_window(window)
+        self.check_monthly_report_obligation(silent=True)
 
     def open_excel_report(self) -> None:
         window = ExcelReportWindow(self)
         self.wait_window(window)
 
-    def show_update_dialog(self, update_info: UpdateInfo) -> None:
+    def show_update_dialog(self, result: UpdateCheckResult) -> None:
+        update_info = result.update_info
+        if update_info is None:
+            return
         message = (
             "Une nouvelle version de l'application est disponible.\n\n"
-            f"Version installee : {APP_VERSION}\n"
+            f"Version installée : {APP_VERSION}\n"
             f"Nouvelle version : {update_info.version}"
         )
 
@@ -3607,6 +3534,26 @@ class DashboardWindow(tk.Toplevel):
 
         if update_info.notes:
             message += f"\n\nNotes :\n{update_info.notes}"
+
+        if result.mandatory:
+            message += (
+                "\n\nCette mise à jour est maintenant obligatoire. "
+                f"Elle est disponible depuis {result.days_since_available} jour(s), "
+                f"et le délai autorisé est de {result.mandatory_after_days} jours.\n\n"
+                "Le lien de téléchargement va s'ouvrir. Installez la nouvelle version pour continuer."
+            )
+            messagebox.showwarning("Mise à jour obligatoire", message)
+            webbrowser.open(update_info.download_url)
+            self.cancel_dashboard_timers()
+            self.root.destroy()
+            return
+
+        remaining_days = max(result.mandatory_after_days - result.days_since_available, 0)
+        if result.first_seen_at:
+            message += (
+                f"\n\nCette version deviendra obligatoire dans {remaining_days} jour(s) "
+                "si elle n'est pas installée."
+            )
 
         message += "\n\nVoulez-vous ouvrir le lien de téléchargement ?"
 
@@ -3669,6 +3616,8 @@ class DashboardWindow(tk.Toplevel):
 
     def open_large_module(self, window_factory: Callable[[DashboardWindow], BaseModuleWindow], module_label: str) -> None:
         if self.module_opening:
+            return
+        if self.enforce_monthly_report_obligation():
             return
         self.module_opening = True
         self.configure(cursor="watch")
@@ -4215,13 +4164,14 @@ class ServerBackupsWindow(BaseModuleWindow):
 
 
 class PdfReportWindow(BaseModuleWindow):
-    def __init__(self, parent: DashboardWindow) -> None:
+    def __init__(self, parent: DashboardWindow, *, required_monthly: bool = False) -> None:
         super().__init__(parent, "Rapports PDF", "760x560", start_maximized=False)
         self.identifiant = parent.user.identifiant
         self.role = parent.user.role
         self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
         self.open_after_generation_var = tk.BooleanVar(value=True)
         self.report_mode_var = tk.StringVar(value="daily")
+        self.required_monthly = required_monthly
         self.message_var = tk.StringVar(value="")
         self.build_ui()
 
@@ -4298,6 +4248,13 @@ class PdfReportWindow(BaseModuleWindow):
 
         form.columnconfigure(1, weight=1)
         self.report_mode_var.trace_add("write", self._on_report_mode_change)
+        if self.required_monthly:
+            previous_month = date.today().replace(day=1) - timedelta(days=1)
+            self.report_mode_var.set("monthly")
+            self.date_field.set_date(previous_month.strftime("%Y-%m-%d"))
+            self.message_var.set(
+                "Rapport mensuel obligatoire : générez le PDF du mois précédent pour continuer."
+            )
         self._on_report_mode_change()
 
         ttk.Label(
@@ -4403,6 +4360,21 @@ class PdfReportWindow(BaseModuleWindow):
             return
 
         self.message_var.set(f"Rapport créé : {report_path}")
+        if mode in {"monthly", "cash_monthly"}:
+            report_reference_date = month_start if mode == "cash_monthly" else target_date
+            try:
+                DatabaseHelper.record_monthly_report_generation(
+                    report_reference_date.strftime("%Y-%m"),
+                    mode,
+                    "PDF",
+                    self.parent.user.identifiant,
+                    self.parent.user.display_name,
+                    self.role,
+                    str(report_path),
+                )
+                self.parent.monthly_report_obligation = None
+            except Exception as exc:
+                self.message_var.set(f"Rapport créé, mais suivi mensuel non enregistré : {exc}")
         log_user_action(
             self,
             "Rapports PDF",
@@ -4618,6 +4590,21 @@ class ExcelReportWindow(BaseModuleWindow):
             return
 
         self.message_var.set(f"Rapport créé : {report_path}")
+        if mode in {"monthly", "cash_monthly"}:
+            report_reference_date = month_start if mode == "cash_monthly" else target_date
+            try:
+                DatabaseHelper.record_monthly_report_generation(
+                    report_reference_date.strftime("%Y-%m"),
+                    mode,
+                    "EXCEL",
+                    self.parent.user.identifiant,
+                    self.parent.user.display_name,
+                    self.role,
+                    str(report_path),
+                )
+                self.parent.monthly_report_obligation = None
+            except Exception as exc:
+                self.message_var.set(f"Rapport créé, mais suivi mensuel non enregistré : {exc}")
         log_user_action(
             self,
             "Rapports Excel",

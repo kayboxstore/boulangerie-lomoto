@@ -147,6 +147,12 @@ _WORKER_WRITE_METHODS = {
     "delete_payroll",
 }
 
+_REPORT_METHODS = {
+    "record_monthly_report_generation",
+    "has_monthly_report_for_role",
+    "get_monthly_report_obligation",
+}
+
 _ADMIN_METHODS = {
     "get_backups_directory",
     "list_backup_files",
@@ -167,7 +173,7 @@ _ADMIN_METHODS = {
     "close_day",
     "reopen_day",
     "update_stock_configuration",
-} | _WORKER_READ_METHODS | _WORKER_WRITE_METHODS
+} | _WORKER_READ_METHODS | _WORKER_WRITE_METHODS | _REPORT_METHODS
 
 
 def _database_helper():
@@ -254,6 +260,9 @@ def _is_method_allowed_for_session(method_name: str, args: list[Any], session: d
 
     if method_name in _WORKER_READ_METHODS:
         return role == "Caissier"
+
+    if method_name in _REPORT_METHODS:
+        return True
 
     if role == "Gestionnaire de stock":
         return method_name in _STOCK_WRITE_METHODS

@@ -123,6 +123,9 @@ REMOTE_DATABASE_METHODS = {
     "get_commission_synthesis_from_orders",
     "find_existing_commission",
     "get_total_commissions",
+    "record_monthly_report_generation",
+    "has_monthly_report_for_role",
+    "get_monthly_report_obligation",
 }
 
 
