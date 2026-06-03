@@ -2,7 +2,7 @@ import os
 
 
 APP_NAME = os.environ.get("BOULANGERIE_APP_NAME", "Boulangerie Lomoto")
-APP_VERSION = os.environ.get("BOULANGERIE_APP_VERSION", "1.3.15")
+APP_VERSION = os.environ.get("BOULANGERIE_APP_VERSION", "1.3.16")
 APP_PUBLISHER = "Kay Box Store"
 APP_EDITION = os.environ.get("BOULANGERIE_APP_EDITION", "standard")
 APP_DEMO = APP_EDITION.strip().lower() == "demo"

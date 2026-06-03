@@ -81,8 +81,20 @@ from .version import APP_DEMO, APP_NAME, APP_VERSION
 UI_FONT_FAMILY = "Poppins"
 UI_FONT_SIZE = 11
 UI_FONT = (UI_FONT_FAMILY, UI_FONT_SIZE)
-APP_BACKGROUND = "#dfeaf4"
-MODULE_BACKGROUND = "#eef3f8"
+APP_BACKGROUND = "#f4ead8"
+MODULE_BACKGROUND = "#fff7ec"
+SURFACE_BACKGROUND = "#fffaf2"
+SURFACE_ALT_BACKGROUND = "#f8ead5"
+PRIMARY_COLOR = "#a11d21"
+PRIMARY_DARK_COLOR = "#6f1115"
+ACCENT_COLOR = "#c97821"
+ACCENT_DARK_COLOR = "#8a4a12"
+TEXT_COLOR = "#2f1b12"
+MUTED_TEXT_COLOR = "#725846"
+SUCCESS_COLOR = "#1f7a54"
+DANGER_COLOR = "#b42318"
+BORDER_COLOR = "#e0c7a5"
+TABLE_SELECTED_COLOR = "#ffe0b5"
 FORM_LOGO_SIZE = 68
 DASHBOARD_LOGO_SIZE = 80
 SETTINGS_LOGO_SIZE = 70
@@ -272,21 +284,146 @@ def configure_styles() -> None:
         default_root.option_add("*Font", UI_FONT)
         default_root.option_add("*TCombobox*Listbox.font", UI_FONT)
         default_root.option_add("*Text.font", UI_FONT)
-    style.configure(".", font=UI_FONT)
-    style.configure("TLabel", font=UI_FONT)
-    style.configure("TButton", font=UI_FONT)
-    style.configure("TEntry", font=UI_FONT)
-    style.configure("TCombobox", font=UI_FONT)
-    style.configure("TCheckbutton", font=UI_FONT)
-    style.configure("TRadiobutton", font=UI_FONT)
-    style.configure("TSpinbox", font=UI_FONT)
-    style.configure("Treeview", font=UI_FONT, rowheight=28)
-    style.configure("Treeview.Heading", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
-    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 44, "bold"), foreground="#B30000")
-    style.configure("DayLock.TLabel", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"), foreground="#8b0000")
-    style.configure("Card.TLabelframe", padding=8)
-    style.configure("Card.TLabelframe.Label", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
-    style.configure("Primary.TButton", padding=(12, 8))
+    style.configure(".", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR)
+    style.configure("TFrame", background=APP_BACKGROUND)
+    style.configure("TLabel", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR)
+    style.configure(
+        "TButton",
+        font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"),
+        padding=(16, 10),
+        background=SURFACE_ALT_BACKGROUND,
+        foreground=TEXT_COLOR,
+        bordercolor=BORDER_COLOR,
+        lightcolor="#ffffff",
+        darkcolor=BORDER_COLOR,
+        relief="flat",
+    )
+    style.map(
+        "TButton",
+        background=[("pressed", "#ead2ae"), ("active", "#f1d9b5"), ("disabled", "#e8dccb")],
+        foreground=[("disabled", "#9a8d80")],
+        relief=[("pressed", "sunken"), ("!pressed", "flat")],
+    )
+    style.configure(
+        "TEntry",
+        font=UI_FONT,
+        padding=(10, 7),
+        fieldbackground="#ffffff",
+        foreground=TEXT_COLOR,
+        bordercolor=BORDER_COLOR,
+        lightcolor=BORDER_COLOR,
+        darkcolor=BORDER_COLOR,
+    )
+    style.configure(
+        "TCombobox",
+        font=UI_FONT,
+        padding=(10, 7),
+        fieldbackground="#ffffff",
+        foreground=TEXT_COLOR,
+        bordercolor=BORDER_COLOR,
+        arrowcolor=PRIMARY_COLOR,
+        selectbackground=TABLE_SELECTED_COLOR,
+        selectforeground=TEXT_COLOR,
+    )
+    style.configure("TCheckbutton", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR, padding=(4, 4))
+    style.configure("TRadiobutton", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR, padding=(4, 4))
+    style.configure(
+        "TSpinbox",
+        font=UI_FONT,
+        padding=(10, 7),
+        fieldbackground="#ffffff",
+        foreground=TEXT_COLOR,
+        bordercolor=BORDER_COLOR,
+    )
+    style.configure(
+        "Treeview",
+        font=UI_FONT,
+        rowheight=34,
+        background="#fffdf8",
+        fieldbackground="#fffdf8",
+        foreground=TEXT_COLOR,
+        bordercolor=BORDER_COLOR,
+        lightcolor=BORDER_COLOR,
+        darkcolor=BORDER_COLOR,
+    )
+    style.map(
+        "Treeview",
+        background=[("selected", TABLE_SELECTED_COLOR)],
+        foreground=[("selected", TEXT_COLOR)],
+    )
+    style.configure(
+        "Treeview.Heading",
+        font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"),
+        background=PRIMARY_DARK_COLOR,
+        foreground="#ffffff",
+        padding=(8, 8),
+        relief="flat",
+    )
+    style.map("Treeview.Heading", background=[("active", PRIMARY_COLOR)])
+    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 42, "bold"), foreground=PRIMARY_COLOR, background=APP_BACKGROUND)
+    style.configure("DayLock.TLabel", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"), foreground=DANGER_COLOR, background=APP_BACKGROUND)
+    style.configure(
+        "Card.TLabelframe",
+        padding=12,
+        background=SURFACE_BACKGROUND,
+        bordercolor=BORDER_COLOR,
+        lightcolor="#ffffff",
+        darkcolor=BORDER_COLOR,
+        relief="solid",
+    )
+    style.configure(
+        "Card.TLabelframe.Label",
+        font=(UI_FONT_FAMILY, UI_FONT_SIZE + 1, "bold"),
+        foreground=PRIMARY_DARK_COLOR,
+        background=SURFACE_BACKGROUND,
+    )
+    style.configure(
+        "Primary.TButton",
+        padding=(18, 11),
+        background=PRIMARY_COLOR,
+        foreground="#ffffff",
+        bordercolor=PRIMARY_DARK_COLOR,
+        lightcolor=PRIMARY_COLOR,
+        darkcolor=PRIMARY_DARK_COLOR,
+    )
+    style.map(
+        "Primary.TButton",
+        background=[("pressed", PRIMARY_DARK_COLOR), ("active", "#bd2b2f"), ("disabled", "#d6a6a8")],
+        foreground=[("disabled", "#fff4f4")],
+    )
+    style.configure(
+        "Module.TButton",
+        font=(UI_FONT_FAMILY, UI_FONT_SIZE + 2, "bold"),
+        padding=(22, 18),
+        background=PRIMARY_COLOR,
+        foreground="#ffffff",
+        bordercolor=PRIMARY_DARK_COLOR,
+        lightcolor="#d24549",
+        darkcolor=PRIMARY_DARK_COLOR,
+    )
+    style.map(
+        "Module.TButton",
+        background=[("pressed", PRIMARY_DARK_COLOR), ("active", "#c23336"), ("disabled", "#d8b1b2")],
+        foreground=[("disabled", "#fff4f4")],
+    )
+    style.configure(
+        "Accent.TButton",
+        padding=(16, 10),
+        background=ACCENT_COLOR,
+        foreground="#ffffff",
+        bordercolor=ACCENT_DARK_COLOR,
+        lightcolor="#df9145",
+        darkcolor=ACCENT_DARK_COLOR,
+    )
+    style.map("Accent.TButton", background=[("pressed", ACCENT_DARK_COLOR), ("active", "#d48732")])
+    style.configure(
+        "Danger.TButton",
+        padding=(16, 10),
+        background=DANGER_COLOR,
+        foreground="#ffffff",
+        bordercolor="#7a130c",
+    )
+    style.map("Danger.TButton", background=[("pressed", "#7a130c"), ("active", "#c43126")])
 
 
 def today_iso() -> str:
@@ -786,8 +923,11 @@ class DataTable(ttk.Frame):
                 value = row.get(column, "")
                 formatter = formatters.get(column)
                 values.append(formatter(value) if formatter else value)
-            self.tree.insert("", "end", iid=item_id, values=values)
+            row_tag = "odd" if index % 2 else "even"
+            self.tree.insert("", "end", iid=item_id, values=values, tags=(row_tag,))
             self.rows_by_item[item_id] = row
+        self.tree.tag_configure("even", background="#fffdf8")
+        self.tree.tag_configure("odd", background="#fff4e4")
 
     def selected_row(self) -> dict[str, Any] | None:
         selection = self.tree.selection()
@@ -1181,7 +1321,7 @@ class LoginWindow(ttk.Frame):
             row=1, column=0, columnspan=2, pady=(0, 18)
         )
 
-        ttk.Label(card, text=f"Version {APP_VERSION}", foreground="#5a6570").grid(
+        ttk.Label(card, text=f"Version {APP_VERSION}", foreground=MUTED_TEXT_COLOR).grid(
             row=2, column=0, columnspan=2, pady=(0, 12)
         )
 
@@ -1189,7 +1329,7 @@ class LoginWindow(ttk.Frame):
         ttk.Label(
             card,
             textvariable=self.connection_status_var,
-            foreground="#2f5d3a",
+            foreground=SUCCESS_COLOR,
             wraplength=360,
             justify="center",
         ).grid(row=3, column=0, columnspan=2, pady=(0, 12))
@@ -1761,7 +1901,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
         ttk.Label(
             server_frame,
             textvariable=self.server_status_var,
-            foreground="#2f5d3a",
+            foreground=SUCCESS_COLOR,
             wraplength=620,
             justify="center",
         ).pack(fill="x", pady=(0, 10))
@@ -1786,7 +1926,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
         ttk.Label(
             service_frame,
             textvariable=self.windows_service_status_var,
-            foreground="#2f5d3a",
+            foreground=SUCCESS_COLOR,
             wraplength=620,
             justify="center",
         ).pack(fill="x", pady=(0, 10))
@@ -1815,7 +1955,7 @@ class ConnectionSettingsDialog(tk.Toplevel):
             height=4,
             wrap="word",
             font=UI_FONT,
-            fg="#8b0000",
+            fg=DANGER_COLOR,
             bg="#fff8f8",
             relief="solid",
             borderwidth=1,
@@ -2210,12 +2350,18 @@ class ConnectionSettingsDialog(tk.Toplevel):
 
 class DashboardMetricCard(tk.Frame):
     def __init__(self, parent: tk.Misc, accent: str) -> None:
-        super().__init__(parent, bg=accent, bd=0, highlightthickness=0)
+        super().__init__(
+            parent,
+            bg=accent,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#ead2ae",
+        )
         self.title_var = tk.StringVar(value="")
         self.value_var = tk.StringVar(value="")
         self.subtitle_var = tk.StringVar(value="")
 
-        self.configure(padx=16, pady=14)
+        self.configure(padx=18, pady=16)
         tk.Label(
             self,
             textvariable=self.title_var,
@@ -2238,7 +2384,7 @@ class DashboardMetricCard(tk.Frame):
             self,
             textvariable=self.subtitle_var,
             bg=accent,
-            fg="#eef5fb",
+            fg="#fff1df",
             font=(UI_FONT_FAMILY, 10),
             anchor="w",
             justify="left",
@@ -2312,7 +2458,7 @@ class ActivityHistoryWindow(tk.Toplevel):
         ttk.Label(
             container,
             textvariable=self.message_var,
-            foreground="#4b5563",
+            foreground=MUTED_TEXT_COLOR,
             wraplength=900,
             justify="left",
         ).grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -2430,13 +2576,13 @@ class DashboardWindow(tk.Toplevel):
         ttk.Label(
             container,
             text=f"Version installee : {APP_VERSION}",
-            foreground="#5a6570",
+            foreground=MUTED_TEXT_COLOR,
         ).pack(anchor="center", pady=(0, 8))
 
         ttk.Label(
             container,
             text=DatabaseHelper.get_connection_status_text(),
-            foreground="#2f5d3a",
+            foreground=SUCCESS_COLOR,
             wraplength=680,
             justify="center",
         ).pack(anchor="center", pady=(0, 8))
@@ -2469,8 +2615,8 @@ class DashboardWindow(tk.Toplevel):
         self.module_buttons: dict[str, ttk.Button] = {}
         visible_buttons = [(label, callback) for label, callback in buttons if self.can_access(label, show_warning=False)]
         for index, (label, callback) in enumerate(visible_buttons):
-            button = ttk.Button(grid, text=label, command=deferred_ui_command(self, callback))
-            button.grid(row=index // 2, column=index % 2, padx=8, pady=8, sticky="ew")
+            button = ttk.Button(grid, text=label, style="Module.TButton", command=deferred_ui_command(self, callback))
+            button.grid(row=index // 2, column=index % 2, padx=10, pady=10, sticky="ew")
             self.module_buttons[label] = button
 
         grid.columnconfigure(0, weight=1)
@@ -2487,14 +2633,14 @@ class DashboardWindow(tk.Toplevel):
         cards_grid.pack(fill="x")
         self.metric_cards = []
         metric_colors = (
-            "#b22222",
-            "#1f4e78",
-            "#0a7d53",
-            "#6b3fa0",
-            "#b36b00",
-            "#6d4c41",
-            "#00796b",
-            "#455a64",
+            PRIMARY_COLOR,
+            "#6f3f1d",
+            SUCCESS_COLOR,
+            ACCENT_COLOR,
+            "#8a5a2b",
+            "#5c4033",
+            "#2f6f73",
+            "#514236",
         )
         for index, color in enumerate(metric_colors):
             card = DashboardMetricCard(cards_grid, color)
@@ -2507,12 +2653,12 @@ class DashboardWindow(tk.Toplevel):
         if self.user.role in {"Admin", "Gestionnaire de stock"}:
             stock_box = ttk.Frame(alerts_frame)
             stock_box.pack(fill="x", pady=(0, 10))
-            ttk.Label(stock_box, text="Stock faible", foreground="#8b0000").pack(anchor="w")
+            ttk.Label(stock_box, text="Stock faible", foreground=DANGER_COLOR).pack(anchor="w")
             ttk.Label(stock_box, textvariable=self.stock_alerts_var, justify="left", wraplength=760).pack(fill="x")
         if self.user.role in {"Admin", "Caissier", "Gestionnaire des commandes"}:
             debt_box = ttk.Frame(alerts_frame)
             debt_box.pack(fill="x")
-            ttk.Label(debt_box, text="Dettes en attente", foreground="#8b0000").pack(anchor="w")
+            ttk.Label(debt_box, text="Dettes en attente", foreground=DANGER_COLOR).pack(anchor="w")
             ttk.Label(debt_box, textvariable=self.debt_alerts_var, justify="left", wraplength=760).pack(fill="x")
 
         if self.user.role == "Admin":
@@ -3176,13 +3322,13 @@ class DashboardWindow(tk.Toplevel):
                 "Attention : ce compte utilise encore le mot de passe par défaut. "
                 "Changez-le maintenant pour mieux protéger l'application."
             )
-            self.security_label.configure(foreground="#8b0000")
+            self.security_label.configure(foreground=DANGER_COLOR)
             return
 
         self.security_message_var.set(
             "Vous pouvez changer votre mot de passe à tout moment depuis ce tableau de bord."
         )
-        self.security_label.configure(foreground="#2f5d3a")
+        self.security_label.configure(foreground=SUCCESS_COLOR)
 
     def start_weekly_update_check(self) -> None:
         if self.update_check_running:
@@ -3351,7 +3497,7 @@ class DashboardWindow(tk.Toplevel):
         self.destroy_module_opening_overlay()
         overlay = tk.Toplevel(self)
         overlay.overrideredirect(True)
-        overlay.configure(bg="#fff8ed")
+        overlay.configure(bg=SURFACE_BACKGROUND)
         overlay.resizable(False, False)
         frame = ttk.Frame(overlay, padding=(24, 18, 24, 18))
         frame.pack(fill="both", expand=True)
@@ -3359,13 +3505,13 @@ class DashboardWindow(tk.Toplevel):
             frame,
             text=f"Ouverture de {module_label}...",
             font=(UI_FONT_FAMILY, 15, "bold"),
-            foreground="#8b0000",
+            foreground=PRIMARY_COLOR,
             justify="center",
         ).pack(fill="x")
         ttk.Label(
             frame,
             text="Préparation de la fenêtre, un instant.",
-            foreground="#4b5563",
+            foreground=MUTED_TEXT_COLOR,
             justify="center",
         ).pack(fill="x", pady=(8, 0))
 
@@ -3675,7 +3821,7 @@ class DayClosuresWindow(BaseModuleWindow):
             textvariable=self.message_var,
             wraplength=820,
             justify="left",
-            foreground="#4b5563",
+            foreground=MUTED_TEXT_COLOR,
         ).grid(row=2, column=0, sticky="ew", pady=(12, 10))
 
         actions = ttk.Frame(container)
@@ -3834,7 +3980,7 @@ class ServerBackupsWindow(BaseModuleWindow):
         ttk.Label(
             container,
             textvariable=self.message_var,
-            foreground="#4b5563",
+            foreground=MUTED_TEXT_COLOR,
             justify="left",
             wraplength=780,
         ).grid(row=3, column=0, sticky="ew", pady=(12, 8))
@@ -3963,7 +4109,7 @@ class PdfReportWindow(BaseModuleWindow):
         ttk.Label(
             intro,
             text=f"Profil du rapport : {get_report_scope_label(self.role)}",
-            foreground="#2f5d3a",
+            foreground=SUCCESS_COLOR,
             justify="center",
         ).pack(fill="x", pady=(8, 0))
 
@@ -3994,7 +4140,7 @@ class PdfReportWindow(BaseModuleWindow):
                 "Mensuel : le mois de la date de début est utilisé. "
                 "Période : toutes les données entre la date de début et la date de fin sont regroupées."
             ),
-            foreground="#4b5563",
+            foreground=MUTED_TEXT_COLOR,
             wraplength=520,
             justify="left",
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -4022,7 +4168,7 @@ class PdfReportWindow(BaseModuleWindow):
         ttk.Label(
             container,
             textvariable=self.message_var,
-            foreground="#8b0000",
+            foreground=DANGER_COLOR,
             wraplength=520,
             justify="center",
         ).pack(fill="x", pady=(12, 0))
@@ -4173,7 +4319,7 @@ class ExcelReportWindow(BaseModuleWindow):
         ttk.Label(
             intro,
             text=f"Profil du rapport : {get_report_scope_label(self.role)}",
-            foreground="#2f5d3a",
+            foreground=SUCCESS_COLOR,
             justify="center",
         ).pack(fill="x", pady=(8, 0))
 
@@ -4204,7 +4350,7 @@ class ExcelReportWindow(BaseModuleWindow):
                 "Mensuel : le mois de la date de début est utilisé. "
                 "Période : toutes les données entre la date de début et la date de fin sont regroupées."
             ),
-            foreground="#4b5563",
+            foreground=MUTED_TEXT_COLOR,
             wraplength=520,
             justify="left",
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -4235,7 +4381,7 @@ class ExcelReportWindow(BaseModuleWindow):
         ttk.Label(
             container,
             textvariable=self.message_var,
-            foreground="#8b0000",
+            foreground=DANGER_COLOR,
             wraplength=520,
             justify="center",
         ).pack(fill="x", pady=(12, 0))
@@ -4385,13 +4531,13 @@ class ChangePasswordWindow(BaseModuleWindow):
                 "Ce compte utilise encore le mot de passe par défaut. "
                 "Choisissez-en un nouveau des maintenant."
             )
-            description_color = "#8b0000"
+            description_color = DANGER_COLOR
         else:
             description_text = (
                 "Saisissez votre mot de passe actuel, puis choisissez un nouveau mot de passe "
                 "d'au moins 6 caracteres."
             )
-            description_color = "#2f5d3a"
+            description_color = SUCCESS_COLOR
 
         ttk.Label(
             description,
@@ -4428,7 +4574,7 @@ class ChangePasswordWindow(BaseModuleWindow):
         ttk.Label(
             container,
             textvariable=self.message_var,
-            foreground="#8b0000",
+            foreground=DANGER_COLOR,
             wraplength=440,
             justify="center",
         ).pack(fill="x", pady=(12, 0))
@@ -4527,7 +4673,7 @@ class UsersWindow(BaseModuleWindow):
         form.columnconfigure(1, weight=1)
 
         self.message_var = tk.StringVar(value="")
-        ttk.Label(form, textvariable=self.message_var, foreground="#8b0000", wraplength=320).grid(
+        ttk.Label(form, textvariable=self.message_var, foreground=DANGER_COLOR, wraplength=320).grid(
             row=5, column=0, columnspan=2, sticky="ew", pady=(12, 0)
         )
 
@@ -4694,7 +4840,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         ttk.Label(
             container,
             textvariable=self.summary_var,
-            foreground="#1f4e78",
+            foreground=ACCENT_DARK_COLOR,
             justify="center",
             wraplength=980,
         ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
@@ -4785,7 +4931,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         ttk.Label(payroll_form, text="Retenue").grid(row=6, column=0, sticky="w", pady=5)
         ttk.Entry(payroll_form, textvariable=self.payroll_withholding_var).grid(row=6, column=1, sticky="ew", pady=5)
         ttk.Label(payroll_form, text="Net à payer").grid(row=7, column=0, sticky="w", pady=5)
-        ttk.Label(payroll_form, textvariable=self.payroll_net_var, foreground="#8b0000").grid(
+        ttk.Label(payroll_form, textvariable=self.payroll_net_var, foreground=DANGER_COLOR).grid(
             row=7, column=1, sticky="w", pady=5
         )
         ttk.Label(payroll_form, text="Mode paiement").grid(row=8, column=0, sticky="w", pady=5)
@@ -4835,7 +4981,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         self.payrolls_table.tree.bind("<Double-1>", lambda _event: self.load_payroll_for_edit())
 
         self.message_var = tk.StringVar(value="")
-        ttk.Label(container, textvariable=self.message_var, foreground="#8b0000", wraplength=980).grid(
+        ttk.Label(container, textvariable=self.message_var, foreground=DANGER_COLOR, wraplength=980).grid(
             row=3, column=0, sticky="ew", pady=(12, 0)
         )
         actions = ttk.Frame(container)
@@ -5810,7 +5956,7 @@ class PrevisionWindow(BaseModuleWindow):
         )
         self.status_combo.grid(row=3, column=1, sticky="ew", pady=6)
 
-        ttk.Label(form, text="Commande", foreground="#1b2d5d").grid(
+        ttk.Label(form, text="Commande", foreground=PRIMARY_DARK_COLOR).grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(14, 6)
         )
 
@@ -5834,7 +5980,7 @@ class PrevisionWindow(BaseModuleWindow):
             row=8, column=1, sticky="w", pady=6
         )
 
-        self._make_label_value(form, "Total ligne", self.line_total_var, 9, "#006400")
+        self._make_label_value(form, "Total ligne", self.line_total_var, 9, SUCCESS_COLOR)
 
         actions = ttk.Frame(form)
         actions.grid(row=10, column=0, columnspan=2, pady=(14, 0))
@@ -6439,12 +6585,12 @@ class ProductionWindow(BaseModuleWindow):
             row=7, column=1, sticky="w", pady=6
         )
 
-        self._make_label_value(form, "Total bacs produits", self.total_produced_var, 8, "#006400")
-        self._make_label_value(form, "Bacs disponibles", self.available_trays_var, 9, "#006400")
+        self._make_label_value(form, "Total bacs produits", self.total_produced_var, 8, SUCCESS_COLOR)
+        self._make_label_value(form, "Bacs disponibles", self.available_trays_var, 9, SUCCESS_COLOR)
         ttk.Label(form, text="Écart avec commandes").grid(row=10, column=0, sticky="w", pady=6)
-        self.gap_label = ttk.Label(form, textvariable=self.gap_var, foreground="#1b2d5d")
+        self.gap_label = ttk.Label(form, textvariable=self.gap_var, foreground=PRIMARY_DARK_COLOR)
         self.gap_label.grid(row=10, column=1, sticky="w", pady=6)
-        self._make_label_value(form, "Taux de couverture", self.coverage_var, 11, "#1f4e78")
+        self._make_label_value(form, "Taux de couverture", self.coverage_var, 11, ACCENT_DARK_COLOR)
         ttk.Label(form, text="Nombre de sacs utilisés").grid(row=12, column=0, sticky="w", pady=6)
         self.sacks_used_entry = ttk.Entry(form, textvariable=self.sacks_used_var, width=12)
         self.sacks_used_entry.grid(row=12, column=1, sticky="w", pady=6)
@@ -6545,7 +6691,7 @@ class ProductionWindow(BaseModuleWindow):
         self.available_trays_var.set(str(remaining))
         self.gap_var.set(str(gap))
         self.coverage_var.set(f"{format_number(coverage)} %")
-        self.gap_label.configure(foreground="#8b0000" if gap < 0 else "#006400")
+        self.gap_label.configure(foreground=DANGER_COLOR if gap < 0 else SUCCESS_COLOR)
 
     def load_day_summary(self) -> None:
         try:
@@ -6857,7 +7003,7 @@ class OrdersWindow(BaseModuleWindow):
 
         ttk.Label(form, text="Dette").grid(row=6, column=0, sticky="w", pady=6)
         self.debt_var = tk.StringVar(value=format_fc(0))
-        self.debt_label = ttk.Label(form, textvariable=self.debt_var, foreground="#006400")
+        self.debt_label = ttk.Label(form, textvariable=self.debt_var, foreground=SUCCESS_COLOR)
         self.debt_label.grid(row=6, column=1, sticky="w", pady=6)
 
         actions = ttk.Frame(form)
@@ -6997,10 +7143,10 @@ class OrdersWindow(BaseModuleWindow):
         self.amount_due_var.set(format_fc(amount_due))
         if amount_received > amount_due:
             self.debt_var.set("Paiement trop élevé")
-            self.debt_label.configure(foreground="#8b0000")
+            self.debt_label.configure(foreground=DANGER_COLOR)
             return
         self.debt_var.set(format_fc(debt))
-        self.debt_label.configure(foreground="#8b0000" if debt > 0 else "#006400")
+        self.debt_label.configure(foreground=DANGER_COLOR if debt > 0 else SUCCESS_COLOR)
 
     def validate_order(self) -> tuple[date, str, str, int, float, float, float] | None:
         try:
@@ -7450,9 +7596,9 @@ class CashWindow(BaseModuleWindow):
 
         self._make_label_value(form, "Nombre total de bacs", self.total_trays_var, 1)
         self._make_label_value(form, "Montant attendu", self.expected_var, 2, "#7a0000")
-        self._make_label_value(form, "Montant reçu", self.received_var, 3, "#006400")
-        self._make_label_value(form, "Dettes du jour", self.debts_var, 4, "#8b0000")
-        self._make_label_value(form, "Total dettes accumulées", self.accumulated_debts_var, 5, "#8b0000")
+        self._make_label_value(form, "Montant reçu", self.received_var, 3, SUCCESS_COLOR)
+        self._make_label_value(form, "Dettes du jour", self.debts_var, 4, DANGER_COLOR)
+        self._make_label_value(form, "Total dettes accumulées", self.accumulated_debts_var, 5, DANGER_COLOR)
 
         ttk.Label(form, text="Dettes payées aujourd'hui").grid(row=6, column=0, sticky="w", pady=6)
         ttk.Entry(form, textvariable=self.paid_debts_var, width=28).grid(row=6, column=1, sticky="ew", pady=6)
@@ -7462,7 +7608,7 @@ class CashWindow(BaseModuleWindow):
         self.paid_debts_details_text.configure(font=UI_FONT)
         self.paid_debts_details_text.grid(row=7, column=1, sticky="ew", pady=6)
 
-        self._make_label_value(form, "Dettes accumulées restantes", self.remaining_accumulated_debts_var, 8, "#8b0000")
+        self._make_label_value(form, "Dettes accumulées restantes", self.remaining_accumulated_debts_var, 8, DANGER_COLOR)
         self._make_label_value(form, "Statut dettes accumulées", self.accumulated_debts_status_var, 9, "#1f4e79")
         self._make_label_value(form, "Total des entrées", self.total_entries_var, 10, "#1f4e79")
 
@@ -7475,7 +7621,7 @@ class CashWindow(BaseModuleWindow):
         self.expenses_text.configure(font=UI_FONT)
         self.expenses_text.grid(row=12, column=1, sticky="ew", pady=6)
 
-        self._make_label_value(form, "Solde", self.balance_var, 13, "#1b2d5d")
+        self._make_label_value(form, "Solde", self.balance_var, 13, PRIMARY_DARK_COLOR)
 
         actions = ttk.Frame(form)
         actions.grid(row=14, column=0, columnspan=2, pady=(14, 0))
@@ -7859,7 +8005,7 @@ class CommissionsWindow(BaseModuleWindow):
             ),
             wraplength=360,
             justify="left",
-            foreground="#4b5563",
+            foreground=MUTED_TEXT_COLOR,
         ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
 
         ttk.Label(form, text="Date").grid(row=1, column=0, sticky="w", pady=6)
@@ -7881,11 +8027,11 @@ class CommissionsWindow(BaseModuleWindow):
         self.net_value = tk.StringVar(value=format_fc(0))
 
         self._make_label_value(form, "Statut", self.status_value, 3, "#7a0000")
-        self._make_label_value(form, "Nombre de bacs", self.trays_value, 4, "#1b2d5d")
-        self._make_label_value(form, "Montant payé", self.amount_paid_value, 5, "#006400")
+        self._make_label_value(form, "Nombre de bacs", self.trays_value, 4, PRIMARY_DARK_COLOR)
+        self._make_label_value(form, "Montant payé", self.amount_paid_value, 5, SUCCESS_COLOR)
         self._make_label_value(form, "Commissions", self.commissions_value, 6, "#7a0000")
-        self._make_label_value(form, "Dettes", self.debts_value, 7, "#8b0000")
-        self.net_label = ttk.Label(form, textvariable=self.net_value, foreground="#1b2d5d")
+        self._make_label_value(form, "Dettes", self.debts_value, 7, DANGER_COLOR)
+        self.net_label = ttk.Label(form, textvariable=self.net_value, foreground=PRIMARY_DARK_COLOR)
         ttk.Label(form, text="Net à payer").grid(row=8, column=0, sticky="w", pady=6)
         self.net_label.grid(row=8, column=1, sticky="w", pady=6)
 
@@ -7949,7 +8095,7 @@ class CommissionsWindow(BaseModuleWindow):
         self.commissions_value.set(format_fc(0))
         self.debts_value.set(format_fc(0))
         self.net_value.set(format_fc(0))
-        self.net_label.configure(foreground="#1b2d5d")
+        self.net_label.configure(foreground=PRIMARY_DARK_COLOR)
 
     def reset_form(self) -> None:
         self.selected_commission_id = 0
@@ -8004,7 +8150,7 @@ class CommissionsWindow(BaseModuleWindow):
         self.commissions_value.set(format_fc(self.current_commission))
         self.debts_value.set(format_fc(self.current_debt))
         self.net_value.set(format_fc(self.current_net))
-        self.net_label.configure(foreground="#8b0000" if self.current_net < 0 else "#1b2d5d")
+        self.net_label.configure(foreground=DANGER_COLOR if self.current_net < 0 else PRIMARY_DARK_COLOR)
         self.refresh_day_lock_state()
 
     def refresh_commissions(self) -> None:
@@ -8244,7 +8390,7 @@ class CommissionsWindow(BaseModuleWindow):
         self.commissions_value.set(format_fc(self.current_commission))
         self.debts_value.set(format_fc(self.current_debt))
         self.net_value.set(format_fc(self.current_net))
-        self.net_label.configure(foreground="#8b0000" if self.current_net < 0 else "#1b2d5d")
+        self.net_label.configure(foreground=DANGER_COLOR if self.current_net < 0 else PRIMARY_DARK_COLOR)
         self.refresh_day_lock_state()
         messagebox.showinfo("Commissions", "La commission a été chargée. Modifiez-la puis enregistrez.")
 

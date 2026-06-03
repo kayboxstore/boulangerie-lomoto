@@ -22,7 +22,7 @@ if ($repos -notcontains $Repository) {
 $image = "$Region-docker.pkg.dev/$ProjectId/$Repository/${Service}:latest"
 gcloud builds submit --config cloud-run/cloudbuild.yaml --substitutions "_REGION=$Region,_REPOSITORY=$Repository,_SERVICE=$Service" .
 
-$envVars = "BOULANGERIE_APP_NAME=Boulangerie Lomoto,BOULANGERIE_APP_VERSION=1.3.15,BOULANGERIE_REQUIRE_SESSION_AUTH=1"
+$envVars = "BOULANGERIE_APP_NAME=Boulangerie Lomoto,BOULANGERIE_APP_VERSION=1.3.16,BOULANGERIE_REQUIRE_SESSION_AUTH=1"
 if ($Token.Trim()) {
     $envVars = "$envVars,BOULANGERIE_API_TOKEN=$Token"
 }

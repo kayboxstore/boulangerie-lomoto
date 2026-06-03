@@ -1,6 +1,6 @@
 {
-  "version": "1.3.15",
-  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.15/BoulangerieLomotoSetup.exe",
+  "version": "1.3.16",
+  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.16/BoulangerieLomotoSetup.exe",
   "published_at": "2026-06-03",
-  "notes": "Version 1.3.15 : ajout du défilement tactile dans les grands formulaires et les tableaux pour les écrans tactiles."
+  "notes": "Version 1.3.16 : nouveau thème visuel plus élégant, boutons plus attractifs, tableaux plus lisibles et confort renforcé pour écran tactile."
 }
