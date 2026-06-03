@@ -81,20 +81,25 @@ from .version import APP_DEMO, APP_NAME, APP_VERSION
 UI_FONT_FAMILY = "Poppins"
 UI_FONT_SIZE = 11
 UI_FONT = (UI_FONT_FAMILY, UI_FONT_SIZE)
-APP_BACKGROUND = "#f4ead8"
-MODULE_BACKGROUND = "#fff7ec"
-SURFACE_BACKGROUND = "#fffaf2"
-SURFACE_ALT_BACKGROUND = "#f8ead5"
-PRIMARY_COLOR = "#a11d21"
-PRIMARY_DARK_COLOR = "#6f1115"
-ACCENT_COLOR = "#c97821"
-ACCENT_DARK_COLOR = "#8a4a12"
-TEXT_COLOR = "#2f1b12"
-MUTED_TEXT_COLOR = "#725846"
-SUCCESS_COLOR = "#1f7a54"
+APP_BACKGROUND = "#eef3f7"
+MODULE_BACKGROUND = "#f7f9fc"
+SURFACE_BACKGROUND = "#ffffff"
+SURFACE_ALT_BACKGROUND = "#e6edf5"
+PRIMARY_COLOR = "#16324f"
+PRIMARY_DARK_COLOR = "#0b1f33"
+ACCENT_COLOR = "#0f766e"
+ACCENT_DARK_COLOR = "#0f4f4a"
+WARNING_COLOR = "#b45309"
+TEXT_COLOR = "#18212f"
+MUTED_TEXT_COLOR = "#667085"
+SUCCESS_COLOR = "#15803d"
 DANGER_COLOR = "#b42318"
-BORDER_COLOR = "#e0c7a5"
-TABLE_SELECTED_COLOR = "#ffe0b5"
+BORDER_COLOR = "#d6dee8"
+TABLE_SELECTED_COLOR = "#d7ebff"
+OWNER_NAME = "Augustin Kayembe"
+OWNER_PHONE = "+243 991 599 600"
+OWNER_EMAIL_PRIMARY = "kayboxstore@gmail.com"
+OWNER_EMAIL_SECONDARY = "kayboxstore@outlook.fr"
 FORM_LOGO_SIZE = 68
 DASHBOARD_LOGO_SIZE = 80
 SETTINGS_LOGO_SIZE = 70
@@ -252,6 +257,119 @@ def create_branded_header(
     return header
 
 
+def current_copyright_text() -> str:
+    year = date.today().year
+    return f"© {year} {APP_NAME} - {OWNER_NAME} / Kay Box Store. Tous droits réservés."
+
+
+def copyright_legal_notice() -> str:
+    return (
+        "Application de gestion commerciale développée pour Boulangerie Lomoto. "
+        "Toute reproduction, distribution ou modification non autorisée est interdite."
+    )
+
+
+class CopyrightFooter(ttk.Frame):
+    REFRESH_INTERVAL_MS = 60 * 60 * 1000
+
+    def __init__(self, parent: tk.Misc, *, wraplength: int = 900) -> None:
+        super().__init__(parent)
+        self.wraplength = wraplength
+        self.text_var = tk.StringVar(value=self._build_text())
+        ttk.Separator(self).pack(fill="x", pady=(6, 5))
+        ttk.Label(
+            self,
+            textvariable=self.text_var,
+            foreground=MUTED_TEXT_COLOR,
+            justify="center",
+            wraplength=self.wraplength,
+        ).pack(fill="x")
+        self.after(self.REFRESH_INTERVAL_MS, self.refresh_text)
+
+    def _build_text(self) -> str:
+        return f"{current_copyright_text()}\n{copyright_legal_notice()}"
+
+    def refresh_text(self) -> None:
+        self.text_var.set(self._build_text())
+        self.after(self.REFRESH_INTERVAL_MS, self.refresh_text)
+
+
+def add_copyright_footer(parent: tk.Misc, *, wraplength: int = 900) -> CopyrightFooter:
+    return CopyrightFooter(parent, wraplength=wraplength)
+
+
+class AboutWindow(tk.Toplevel):
+    def __init__(self, parent: tk.Misc) -> None:
+        owner = parent.winfo_toplevel()
+        super().__init__(owner)
+        self.title(f"À propos - {APP_NAME}")
+        self.geometry("640x520")
+        self.minsize(600, 480)
+        self.configure(bg=APP_BACKGROUND)
+        self.resizable(True, True)
+        apply_window_icon(self)
+        self.transient(owner)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.close_window)
+        self.build_ui()
+        center_window(self)
+
+    def build_ui(self) -> None:
+        container = ttk.Frame(self, padding=(22, 18, 22, 18))
+        container.pack(fill="both", expand=True)
+        logo = create_logo_widget(container, 92)
+        if logo is not None:
+            logo.pack(anchor="center", pady=(0, 8))
+
+        ttk.Label(
+            container,
+            text=APP_NAME.upper(),
+            font=(UI_FONT_FAMILY, 24, "bold"),
+            foreground=PRIMARY_COLOR,
+            justify="center",
+        ).pack(fill="x")
+        ttk.Label(
+            container,
+            text=f"Version {APP_VERSION}",
+            foreground=MUTED_TEXT_COLOR,
+            justify="center",
+        ).pack(fill="x", pady=(2, 14))
+
+        description = (
+            f"{OWNER_NAME} est le responsable de Kay Box Store et l'initiateur de cette solution. "
+            "Cette application accompagne la gestion quotidienne de la boulangerie : ventes, commandes, "
+            "stock, production, caisse, travailleurs, rapports et suivi des activités."
+        )
+        ttk.Label(
+            container,
+            text=description,
+            wraplength=560,
+            justify="center",
+        ).pack(fill="x", pady=(0, 14))
+
+        contact_frame = ttk.LabelFrame(container, text="Contact", style="Card.TLabelframe")
+        contact_frame.pack(fill="x", pady=(0, 14))
+        ttk.Label(contact_frame, text=f"Téléphone : {OWNER_PHONE}", justify="center").pack(fill="x", pady=2)
+        ttk.Label(
+            contact_frame,
+            text=f"E-mails : {OWNER_EMAIL_PRIMARY} / {OWNER_EMAIL_SECONDARY}",
+            justify="center",
+            wraplength=520,
+        ).pack(fill="x", pady=2)
+
+        ttk.Label(
+            container,
+            text=f"{current_copyright_text()}\n{copyright_legal_notice()}",
+            foreground=MUTED_TEXT_COLOR,
+            wraplength=560,
+            justify="center",
+        ).pack(fill="x", pady=(0, 16))
+        ttk.Button(container, text="Fermer", style="Primary.TButton", command=self.close_window).pack(anchor="center")
+
+    def close_window(self) -> None:
+        self.destroy()
+
+
 def run_app() -> None:
     if os.name == "nt" and not is_running_as_administrator():
         if relaunch_current_process_as_administrator():
@@ -262,8 +380,8 @@ def run_app() -> None:
     post_update_notice = UpdateChecker.consume_post_update_notice()
     root = tk.Tk()
     root.title(f"{APP_NAME} - Connexion - v{APP_VERSION}")
-    root.geometry("580x380")
-    root.minsize(580, 380)
+    root.geometry("660x500")
+    root.minsize(620, 470)
     root.configure(bg=APP_BACKGROUND)
     apply_window_icon(root)
     configure_styles()
@@ -287,21 +405,22 @@ def configure_styles() -> None:
     style.configure(".", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR)
     style.configure("TFrame", background=APP_BACKGROUND)
     style.configure("TLabel", font=UI_FONT, background=APP_BACKGROUND, foreground=TEXT_COLOR)
+    style.configure("Card.TFrame", background=SURFACE_BACKGROUND)
     style.configure(
         "TButton",
         font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"),
-        padding=(16, 10),
+        padding=(15, 9),
         background=SURFACE_ALT_BACKGROUND,
         foreground=TEXT_COLOR,
         bordercolor=BORDER_COLOR,
         lightcolor="#ffffff",
-        darkcolor=BORDER_COLOR,
+        darkcolor="#c7d2df",
         relief="flat",
     )
     style.map(
         "TButton",
-        background=[("pressed", "#ead2ae"), ("active", "#f1d9b5"), ("disabled", "#e8dccb")],
-        foreground=[("disabled", "#9a8d80")],
+        background=[("pressed", "#ccd8e5"), ("active", "#dce8f3"), ("disabled", "#e7ecf2")],
+        foreground=[("disabled", "#98a2b3")],
         relief=[("pressed", "sunken"), ("!pressed", "flat")],
     )
     style.configure(
@@ -311,7 +430,7 @@ def configure_styles() -> None:
         fieldbackground="#ffffff",
         foreground=TEXT_COLOR,
         bordercolor=BORDER_COLOR,
-        lightcolor=BORDER_COLOR,
+        lightcolor="#ffffff",
         darkcolor=BORDER_COLOR,
     )
     style.configure(
@@ -339,8 +458,8 @@ def configure_styles() -> None:
         "Treeview",
         font=UI_FONT,
         rowheight=34,
-        background="#fffdf8",
-        fieldbackground="#fffdf8",
+        background="#ffffff",
+        fieldbackground="#ffffff",
         foreground=TEXT_COLOR,
         bordercolor=BORDER_COLOR,
         lightcolor=BORDER_COLOR,
@@ -360,15 +479,15 @@ def configure_styles() -> None:
         relief="flat",
     )
     style.map("Treeview.Heading", background=[("active", PRIMARY_COLOR)])
-    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 42, "bold"), foreground=PRIMARY_COLOR, background=APP_BACKGROUND)
+    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 36, "bold"), foreground=PRIMARY_COLOR, background=APP_BACKGROUND)
     style.configure("DayLock.TLabel", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"), foreground=DANGER_COLOR, background=APP_BACKGROUND)
     style.configure(
         "Card.TLabelframe",
-        padding=12,
+        padding=14,
         background=SURFACE_BACKGROUND,
         bordercolor=BORDER_COLOR,
         lightcolor="#ffffff",
-        darkcolor=BORDER_COLOR,
+        darkcolor="#c7d2df",
         relief="solid",
     )
     style.configure(
@@ -379,43 +498,43 @@ def configure_styles() -> None:
     )
     style.configure(
         "Primary.TButton",
-        padding=(18, 11),
-        background=PRIMARY_COLOR,
+        padding=(18, 10),
+        background=ACCENT_COLOR,
         foreground="#ffffff",
-        bordercolor=PRIMARY_DARK_COLOR,
-        lightcolor=PRIMARY_COLOR,
-        darkcolor=PRIMARY_DARK_COLOR,
+        bordercolor=ACCENT_DARK_COLOR,
+        lightcolor="#2a9d94",
+        darkcolor=ACCENT_DARK_COLOR,
     )
     style.map(
         "Primary.TButton",
-        background=[("pressed", PRIMARY_DARK_COLOR), ("active", "#bd2b2f"), ("disabled", "#d6a6a8")],
-        foreground=[("disabled", "#fff4f4")],
+        background=[("pressed", ACCENT_DARK_COLOR), ("active", "#138a81"), ("disabled", "#aacfc9")],
+        foreground=[("disabled", "#eef8f6")],
     )
     style.configure(
         "Module.TButton",
-        font=(UI_FONT_FAMILY, UI_FONT_SIZE + 2, "bold"),
-        padding=(22, 18),
+        font=(UI_FONT_FAMILY, UI_FONT_SIZE + 1, "bold"),
+        padding=(22, 16),
         background=PRIMARY_COLOR,
         foreground="#ffffff",
         bordercolor=PRIMARY_DARK_COLOR,
-        lightcolor="#d24549",
+        lightcolor="#244767",
         darkcolor=PRIMARY_DARK_COLOR,
     )
     style.map(
         "Module.TButton",
-        background=[("pressed", PRIMARY_DARK_COLOR), ("active", "#c23336"), ("disabled", "#d8b1b2")],
-        foreground=[("disabled", "#fff4f4")],
+        background=[("pressed", PRIMARY_DARK_COLOR), ("active", "#1f4568"), ("disabled", "#b7c3d1")],
+        foreground=[("disabled", "#f5f7fa")],
     )
     style.configure(
         "Accent.TButton",
         padding=(16, 10),
-        background=ACCENT_COLOR,
+        background=WARNING_COLOR,
         foreground="#ffffff",
-        bordercolor=ACCENT_DARK_COLOR,
-        lightcolor="#df9145",
-        darkcolor=ACCENT_DARK_COLOR,
+        bordercolor="#7c2d12",
+        lightcolor="#d97706",
+        darkcolor="#7c2d12",
     )
-    style.map("Accent.TButton", background=[("pressed", ACCENT_DARK_COLOR), ("active", "#d48732")])
+    style.map("Accent.TButton", background=[("pressed", "#7c2d12"), ("active", "#c56612")])
     style.configure(
         "Danger.TButton",
         padding=(16, 10),
@@ -926,8 +1045,8 @@ class DataTable(ttk.Frame):
             row_tag = "odd" if index % 2 else "even"
             self.tree.insert("", "end", iid=item_id, values=values, tags=(row_tag,))
             self.rows_by_item[item_id] = row
-        self.tree.tag_configure("even", background="#fffdf8")
-        self.tree.tag_configure("odd", background="#fff4e4")
+        self.tree.tag_configure("even", background="#ffffff")
+        self.tree.tag_configure("odd", background="#f5f8fc")
 
     def selected_row(self) -> dict[str, Any] | None:
         selection = self.tree.selection()
@@ -1362,16 +1481,20 @@ class LoginWindow(ttk.Frame):
         button_row = ttk.Frame(card)
         button_row.grid(row=row_index, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(button_row, text="Connexion", style="Primary.TButton", command=self.login).grid(
-            row=0, column=0, padx=6
+            row=0, column=0, columnspan=2, padx=6, pady=(0, 8), sticky="ew"
         )
-        ttk.Button(button_row, text="Quitter", command=self.on_quit).grid(row=0, column=1, padx=6)
+        ttk.Button(button_row, text="Quitter", command=self.on_quit).grid(row=1, column=0, padx=6, pady=4, sticky="ew")
+        ttk.Button(button_row, text="À propos", command=self.open_about).grid(row=1, column=1, padx=6, pady=4, sticky="ew")
         ttk.Button(button_row, text="Paramètres réseau", command=self.open_connection_settings).grid(
-            row=0, column=2, padx=6
+            row=2, column=0, padx=6, pady=4, sticky="ew"
         )
         ttk.Button(button_row, text="Détecter le serveur", command=self.detect_server_now).grid(
-            row=0, column=3, padx=6
+            row=2, column=1, padx=6, pady=4, sticky="ew"
         )
+        button_row.columnconfigure(0, weight=1)
+        button_row.columnconfigure(1, weight=1)
         card.columnconfigure(1, weight=1)
+        add_copyright_footer(self, wraplength=560).pack(side="bottom", fill="x", pady=(8, 0))
         user_entry.focus()
         user_entry.bind("<Return>", lambda _event: self.password_entry.focus())
         self.password_entry.bind("<Return>", lambda _event: self.login())
@@ -1383,6 +1506,9 @@ class LoginWindow(ttk.Frame):
         dialog = ConnectionSettingsDialog(self)
         self.wait_window(dialog)
         self.refresh_connection_status()
+
+    def open_about(self) -> None:
+        AboutWindow(self)
 
     def _apply_session_connection_settings(self, settings: ConnectionSettings) -> None:
         DatabaseHelper.apply_connection_settings(settings, persist=False)
@@ -2352,39 +2478,42 @@ class DashboardMetricCard(tk.Frame):
     def __init__(self, parent: tk.Misc, accent: str) -> None:
         super().__init__(
             parent,
-            bg=accent,
+            bg=SURFACE_BACKGROUND,
             bd=0,
             highlightthickness=1,
-            highlightbackground="#ead2ae",
+            highlightbackground=BORDER_COLOR,
         )
         self.title_var = tk.StringVar(value="")
         self.value_var = tk.StringVar(value="")
         self.subtitle_var = tk.StringVar(value="")
 
-        self.configure(padx=18, pady=16)
+        self.configure(padx=0, pady=0)
+        tk.Frame(self, bg=accent, width=5, bd=0, highlightthickness=0).pack(side="left", fill="y")
+        content = tk.Frame(self, bg=SURFACE_BACKGROUND, bd=0, highlightthickness=0, padx=16, pady=14)
+        content.pack(side="left", fill="both", expand=True)
         tk.Label(
-            self,
+            content,
             textvariable=self.title_var,
-            bg=accent,
-            fg="#ffffff",
+            bg=SURFACE_BACKGROUND,
+            fg=MUTED_TEXT_COLOR,
             font=(UI_FONT_FAMILY, 11, "bold"),
             anchor="w",
             justify="left",
         ).pack(fill="x")
         tk.Label(
-            self,
+            content,
             textvariable=self.value_var,
-            bg=accent,
-            fg="#ffffff",
+            bg=SURFACE_BACKGROUND,
+            fg=PRIMARY_DARK_COLOR,
             font=(UI_FONT_FAMILY, 24, "bold"),
             anchor="w",
             justify="left",
         ).pack(fill="x", pady=(6, 2))
         tk.Label(
-            self,
+            content,
             textvariable=self.subtitle_var,
-            bg=accent,
-            fg="#fff1df",
+            bg=SURFACE_BACKGROUND,
+            fg=TEXT_COLOR,
             font=(UI_FONT_FAMILY, 10),
             anchor="w",
             justify="left",
@@ -2575,7 +2704,7 @@ class DashboardWindow(tk.Toplevel):
 
         ttk.Label(
             container,
-            text=f"Version installee : {APP_VERSION}",
+            text=f"Version installée : {APP_VERSION}",
             foreground=MUTED_TEXT_COLOR,
         ).pack(anchor="center", pady=(0, 8))
 
@@ -2634,13 +2763,13 @@ class DashboardWindow(tk.Toplevel):
         self.metric_cards = []
         metric_colors = (
             PRIMARY_COLOR,
-            "#6f3f1d",
+            "#275c7a",
             SUCCESS_COLOR,
             ACCENT_COLOR,
-            "#8a5a2b",
-            "#5c4033",
-            "#2f6f73",
-            "#514236",
+            WARNING_COLOR,
+            "#475467",
+            "#2563eb",
+            "#7c3aed",
         )
         for index, color in enumerate(metric_colors):
             card = DashboardMetricCard(cards_grid, color)
@@ -2790,8 +2919,10 @@ class DashboardWindow(tk.Toplevel):
 
         actions = ttk.Frame(container)
         actions.pack(anchor="center", pady=(8, 0))
-        ttk.Button(actions, text="Déconnexion", command=self.logout).grid(row=0, column=0, padx=8)
-        ttk.Button(actions, text="Quitter", command=self.on_close_app).grid(row=0, column=1, padx=8)
+        ttk.Button(actions, text="À propos", command=self.open_about).grid(row=0, column=0, padx=8, pady=4)
+        ttk.Button(actions, text="Déconnexion", command=self.logout).grid(row=0, column=1, padx=8, pady=4)
+        ttk.Button(actions, text="Quitter", command=self.on_close_app).grid(row=0, column=2, padx=8, pady=4)
+        add_copyright_footer(container, wraplength=900).pack(fill="x", pady=(14, 0))
 
         self.apply_permissions()
 
@@ -3612,6 +3743,9 @@ class DashboardWindow(tk.Toplevel):
         self.wait_window(window)
         self.refresh_security_notice()
 
+    def open_about(self) -> None:
+        AboutWindow(self)
+
     def on_close_app(self) -> None:
         if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment quitter l'application ?"):
             return
@@ -3650,6 +3784,7 @@ class BaseModuleWindow(tk.Toplevel):
         setattr(self, "_header_logo", getattr(header, "_header_logo", None))
         self.body = ttk.Frame(shell)
         self.body.pack(fill="both", expand=True)
+        add_copyright_footer(shell, wraplength=900).pack(fill="x", pady=(10, 0))
         if start_maximized:
             maximize_window(self, min_width, min_height)
         else:
@@ -4836,14 +4971,20 @@ class WorkersPayrollWindow(BaseModuleWindow):
         container.columnconfigure(0, weight=1)
         container.rowconfigure(2, weight=1)
 
+        top_bar = ttk.Frame(container)
+        top_bar.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        top_bar.columnconfigure(0, weight=1)
         self.summary_var = tk.StringVar(value="Chargement du résumé...")
         ttk.Label(
-            container,
+            top_bar,
             textvariable=self.summary_var,
             foreground=ACCENT_DARK_COLOR,
-            justify="center",
-            wraplength=980,
-        ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
+            justify="left",
+            wraplength=900,
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Button(top_bar, text="Fermer", style="Primary.TButton", command=self.close_window).grid(
+            row=0, column=1, sticky="e", padx=(12, 0)
+        )
 
         forms = ttk.Frame(container)
         forms.grid(row=1, column=0, sticky="ew", pady=(0, 12))
@@ -4986,7 +5127,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         )
         actions = ttk.Frame(container)
         actions.grid(row=4, column=0, sticky="e", pady=(12, 0))
-        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=0)
+        ttk.Button(actions, text="Fermer", style="Primary.TButton", command=self.close_window).grid(row=0, column=0)
 
     def refresh_live_view(self) -> None:
         self.refresh_all()

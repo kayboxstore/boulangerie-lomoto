@@ -1,6 +1,6 @@
 {
-  "version": "1.3.16",
-  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.16/BoulangerieLomotoSetup.exe",
+  "version": "1.3.17",
+  "download_url": "https://github.com/kayboxstore/boulangerie-lomoto/releases/download/v1.3.17/BoulangerieLomotoSetup.exe",
   "published_at": "2026-06-03",
-  "notes": "Version 1.3.16 : nouveau thème visuel plus élégant, boutons plus attractifs, tableaux plus lisibles et confort renforcé pour écran tactile."
+  "notes": "Version 1.3.17 : thème visuel repris dans un style plus professionnel, bouton Fermer ajouté dans Travailleurs, copyright dynamique et fenêtre À propos avec contacts."
 }
