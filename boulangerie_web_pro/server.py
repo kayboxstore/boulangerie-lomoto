@@ -1131,6 +1131,41 @@ class WebProHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if path == "/api/email/test":
+            _require_admin(session, "le test d'envoi d'e-mail")
+            from boulangerie_app.email_service import send_transactional_email
+
+            recipient = DatabaseHelper._normalize_email(_clean(payload.get("recipient")))
+            if not recipient:
+                raise ValueError("Veuillez saisir une adresse e-mail de test.")
+            result = send_transactional_email(
+                recipient,
+                "Test e-mail - Boulangerie Lomoto",
+                (
+                    "Bonjour,\n\n"
+                    "Ceci est un e-mail de test envoye depuis Boulangerie Lomoto.\n"
+                    "Si vous le recevez, la configuration d'envoi est operationnelle."
+                ),
+                (
+                    "<p>Bonjour,</p>"
+                    "<p>Ceci est un e-mail de test envoye depuis <strong>Boulangerie Lomoto</strong>.</p>"
+                    "<p>Si vous le recevez, la configuration d'envoi est operationnelle.</p>"
+                ),
+            )
+            if not result.sent:
+                raise ValueError(result.message or "Echec de l'envoi du test.")
+            self._send_json(
+                {
+                    "ok": True,
+                    "result": {
+                        "sent": 1,
+                        "status": result.status,
+                        "message": result.message,
+                    },
+                    "data": DatabaseHelper.get_email_notification_status(),
+                }
+            )
+            return
         if path == "/api/email/settings":
             _require_admin(session, "la configuration des notifications par e-mail")
             from boulangerie_app.email_service import save_email_settings

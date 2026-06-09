@@ -47,6 +47,7 @@ ACTIVE_SESSION_TTL_HOURS = 12
 DEFAULT_ADMIN_FULL_NAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_FULL_NAME", "Augustin Kayembe")
 DEFAULT_ADMIN_USERNAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_USERNAME", "a.kayembe")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_PASSWORD", "010203")
+DEFAULT_EMAIL_DOMAIN = os.environ.get("BOULANGERIE_EMAIL_DOMAIN", "boulangerie-lomoto.com")
 FORCED_DATABASE_RESET_VERSION = "1.3.0"
 AUTO_BACKUP_PREFIX = "sauvegarde-automatique"
 AUTO_BACKUP_RETENTION_DAYS = 30
@@ -1456,6 +1457,51 @@ class DatabaseHelper:
             raise ValueError("L'adresse e-mail n'est pas valide.")
         return normalized
 
+    @staticmethod
+    def _email_local_part(value: str) -> str:
+        normalized = unicodedata.normalize("NFD", str(value or "").strip().lower())
+        normalized = "".join(
+            character for character in normalized if unicodedata.category(character) != "Mn"
+        )
+        normalized = re.sub(r"[^a-z0-9._-]+", ".", normalized)
+        normalized = re.sub(r"\.{2,}", ".", normalized).strip(".-_")
+        return normalized or "utilisateur"
+
+    @classmethod
+    def build_default_user_email(cls, identifiant: str) -> str:
+        domain = DEFAULT_EMAIL_DOMAIN.strip().lower().lstrip("@") or "boulangerie-lomoto.com"
+        return f"{cls._email_local_part(identifiant)}@{domain}"
+
+    @classmethod
+    def _user_email_for_save(
+        cls,
+        connection: sqlite3.Connection,
+        email: str | None,
+        identifiant: str,
+        current_identifiant: str = "",
+    ) -> str:
+        normalized_email = cls._normalize_email(email or "")
+        generated = not normalized_email
+        candidate = normalized_email or cls.build_default_user_email(identifiant)
+        if not generated:
+            return candidate
+
+        local_part, _, domain = candidate.partition("@")
+        suffix = 2
+        while connection.execute(
+            """
+            SELECT 1
+            FROM Utilisateurs
+            WHERE LOWER(Email) = LOWER(?)
+              AND LOWER(Identifiant) <> LOWER(?)
+            LIMIT 1
+            """,
+            (candidate, current_identifiant or identifiant),
+        ).fetchone():
+            candidate = f"{local_part}-{suffix}@{domain}"
+            suffix += 1
+        return candidate
+
     @classmethod
     def get_setup_status(cls) -> dict[str, Any]:
         user_count = int(cls._fetch_value("SELECT COUNT(*) FROM Utilisateurs") or 0)
@@ -1753,17 +1799,24 @@ class DatabaseHelper:
         email: str = "",
     ) -> None:
         normalized_password = str(password or "").strip()
-        normalized_email = cls._normalize_email(email)
-        if not normalized_email:
-            raise ValueError("Veuillez saisir l'adresse e-mail de l'utilisateur.")
+        normalized_identifiant = str(identifiant or "").strip().lower()
+        normalized_name = str(full_name or "").strip()
+        normalized_role = str(role or "").strip()
+        if not normalized_name:
+            raise ValueError("Veuillez saisir le nom complet de l'utilisateur.")
+        if not normalized_identifiant:
+            raise ValueError("Veuillez saisir l'identifiant de l'utilisateur.")
+        if not normalized_role:
+            raise ValueError("Veuillez choisir le rÃ´le de l'utilisateur.")
         cls.validate_password_strength(
             normalized_password,
-            role=role,
-            identifiant=identifiant,
-            full_name=full_name,
+            role=normalized_role,
+            identifiant=normalized_identifiant,
+            full_name=normalized_name,
         )
         with cls.connect() as connection:
-            if role.strip() == DIRECTOR_GENERAL_ROLE:
+            normalized_email = cls._user_email_for_save(connection, email, normalized_identifiant)
+            if normalized_role == DIRECTOR_GENERAL_ROLE:
                 existing = connection.execute(
                     "SELECT COUNT(*) FROM Utilisateurs WHERE Role = ?",
                     (DIRECTOR_GENERAL_ROLE,),
@@ -1776,21 +1829,21 @@ class DatabaseHelper:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    full_name,
-                    identifiant,
+                    normalized_name,
+                    normalized_identifiant,
                     normalized_email,
                     cls.hash_password(normalized_password),
                     "",
-                    role,
+                    normalized_role,
                 ),
             )
             cls._queue_credentials_email(
                 connection,
-                full_name.strip(),
-                identifiant.strip(),
+                normalized_name,
+                normalized_identifiant,
                 normalized_email,
                 normalized_password,
-                role.strip(),
+                normalized_role,
             )
 
     @classmethod
@@ -1802,6 +1855,7 @@ class DatabaseHelper:
         role: str,
         email: str | None = None,
     ) -> int:
+        normalized_identifiant = str(original_identifiant or "").strip().lower()
         normalized_email = cls._normalize_email(email or "") if email is not None else None
         normalized_password = str(password or "").strip()
         if normalized_password:
@@ -1812,6 +1866,13 @@ class DatabaseHelper:
                 full_name=full_name,
             )
         with cls.connect() as connection:
+            if email is not None:
+                normalized_email = cls._user_email_for_save(
+                    connection,
+                    email,
+                    normalized_identifiant,
+                    normalized_identifiant,
+                )
             if role.strip() == DIRECTOR_GENERAL_ROLE:
                 existing = connection.execute(
                     """

@@ -5226,7 +5226,7 @@ class UsersWindow(BaseModuleWindow):
         self.identifiant_entry = ttk.Entry(form, textvariable=self.identifiant_var, width=34)
         self.identifiant_entry.grid(row=1, column=1, sticky="ew", pady=6)
 
-        ttk.Label(form, text="Adresse e-mail").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Adresse e-mail (facultative)").grid(row=2, column=0, sticky="w", pady=6)
         self.email_var = tk.StringVar()
         ttk.Entry(form, textvariable=self.email_var, width=34).grid(row=2, column=1, sticky="ew", pady=6)
 
@@ -5322,8 +5322,12 @@ class UsersWindow(BaseModuleWindow):
         password = self.password_var.get().strip()
         role = self.role_var.get().strip()
 
-        if not name or not identifiant or not email or not role:
-            messagebox.showwarning("Utilisateurs", "Veuillez remplir tous les champs.")
+        if not name or not identifiant or not role:
+            messagebox.showwarning(
+                "Utilisateurs",
+                "Veuillez saisir le nom complet, l'identifiant et le rÃ´le. "
+                "Si l'e-mail est vide, une adresse @boulangerie-lomoto.com sera crÃ©Ã©e.",
+            )
             return
         if not self.edit_mode and not password:
             messagebox.showwarning("Utilisateurs", "Veuillez saisir un mot de passe.")
