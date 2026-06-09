@@ -174,7 +174,7 @@ function loginView() {
       <section class="login-card">
         <div class="brand-mark">
           <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Logo" />
-          <span>Version web professionnelle 1.4.1</span>
+          <span>Version web professionnelle 1.4.2</span>
         </div>
         <p class="eyebrow">Application connectée</p>
         <h1>BOULANGERIE LOMOTO</h1>
@@ -185,7 +185,6 @@ function loginView() {
           <input class="autofill-decoy" name="password" type="password" autocomplete="current-password" tabindex="-1" aria-hidden="true" />
           <label>Identifiant ou e-mail <input id="loginIdentifiant" name="lomotoLoginIdentifiant" autocomplete="off" autocapitalize="none" spellcheck="false" required /></label>
           <label>Mot de passe <input id="passwordInput" name="lomotoLoginPassword" type="password" autocomplete="new-password" required /></label>
-          <label class="toggle-line"><input id="allowSavedCredentials" type="checkbox" /><span>Autoriser le remplissage enregistrÃ©</span></label>
           <label class="toggle-line"><input id="showPassword" type="checkbox" /><span>Afficher le mot de passe</span></label>
           ${state.loading ? `<div class="login-progress" aria-label="Connexion en cours"><span></span></div>` : ""}
           <button class="primary" type="submit" ${state.loading ? "disabled" : ""}>${state.loading ? "Connexion..." : "Se connecter"}</button>
@@ -206,7 +205,7 @@ function shell(content) {
             <div>
               <strong>BOULANGERIE LOMOTO</strong>
               <span>Pain Lia o Tonda</span>
-              <small>Données Windows v${escapeHtml(state.user?.appVersion || "1.4.1")}</small>
+              <small>Données Windows v${escapeHtml(state.user?.appVersion || "1.4.2")}</small>
             </div>
           </div>
           <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-expanded="false" aria-controls="sidebarMenu" title="Ouvrir le menu">☰</button>
@@ -232,7 +231,7 @@ function shell(content) {
             </div>
             <div class="version-card">
               <span>Version</span>
-              <strong>${escapeHtml(state.user?.appVersion || "1.4.1")}</strong>
+              <strong>${escapeHtml(state.user?.appVersion || "1.4.2")}</strong>
             </div>
           </div>
         </header>
@@ -1029,33 +1028,19 @@ function prepareLoginCredentialControls() {
   const form = document.querySelector("#loginForm");
   const identifiantInput = document.querySelector("#loginIdentifiant");
   const passwordInput = document.querySelector("#passwordInput");
-  const allowSaved = document.querySelector("#allowSavedCredentials");
-  if (!form || !identifiantInput || !passwordInput || !allowSaved) return;
+  if (!form || !identifiantInput || !passwordInput) return;
 
   const lockAutofill = () => {
     form.setAttribute("autocomplete", "off");
     identifiantInput.setAttribute("autocomplete", "off");
     passwordInput.setAttribute("autocomplete", "new-password");
   };
-  const clearIfLocked = () => {
-    if (allowSaved.checked) return;
+  const clearLoginFields = () => {
     identifiantInput.value = "";
     passwordInput.value = "";
   };
   lockAutofill();
-  [0, 80, 350, 900].forEach((delayMs) => window.setTimeout(clearIfLocked, delayMs));
-  allowSaved.addEventListener("change", () => {
-    if (allowSaved.checked) {
-      form.setAttribute("autocomplete", "on");
-      identifiantInput.setAttribute("autocomplete", "username");
-      passwordInput.setAttribute("autocomplete", "current-password");
-      identifiantInput.focus();
-    } else {
-      lockAutofill();
-      clearIfLocked();
-      identifiantInput.focus();
-    }
-  });
+  [0, 80, 350, 900].forEach((delayMs) => window.setTimeout(clearLoginFields, delayMs));
 }
 
 function applyDirectorGeneralReadOnly() {
