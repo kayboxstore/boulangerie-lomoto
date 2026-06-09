@@ -48,6 +48,9 @@ DEFAULT_ADMIN_FULL_NAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_FULL_NAME", 
 DEFAULT_ADMIN_USERNAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_USERNAME", "a.kayembe")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_PASSWORD", "010203")
 DEFAULT_EMAIL_DOMAIN = os.environ.get("BOULANGERIE_EMAIL_DOMAIN", "boulangerie-lomoto.com")
+APP_PUBLIC_URL = os.environ.get("BOULANGERIE_PUBLIC_URL", "https://app.boulangerie-lomoto.com")
+APP_CONTACT_EMAIL = os.environ.get("BOULANGERIE_CONTACT_EMAIL", "contact@boulangerie-lomoto.com")
+APP_CONTACT_PHONE = os.environ.get("BOULANGERIE_CONTACT_PHONE", "+243 991 599 600")
 FORCED_DATABASE_RESET_VERSION = "1.3.0"
 AUTO_BACKUP_PREFIX = "sauvegarde-automatique"
 AUTO_BACKUP_RETENTION_DAYS = 30
@@ -1546,6 +1549,54 @@ class DatabaseHelper:
             ),
         )
 
+    @staticmethod
+    def _email_text_footer() -> str:
+        return (
+            "\n\n--\n"
+            "Boulangerie Lomoto\n"
+            f"Application : {APP_PUBLIC_URL}\n"
+            f"Contact : {APP_CONTACT_EMAIL} | {APP_CONTACT_PHONE}\n"
+            "Message automatique genere par l'application Boulangerie Lomoto."
+        )
+
+    @staticmethod
+    def _email_html_layout(title: str, intro: str, body_html: str) -> str:
+        year = datetime.now().year
+        safe_title = escape(title)
+        safe_intro = escape(intro)
+        return f"""<!doctype html>
+<html>
+  <body style="margin:0;background:#f3f6fa;font-family:Arial,Helvetica,sans-serif;color:#172033;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f6fa;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #d9e1ec;border-radius:10px;overflow:hidden;">
+            <tr>
+              <td style="background:#101827;color:#ffffff;padding:22px 28px;">
+                <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#f2c94c;">Boulangerie Lomoto</div>
+                <h1 style="margin:8px 0 0;font-size:24px;line-height:1.25;">{safe_title}</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:26px 28px;">
+                <p style="margin:0 0 18px;font-size:16px;line-height:1.55;color:#334155;">{safe_intro}</p>
+                {body_html}
+              </td>
+            </tr>
+            <tr>
+              <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:18px 28px;color:#64748b;font-size:12px;line-height:1.55;">
+                <p style="margin:0 0 6px;">Application : <a href="{escape(APP_PUBLIC_URL)}" style="color:#c5162d;text-decoration:none;">{escape(APP_PUBLIC_URL)}</a></p>
+                <p style="margin:0 0 6px;">Contact : {escape(APP_CONTACT_EMAIL)} | {escape(APP_CONTACT_PHONE)}</p>
+                <p style="margin:0;">&copy; {year} Boulangerie Lomoto - Kay Box Store. Message automatique, merci de ne pas partager son contenu inutilement.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
+
     @classmethod
     def _queue_credentials_email(
         cls,
@@ -1556,24 +1607,39 @@ class DatabaseHelper:
         password: str,
         role: str,
     ) -> None:
-        subject = "Vos accès à Boulangerie Lomoto"
+        subject = "Boulangerie Lomoto - Vos accès utilisateur"
         text_body = (
             f"Bonjour {full_name},\n\n"
             "Votre compte Boulangerie Lomoto a été créé.\n\n"
             f"Identifiant : {identifiant}\n"
             f"Mot de passe temporaire : {password}\n"
-            f"Rôle : {role}\n\n"
-            "Pour votre sécurité, changez le mot de passe après votre première connexion."
+            f"Rôle : {role}\n"
+            f"Application : {APP_PUBLIC_URL}\n\n"
+            "Pour votre sécurité, changez le mot de passe après votre première connexion.\n"
+            "Ne transmettez jamais votre mot de passe à une autre personne."
+            + cls._email_text_footer()
         )
-        html_body = (
-            f"<p>Bonjour <strong>{escape(full_name)}</strong>,</p>"
-            "<p>Votre compte Boulangerie Lomoto a été créé.</p>"
-            "<ul>"
-            f"<li>Identifiant : <strong>{escape(identifiant)}</strong></li>"
-            f"<li>Mot de passe temporaire : <strong>{escape(password)}</strong></li>"
-            f"<li>Rôle : <strong>{escape(role)}</strong></li>"
-            "</ul>"
-            "<p>Pour votre sécurité, changez le mot de passe après votre première connexion.</p>"
+        details = (
+            '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" '
+            'style="border-collapse:collapse;border:1px solid #d9e1ec;border-radius:8px;overflow:hidden;">'
+            '<tr><td style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Identifiant</td>'
+            f'<td style="padding:12px 14px;border-bottom:1px solid #e2e8f0;font-weight:700;">{escape(identifiant)}</td></tr>'
+            '<tr><td style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Mot de passe temporaire</td>'
+            f'<td style="padding:12px 14px;border-bottom:1px solid #e2e8f0;font-weight:700;">{escape(password)}</td></tr>'
+            '<tr><td style="padding:12px 14px;background:#f8fafc;color:#64748b;">Rôle</td>'
+            f'<td style="padding:12px 14px;font-weight:700;">{escape(role)}</td></tr>'
+            "</table>"
+            f'<p style="margin:18px 0 0;"><a href="{escape(APP_PUBLIC_URL)}" '
+            'style="display:inline-block;background:#c5162d;color:#ffffff;text-decoration:none;'
+            'font-weight:700;padding:12px 18px;border-radius:7px;">Ouvrir l\'application</a></p>'
+            '<div style="margin-top:18px;padding:14px 16px;border-left:4px solid #c5162d;background:#fff7ed;color:#7c2d12;">'
+            "<strong>Sécurité :</strong> changez ce mot de passe après la première connexion et ne le partagez pas."
+            "</div>"
+        )
+        html_body = cls._email_html_layout(
+            "Vos accès utilisateur",
+            f"Bonjour {full_name}, votre compte Boulangerie Lomoto est prêt.",
+            details,
         )
         cls._queue_email_notification(
             connection,
@@ -2617,7 +2683,7 @@ class DatabaseHelper:
         def money(value: float) -> str:
             return f"{float(value or 0):,.0f}".replace(",", " ") + " FC"
 
-        subject = f"Paie - statut {normalized_status} - {period}"
+        subject = f"Boulangerie Lomoto - Paie {normalized_status} - {period}"
         text_body = (
             f"Bonjour {worker_name},\n\n"
             f"Votre paie pour la période {period} est au statut : {normalized_status}.\n\n"
@@ -2628,20 +2694,39 @@ class DatabaseHelper:
             f"Retenue : {money(withholding)}\n"
             f"Net : {money(net_amount)}\n"
             f"Mode de paiement : {payment_mode}\n"
+            + cls._email_text_footer()
         )
-        html_body = (
-            f"<p>Bonjour <strong>{escape(worker_name)}</strong>,</p>"
-            f"<p>Votre paie pour la période <strong>{escape(period)}</strong> est au statut "
-            f"<strong>{escape(normalized_status)}</strong>.</p>"
-            "<table>"
-            f"<tr><td>Date</td><td>{pay_date.strftime('%d/%m/%Y')}</td></tr>"
-            f"<tr><td>Montant brut</td><td>{money(gross)}</td></tr>"
-            f"<tr><td>Prime</td><td>{money(bonus)}</td></tr>"
-            f"<tr><td>Avance</td><td>{money(advance)}</td></tr>"
-            f"<tr><td>Retenue</td><td>{money(withholding)}</td></tr>"
-            f"<tr><td>Net</td><td><strong>{money(net_amount)}</strong></td></tr>"
-            f"<tr><td>Mode de paiement</td><td>{escape(payment_mode)}</td></tr>"
+        status_color = "#166534" if normalized_status.lower().startswith(("pay", "valid")) else "#92400e"
+        details = (
+            f'<div style="display:inline-block;margin-bottom:16px;padding:7px 12px;border-radius:999px;'
+            f'background:#f1f5f9;color:{status_color};font-weight:700;">Statut : {escape(normalized_status)}</div>'
+            '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" '
+            'style="border-collapse:collapse;border:1px solid #d9e1ec;border-radius:8px;overflow:hidden;">'
+            '<tr><td style="padding:11px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Date</td>'
+            f'<td style="padding:11px 14px;border-bottom:1px solid #e2e8f0;">{pay_date.strftime("%d/%m/%Y")}</td></tr>'
+            '<tr><td style="padding:11px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Période</td>'
+            f'<td style="padding:11px 14px;border-bottom:1px solid #e2e8f0;">{escape(period)}</td></tr>'
+            '<tr><td style="padding:11px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Montant brut</td>'
+            f'<td style="padding:11px 14px;border-bottom:1px solid #e2e8f0;">{money(gross)}</td></tr>'
+            '<tr><td style="padding:11px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Prime</td>'
+            f'<td style="padding:11px 14px;border-bottom:1px solid #e2e8f0;">{money(bonus)}</td></tr>'
+            '<tr><td style="padding:11px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Avance</td>'
+            f'<td style="padding:11px 14px;border-bottom:1px solid #e2e8f0;">{money(advance)}</td></tr>'
+            '<tr><td style="padding:11px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Retenue</td>'
+            f'<td style="padding:11px 14px;border-bottom:1px solid #e2e8f0;">{money(withholding)}</td></tr>'
+            '<tr><td style="padding:13px 14px;background:#101827;color:#ffffff;">Net à recevoir</td>'
+            f'<td style="padding:13px 14px;background:#101827;color:#ffffff;font-size:18px;font-weight:700;">{money(net_amount)}</td></tr>'
+            '<tr><td style="padding:11px 14px;background:#f8fafc;color:#64748b;">Mode de paiement</td>'
+            f'<td style="padding:11px 14px;">{escape(payment_mode)}</td></tr>'
             "</table>"
+            '<p style="margin:16px 0 0;color:#64748b;font-size:13px;">'
+            "Conservez ce message comme justificatif interne. En cas d'erreur, contactez l'administration."
+            "</p>"
+        )
+        html_body = cls._email_html_layout(
+            "Notification de paie",
+            f"Bonjour {worker_name}, votre paie pour la période {period} a été mise à jour.",
+            details,
         )
         cls._queue_email_notification(
             connection,

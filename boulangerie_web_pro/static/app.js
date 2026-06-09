@@ -174,7 +174,7 @@ function loginView() {
       <section class="login-card">
         <div class="brand-mark">
           <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Logo" />
-          <span>Version web professionnelle 1.4.3</span>
+          <span>Version web professionnelle 1.4.4</span>
         </div>
         <p class="eyebrow">Application connectée</p>
         <h1>BOULANGERIE LOMOTO</h1>
@@ -205,7 +205,7 @@ function shell(content) {
             <div>
               <strong>BOULANGERIE LOMOTO</strong>
               <span>Pain Lia o Tonda</span>
-              <small>Données Windows v${escapeHtml(state.user?.appVersion || "1.4.3")}</small>
+              <small>Données Windows v${escapeHtml(state.user?.appVersion || "1.4.4")}</small>
             </div>
           </div>
           <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-expanded="false" aria-controls="sidebarMenu" title="Ouvrir le menu">☰</button>
@@ -231,7 +231,7 @@ function shell(content) {
             </div>
             <div class="version-card">
               <span>Version</span>
-              <strong>${escapeHtml(state.user?.appVersion || "1.4.3")}</strong>
+              <strong>${escapeHtml(state.user?.appVersion || "1.4.4")}</strong>
             </div>
           </div>
         </header>
