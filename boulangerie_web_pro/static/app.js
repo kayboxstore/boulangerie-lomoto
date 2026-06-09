@@ -174,7 +174,7 @@ function loginView() {
       <section class="login-card">
         <div class="brand-mark">
           <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Logo" />
-          <span>Version web professionnelle 1.4.2</span>
+          <span>Version web professionnelle 1.4.3</span>
         </div>
         <p class="eyebrow">Application connectée</p>
         <h1>BOULANGERIE LOMOTO</h1>
@@ -205,7 +205,7 @@ function shell(content) {
             <div>
               <strong>BOULANGERIE LOMOTO</strong>
               <span>Pain Lia o Tonda</span>
-              <small>Données Windows v${escapeHtml(state.user?.appVersion || "1.4.2")}</small>
+              <small>Données Windows v${escapeHtml(state.user?.appVersion || "1.4.3")}</small>
             </div>
           </div>
           <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-expanded="false" aria-controls="sidebarMenu" title="Ouvrir le menu">☰</button>
@@ -231,7 +231,7 @@ function shell(content) {
             </div>
             <div class="version-card">
               <span>Version</span>
-              <strong>${escapeHtml(state.user?.appVersion || "1.4.2")}</strong>
+              <strong>${escapeHtml(state.user?.appVersion || "1.4.3")}</strong>
             </div>
           </div>
         </header>
@@ -1370,10 +1370,7 @@ async function submitPassword(event) {
 
 async function submitEmailSettings(event) {
   event.preventDefault();
-  const form = event.currentTarget;
-  const data = formObject(form);
-  data.smtpUseTls = Boolean(form.elements.smtpUseTls?.checked);
-  data.smtpUseSsl = Boolean(form.elements.smtpUseSsl?.checked);
+  const data = emailSettingsFormData(event.currentTarget);
   try {
     const payload = await post("/api/email/settings", data);
     const result = payload.result || {};
@@ -1388,10 +1385,24 @@ async function submitEmailSettings(event) {
   }
 }
 
+function emailSettingsFormData(form = document.querySelector("#emailSettingsForm")) {
+  const data = formObject(form);
+  data.smtpUseTls = Boolean(form.elements.smtpUseTls?.checked);
+  data.smtpUseSsl = Boolean(form.elements.smtpUseSsl?.checked);
+  return data;
+}
+
 async function testEmailSending() {
   const recipient = window.prompt("Adresse e-mail de test", OWNER.emailPrimary);
   if (!recipient) return;
   try {
+    const form = document.querySelector("#emailSettingsForm");
+    if (form) {
+      const settingsPayload = await post("/api/email/settings", emailSettingsFormData(form));
+      if (!settingsPayload.settings?.configured) {
+        throw new Error("Collez le jeton Cloudflare Email Sending, puis relancez le test.");
+      }
+    }
     const payload = await post("/api/email/test", { recipient });
     const result = payload.result || {};
     setState({
