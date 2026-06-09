@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+from http.server import ThreadingHTTPServer
 
 import servicemanager  # type: ignore
 import win32event  # type: ignore
@@ -12,9 +14,15 @@ from .server_host import (
     WINDOWS_SERVICE_DESCRIPTION,
     WINDOWS_SERVICE_DISPLAY_NAME,
     WINDOWS_SERVICE_NAME,
+    ensure_central_server_token,
     load_central_server_settings,
+    save_central_server_settings,
 )
 from .version import APP_NAME
+from boulangerie_web_pro.server import WebProHandler
+
+
+WEB_PRO_PORT = 8787
 
 
 class CentralServerWindowsService(win32serviceutil.ServiceFramework):
@@ -25,10 +33,15 @@ class CentralServerWindowsService(win32serviceutil.ServiceFramework):
     def __init__(self, args: list[str]) -> None:
         super().__init__(args)
         self.stop_event = win32event.CreateEvent(None, 0, 0, None)
+        self.web_server: ThreadingHTTPServer | None = None
+        self.web_thread: threading.Thread | None = None
 
     def SvcStop(self) -> None:  # noqa: N802
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
         servicemanager.LogInfoMsg(f"{APP_NAME} - arret du service Windows du serveur central.")
+        if self.web_server is not None:
+            self.web_server.shutdown()
+            self.web_server.server_close()
         stop_embedded_server()
         win32event.SetEvent(self.stop_event)
 
@@ -37,12 +50,23 @@ class CentralServerWindowsService(win32serviceutil.ServiceFramework):
         self.main()
 
     def main(self) -> None:
-        settings = load_central_server_settings()
+        settings = ensure_central_server_token(load_central_server_settings())
+        save_central_server_settings(settings)
         start_embedded_server(
             host="0.0.0.0",
             port=settings.normalized_port(),
             api_token=settings.normalized_token(),
             data_dir=settings.normalized_data_dir(),
+        )
+        self.web_server = ThreadingHTTPServer(("127.0.0.1", WEB_PRO_PORT), WebProHandler)
+        self.web_thread = threading.Thread(
+            target=self.web_server.serve_forever,
+            name="boulangerie-web-pro",
+            daemon=True,
+        )
+        self.web_thread.start()
+        servicemanager.LogInfoMsg(
+            f"{APP_NAME} - Web Pro disponible sur le port {WEB_PRO_PORT}."
         )
         win32event.WaitForSingleObject(self.stop_event, win32event.INFINITE)
         stop_embedded_server()

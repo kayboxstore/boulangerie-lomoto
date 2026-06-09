@@ -1,0 +1,17 @@
+{
+  "name": "Boulangerie Lomoto",
+  "short_name": "Lomoto",
+  "description": "Gestion connectée de la Boulangerie Lomoto sur PC, tablette et téléphone",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fff7ed",
+  "theme_color": "#b71c1c",
+  "icons": [
+    {
+      "src": "/assets/logo-boulangerie-lomoto.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

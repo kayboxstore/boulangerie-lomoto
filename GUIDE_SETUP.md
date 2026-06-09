@@ -26,8 +26,8 @@ Installez aussi Inno Setup sur Windows :
 Depuis le dossier du projet, lancez :
 
 ```powershell
-.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --uac-admin --onedir --name "Boulangerie Lomoto" --add-data ".\boulangerie_app\assets;boulangerie_app\assets" --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" main.py
-.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --console --onefile --name "Boulangerie Lomoto Service" --distpath ".\dist\Boulangerie Lomoto" --workpath ".\build\service" serveur_windows_service.py
+.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --uac-admin --onedir --name "Boulangerie Lomoto" --add-data ".\boulangerie_app\assets;boulangerie_app\assets" --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" --add-data ".\boulangerie_web_pro\static;boulangerie_web_pro\static" main.py
+.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --console --onefile --name "Boulangerie Lomoto Service" --distpath ".\dist\Boulangerie Lomoto" --workpath ".\build\service" --add-data ".\boulangerie_web_pro\static;boulangerie_web_pro\static" serveur_windows_service.py
 ```
 
 Version avec icône de l'application :

@@ -16,3 +16,7 @@ tmp/
 test-output/
 presentations/build/node_modules/
 presentations/guide-utilisateur/demo-data/
+
+web-mobile-app/node_modules/
+web-mobile-app/dist/
+web-mobile-app/.firebase/

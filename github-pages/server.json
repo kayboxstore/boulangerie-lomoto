@@ -1,9 +1,9 @@
 {
-  "enabled": false,
-  "required": false,
+  "enabled": true,
+  "required": true,
   "label": "Serveur Internet Boulangerie Lomoto",
-  "server_url": "https://boulangerie-lomoto-api-3lfz3zboha-ew.a.run.app",
+  "server_url": "https://app.boulangerie-lomoto.com",
   "api_token": "",
-  "updated_at": "2026-05-28",
-  "notes": "Serveur Internet désactivé temporairement. L'application doit utiliser le serveur local ou le réseau local."
+  "updated_at": "2026-06-09",
+  "notes": "Serveur Internet actif via Cloudflare Tunnel. Les postes Windows distants utilisent cette adresse avec le jeton prive du serveur."
 }

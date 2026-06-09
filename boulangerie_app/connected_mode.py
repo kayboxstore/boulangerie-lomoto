@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import socket
@@ -14,26 +15,42 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+from .version import APP_VERSION
+
 
 REMOTE_DEFAULT_PORT = 8765
 REMOTE_DISCOVERY_PORT = 8766
 REMOTE_DISCOVERY_TIMEOUT_SECONDS = 3.0
 REMOTE_REFRESH_INTERVAL_MS = 5000
 CONNECTION_CONFIG_FILENAME = "connection_settings.json"
-PUBLIC_SERVER_DIRECTORY_URL = os.environ.get("BOULANGERIE_PUBLIC_SERVER_DIRECTORY_URL", "").strip()
+PUBLIC_SERVER_DIRECTORY_URL = os.environ.get(
+    "BOULANGERIE_PUBLIC_SERVER_DIRECTORY_URL",
+    "https://api.github.com/repos/kayboxstore/boulangerie-lomoto-updates/contents/server.json?ref=main",
+).strip()
 PUBLIC_SERVER_DIRECTORY_TIMEOUT_SECONDS = 4
 DISCOVERY_APP_ID = "boulangerie-lomoto-sync"
 DISCOVERY_REQUEST_ACTION = "discover_server"
 DISCOVERY_RESPONSE_ACTION = "server_available"
 
 REMOTE_DATABASE_METHODS = {
+    "get_setup_status",
+    "get_email_notification_status",
+    "list_email_notifications",
+    "process_pending_email_notifications",
+    "retry_email_notifications",
+    "create_initial_admin",
     "find_user_for_login",
+    "get_active_session",
+    "open_active_session",
+    "validate_active_session",
+    "close_active_session",
     "is_using_default_password",
     "change_user_password",
     "get_backups_directory",
     "list_backup_files",
     "backup_database",
     "restore_database",
+    "reset_database_to_empty",
     "add_user",
     "update_user",
     "search_users_by_identifiant",
@@ -41,6 +58,7 @@ REMOTE_DATABASE_METHODS = {
     "delete_user",
     "list_users",
     "count_admins",
+    "count_directors_general",
     "get_user_role",
     "count_users",
     "log_activity",
@@ -70,6 +88,7 @@ REMOTE_DATABASE_METHODS = {
     "get_stock_journal",
     "update_stock_closing",
     "count_stock_exits",
+    "count_stock_exits_for_period",
     "list_stock_exits",
     "list_stock_exits_by_date",
     "get_stock_sacks_used_for_date",
@@ -77,6 +96,7 @@ REMOTE_DATABASE_METHODS = {
     "update_stock_exit",
     "delete_stock_exit",
     "count_stock_supplies",
+    "count_stock_supplies_for_period",
     "list_stock_supplies",
     "list_stock_supplies_by_date",
     "add_stock_supply",
@@ -96,10 +116,12 @@ REMOTE_DATABASE_METHODS = {
     "list_productions",
     "list_productions_by_date",
     "get_global_production_summary",
+    "get_production_summary_for_period",
     "save_production_day",
     "delete_production_day",
     "get_orders_summary_for_date",
     "get_global_orders_summary",
+    "get_orders_summary_for_period",
     "get_cash_for_date",
     "get_accumulated_debt_totals_for_date",
     "save_cash_day",
@@ -108,8 +130,11 @@ REMOTE_DATABASE_METHODS = {
     "list_cash_balance_by_period",
     "delete_cash_day",
     "get_total_cash",
+    "get_cash_total_for_period",
     "list_orders",
     "list_orders_by_date",
+    "get_client_advance_balance",
+    "get_total_client_advances",
     "add_order",
     "count_orders_with_debt",
     "get_debt_alerts",
@@ -123,6 +148,7 @@ REMOTE_DATABASE_METHODS = {
     "get_commission_synthesis_from_orders",
     "find_existing_commission",
     "get_total_commissions",
+    "get_total_commissions_for_period",
     "record_monthly_report_generation",
     "has_monthly_report_for_role",
     "get_monthly_report_obligation",
@@ -279,6 +305,19 @@ def fetch_public_server_directory(
     except json.JSONDecodeError as exc:
         raise RemoteDatabaseError("Le fichier du serveur Internet n'est pas un JSON valide.") from exc
 
+    if (
+        isinstance(payload, dict)
+        and payload.get("encoding") == "base64"
+        and isinstance(payload.get("content"), str)
+    ):
+        try:
+            decoded_content = base64.b64decode(payload["content"]).decode("utf-8-sig")
+            payload = json.loads(decoded_content)
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RemoteDatabaseError(
+                "Le contenu du serveur Internet publié sur GitHub est invalide."
+            ) from exc
+
     if not isinstance(payload, dict):
         raise RemoteDatabaseError("Le fichier du serveur Internet doit être un objet JSON.")
 
@@ -286,7 +325,7 @@ def fetch_public_server_directory(
         enabled=bool(payload.get("enabled", False)),
         required=bool(payload.get("required", False)),
         server_url=str(payload.get("server_url", "")).strip(),
-        api_token=str(payload.get("api_token", "")).strip(),
+        api_token="",
         label=str(payload.get("label", "Serveur Internet")).strip() or "Serveur Internet",
         notes=str(payload.get("notes", "")).strip(),
         updated_at=str(payload.get("updated_at", "")).strip(),
@@ -599,7 +638,10 @@ class RemoteDatabaseClient:
 
     def _request(self, method: str, target_url: str, payload: dict[str, Any] | None = None) -> Any:
         request_body = None
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": f"BoulangerieLomoto/{APP_VERSION} WindowsClient",
+        }
         if payload is not None:
             request_body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
             headers["Content-Type"] = "application/json"

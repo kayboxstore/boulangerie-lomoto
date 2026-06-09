@@ -181,21 +181,31 @@ def _production_field_rows(summary: dict[str, Any]) -> list[tuple[str, Any]]:
     ]
 
 
-def _order_status_summary_rows(rows: list[dict[str, Any]]) -> list[tuple[str, int, int, float, float, float]]:
+def _order_status_summary_rows(rows: list[dict[str, Any]]) -> list[tuple[str, int, int, float, float, float, float, float]]:
     summary: dict[str, dict[str, int | float]] = {}
     for row in rows:
         status = normalize_status_form_label(row.get("Statut")) or "Non précisé"
         bucket = summary.setdefault(
             status,
-            {"count": 0, "trays": 0, "expected": 0.0, "received": 0.0, "debt": 0.0},
+            {
+                "count": 0,
+                "trays": 0,
+                "expected": 0.0,
+                "received": 0.0,
+                "advance_used": 0.0,
+                "advance_generated": 0.0,
+                "debt": 0.0,
+            },
         )
         bucket["count"] = int(bucket["count"]) + 1
         bucket["trays"] = int(bucket["trays"]) + int(row.get("NombreBacs", 0) or 0)
         bucket["expected"] = float(bucket["expected"]) + float(row.get("MontantAPercevoir", 0) or 0)
         bucket["received"] = float(bucket["received"]) + float(row.get("MontantRecu", 0) or 0)
+        bucket["advance_used"] = float(bucket["advance_used"]) + float(row.get("AvanceUtilisee", 0) or 0)
+        bucket["advance_generated"] = float(bucket["advance_generated"]) + float(row.get("AvanceGeneree", 0) or 0)
         bucket["debt"] = float(bucket["debt"]) + float(row.get("Dette", 0) or 0)
 
-    summary_rows: list[tuple[str, int, int, float, float, float]] = []
+    summary_rows: list[tuple[str, int, int, float, float, float, float, float]] = []
     for status in sorted(summary):
         bucket = summary[status]
         summary_rows.append(
@@ -205,6 +215,8 @@ def _order_status_summary_rows(rows: list[dict[str, Any]]) -> list[tuple[str, in
                 int(bucket["trays"]),
                 float(bucket["expected"]),
                 float(bucket["received"]),
+                float(bucket["advance_used"]),
+                float(bucket["advance_generated"]),
                 float(bucket["debt"]),
             )
         )
@@ -218,6 +230,8 @@ def _order_status_summary_rows(rows: list[dict[str, Any]]) -> list[tuple[str, in
                 sum(row[3] for row in summary_rows),
                 sum(row[4] for row in summary_rows),
                 sum(row[5] for row in summary_rows),
+                sum(row[6] for row in summary_rows),
+                sum(row[7] for row in summary_rows),
             )
         )
     return summary_rows
@@ -491,9 +505,6 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     if "stock" in context["allowed_sections"]:
         rows.extend(
             [
-                ("Sorties de stock du jour", len(context["stock_exits"]), "nombre"),
-                ("Approvisionnements du jour", len(context["stock_supplies"]), "nombre"),
-                ("Journal de stock disponible", 1 if context["stock_journal"] else 0, "nombre"),
             ]
         )
     if "production" in context["allowed_sections"]:
@@ -721,7 +732,7 @@ def _build_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     sheet["A2"] = f"Date : {_format_date(context['target_date'])}"
     _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
 
-    headers = ["Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]
+    headers = ["Client", "Statut", "Bacs", "À percevoir", "Reçu", "Avance utilisée", "Nouvelle avance", "Solde avance", "Dette"]
     for col_index, header in enumerate(headers, start=1):
         cell = sheet.cell(3, col_index, header)
         _apply_cell_style(cell, fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
@@ -737,12 +748,15 @@ def _build_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
                 int(item.get("NombreBacs", 0) or 0),
                 float(item.get("MontantAPercevoir", 0) or 0),
                 float(item.get("MontantRecu", 0) or 0),
+                float(item.get("AvanceUtilisee", 0) or 0),
+                float(item.get("AvanceGeneree", 0) or 0),
+                float(item.get("SoldeAvance", 0) or 0),
                 float(item.get("Dette", 0) or 0),
             ]
             for col_index, value in enumerate(values, start=1):
                 cell = sheet.cell(current_row, col_index, value)
                 _apply_cell_style(cell, alignment=Alignment(horizontal="left"))
-            for col in range(4, 7):
+            for col in range(4, 10):
                 sheet.cell(current_row, col).number_format = MONEY_FORMAT
 
         totals_row = current_row + 1
@@ -751,16 +765,18 @@ def _build_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         sheet.cell(totals_row, 4, f"=SUM(D4:D{current_row})")
         sheet.cell(totals_row, 5, f"=SUM(E4:E{current_row})")
         sheet.cell(totals_row, 6, f"=SUM(F4:F{current_row})")
-        for col_index in range(1, 7):
+        sheet.cell(totals_row, 7, f"=SUM(G4:G{current_row})")
+        sheet.cell(totals_row, 9, f"=SUM(I4:I{current_row})")
+        for col_index in range(1, 10):
             _apply_cell_style(
                 sheet.cell(totals_row, col_index),
                 fill=SECTION_FILL,
                 alignment=Alignment(horizontal="left"),
                 font=SECTION_FONT if col_index == 1 else BODY_FONT,
             )
-        for col in range(4, 7):
+        for col in range(4, 10):
             sheet.cell(totals_row, col).number_format = MONEY_FORMAT
-        _add_table(sheet, 3, current_row, 6, "CommandesJour")
+        _add_table(sheet, 3, current_row, 9, "CommandesJour")
     else:
         sheet["A4"] = "Aucune commande enregistrée pour cette date."
         _apply_cell_style(sheet["A4"], alignment=Alignment(horizontal="left"), font=NOTE_FONT)
@@ -1543,14 +1559,14 @@ def _build_monthly_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> 
     sheet["A2"] = f"Période : {context['period_label']}"
     _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
 
-    headers = ["Statut", "Commandes", "Bacs", "À percevoir", "Reçu", "Dette"]
+    headers = ["Statut", "Commandes", "Bacs", "À percevoir", "Reçu", "Avance utilisée", "Nouvelle avance", "Dette"]
     for col_index, header in enumerate(headers, start=1):
         _apply_cell_style(sheet.cell(3, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
 
     current_row = 3
     summary_rows = _order_status_summary_rows(context["orders"])
     if summary_rows:
-        for status, count, trays, expected, received, debt in summary_rows:
+        for status, count, trays, expected, received, advance_used, advance_generated, debt in summary_rows:
             current_row += 1
             values = [
                 status,
@@ -1558,26 +1574,28 @@ def _build_monthly_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> 
                 trays,
                 expected,
                 received,
+                advance_used,
+                advance_generated,
                 debt,
             ]
             for col_index, value in enumerate(values, start=1):
                 _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
-            for col in range(4, 7):
+            for col in range(4, 9):
                 sheet.cell(current_row, col).number_format = MONEY_FORMAT
             if status == "Total":
-                for col_index in range(1, 7):
+                for col_index in range(1, 9):
                     _apply_cell_style(
                         sheet.cell(current_row, col_index),
                         fill=SECTION_FILL,
                         alignment=Alignment(horizontal="left"),
                         font=SECTION_FONT if col_index == 1 else BODY_FONT,
                     )
-                for col in range(4, 7):
+                for col in range(4, 9):
                     sheet.cell(current_row, col).number_format = MONEY_FORMAT
-        _add_table(sheet, 3, current_row, 6, "CommandesMensuellesSynthese")
+        _add_table(sheet, 3, current_row, 8, "CommandesMensuellesSynthese")
 
         current_row += 2
-        sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 1, end_column=6)
+        sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row + 1, end_column=8)
         note = (
             "La liste détaillée de toutes les commandes du mois n'est pas affichée ici afin de garder "
             "le rapport mensuel lisible. Le détail reste disponible dans les rapports journaliers ou de période."
@@ -1959,7 +1977,7 @@ def _build_period_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> N
     sheet["A2"] = f"Période : {context['period_label']}"
     _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
 
-    headers = ["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"]
+    headers = ["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Avance utilisée", "Nouvelle avance", "Solde avance", "Dette"]
     for col_index, header in enumerate(headers, start=1):
         _apply_cell_style(sheet.cell(3, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
 
@@ -1975,11 +1993,14 @@ def _build_period_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> N
                 int(item.get("NombreBacs", 0) or 0),
                 float(item.get("MontantAPercevoir", 0) or 0),
                 float(item.get("MontantRecu", 0) or 0),
+                float(item.get("AvanceUtilisee", 0) or 0),
+                float(item.get("AvanceGeneree", 0) or 0),
+                float(item.get("SoldeAvance", 0) or 0),
                 float(item.get("Dette", 0) or 0),
             ]
             for col_index, value in enumerate(values, start=1):
                 _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
-            for col in range(5, 8):
+            for col in range(5, 11):
                 sheet.cell(current_row, col).number_format = MONEY_FORMAT
 
         totals_row = current_row + 1
@@ -1988,11 +2009,13 @@ def _build_period_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> N
         sheet.cell(totals_row, 5, f"=SUM(E4:E{current_row})")
         sheet.cell(totals_row, 6, f"=SUM(F4:F{current_row})")
         sheet.cell(totals_row, 7, f"=SUM(G4:G{current_row})")
-        for col_index in range(1, 8):
+        sheet.cell(totals_row, 8, f"=SUM(H4:H{current_row})")
+        sheet.cell(totals_row, 10, f"=SUM(J4:J{current_row})")
+        for col_index in range(1, 11):
             _apply_cell_style(sheet.cell(totals_row, col_index), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT if col_index == 1 else BODY_FONT)
-        for col in range(5, 8):
+        for col in range(5, 11):
             sheet.cell(totals_row, col).number_format = MONEY_FORMAT
-        _add_table(sheet, 3, current_row, 7, "CommandesPeriode")
+        _add_table(sheet, 3, current_row, 10, "CommandesPeriode")
     else:
         _apply_cell_style(sheet["A4"], alignment=Alignment(horizontal="left"), font=NOTE_FONT)
         sheet["A4"] = "Aucune commande enregistrée pour cette période."

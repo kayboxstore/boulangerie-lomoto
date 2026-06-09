@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import secrets
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .connected_mode import (
+    ConnectionSettings,
     DISCOVERY_APP_ID,
     DISCOVERY_REQUEST_ACTION,
     DISCOVERY_RESPONSE_ACTION,
@@ -37,6 +39,8 @@ class EmbeddedServerHandle:
     discovery_stop_event: threading.Event | None = None
     automatic_backup_thread: threading.Thread | None = None
     automatic_backup_stop_event: threading.Event | None = None
+    email_notification_thread: threading.Thread | None = None
+    email_notification_stop_event: threading.Event | None = None
 
     @property
     def preferred_url(self) -> str:
@@ -49,12 +53,16 @@ class EmbeddedServerHandle:
             self.discovery_stop_event.set()
         if self.automatic_backup_stop_event is not None:
             self.automatic_backup_stop_event.set()
+        if self.email_notification_stop_event is not None:
+            self.email_notification_stop_event.set()
         self.server.shutdown()
         self.server.server_close()
         if self.discovery_thread is not None:
             self.discovery_thread.join(timeout=5)
         if self.automatic_backup_thread is not None:
             self.automatic_backup_thread.join(timeout=5)
+        if self.email_notification_thread is not None:
+            self.email_notification_thread.join(timeout=5)
         self.thread.join(timeout=5)
 
 
@@ -62,8 +70,10 @@ _embedded_server_handle: EmbeddedServerHandle | None = None
 _web_sessions: dict[str, dict[str, Any]] = {}
 _web_sessions_lock = threading.Lock()
 _WEB_SESSION_TTL_SECONDS = 12 * 60 * 60
+_MAX_JSON_BODY_BYTES = 256 * 1024
 _AUTO_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
 _AUTO_BACKUP_RETRY_INTERVAL_SECONDS = 5 * 60
+_EMAIL_NOTIFICATION_INTERVAL_SECONDS = 30
 
 _READ_METHODS = {
     "get_stock_configuration",
@@ -71,10 +81,12 @@ _READ_METHODS = {
     "get_low_stock_alerts",
     "get_stock_journal",
     "count_stock_exits",
+    "count_stock_exits_for_period",
     "list_stock_exits",
     "list_stock_exits_by_date",
     "get_stock_sacks_used_for_date",
     "count_stock_supplies",
+    "count_stock_supplies_for_period",
     "list_stock_supplies",
     "list_stock_supplies_by_date",
     "get_production_for_date",
@@ -82,16 +94,21 @@ _READ_METHODS = {
     "list_productions",
     "list_productions_by_date",
     "get_global_production_summary",
+    "get_production_summary_for_period",
     "get_orders_summary_for_date",
     "get_global_orders_summary",
+    "get_orders_summary_for_period",
     "get_cash_for_date",
     "get_accumulated_debt_totals_for_date",
     "list_cash_days",
     "list_cash_days_by_date",
     "list_cash_balance_by_period",
     "get_total_cash",
+    "get_cash_total_for_period",
     "list_orders",
     "list_orders_by_date",
+    "get_client_advance_balance",
+    "get_total_client_advances",
     "find_existing_order",
     "find_similar_order",
     "count_orders_with_debt",
@@ -102,6 +119,7 @@ _READ_METHODS = {
     "get_commission_synthesis_from_orders",
     "find_existing_commission",
     "get_total_commissions",
+    "get_total_commissions_for_period",
     "get_day_closure",
     "is_day_closed",
     "list_day_closures",
@@ -118,9 +136,12 @@ _STOCK_WRITE_METHODS = {
     "delete_stock_supply",
 }
 
-_ORDER_WRITE_METHODS = {
+_PRODUCTION_WRITE_METHODS = {
     "save_production_day",
     "delete_production_day",
+}
+
+_ORDER_WRITE_METHODS = {
     "add_order",
     "update_order",
     "delete_order",
@@ -158,6 +179,7 @@ _ADMIN_METHODS = {
     "list_backup_files",
     "backup_database",
     "restore_database",
+    "reset_database_to_empty",
     "add_user",
     "update_user",
     "search_users_by_identifiant",
@@ -165,6 +187,7 @@ _ADMIN_METHODS = {
     "delete_user",
     "list_users",
     "count_admins",
+    "count_directors_general",
     "get_user_role",
     "count_users",
     "log_activity",
@@ -174,6 +197,19 @@ _ADMIN_METHODS = {
     "reopen_day",
     "update_stock_configuration",
 } | _WORKER_READ_METHODS | _WORKER_WRITE_METHODS | _REPORT_METHODS
+
+_DIRECTOR_GENERAL_READ_METHODS = {
+    "get_backups_directory",
+    "list_backup_files",
+    "search_users_by_identifiant",
+    "list_users",
+    "count_admins",
+    "count_directors_general",
+    "get_user_role",
+    "count_users",
+    "list_activity_logs",
+    "get_recent_activity_summary",
+}
 
 
 def _database_helper():
@@ -210,8 +246,8 @@ def _build_login_result(user: Any, session: dict[str, Any] | None = None) -> dic
     }
 
 
-def _create_web_session(user: Any) -> dict[str, Any]:
-    token = secrets.token_urlsafe(32)
+def _create_web_session(user: Any, token: str | None = None) -> dict[str, Any]:
+    token = token or secrets.token_urlsafe(32)
     fields = _get_user_fields(user)
     session = {
         "token": token,
@@ -241,21 +277,70 @@ def _get_web_session(token: str) -> dict[str, Any] | None:
         if session is None:
             return None
         session["expires_at"] = now + _WEB_SESSION_TTL_SECONDS
-        return dict(session)
+        session_copy = dict(session)
+    try:
+        DatabaseHelper = _database_helper()
+        if not DatabaseHelper.invoke_local_method(
+            "validate_active_session",
+            str(session_copy.get("identifiant", "")),
+            token,
+        ):
+            _delete_web_session(token)
+            return None
+    except Exception:
+        _delete_web_session(token)
+        return None
+    return session_copy
+
+
+def _delete_web_session(token: str) -> None:
+    if not token:
+        return
+    with _web_sessions_lock:
+        _web_sessions.pop(token, None)
 
 
 def _is_method_allowed_for_session(method_name: str, args: list[Any], session: dict[str, Any]) -> bool:
     role = str(session.get("role", ""))
+    if method_name in {"validate_active_session", "close_active_session"}:
+        return bool(args) and str(args[0]).lower() == str(session.get("identifiant", "")).lower()
     if role == "Admin":
         return True
 
     if method_name == "change_user_password":
+        if role == "Directeur Général":
+            return False
         return bool(args) and str(args[0]) == str(session.get("identifiant", ""))
+
+    if method_name == "process_pending_email_notifications":
+        return role == "Caissier"
+
+    if role == "Directeur Général":
+        return (
+            method_name in _READ_METHODS
+            or method_name in _WORKER_READ_METHODS
+            or method_name in _REPORT_METHODS
+            or method_name in _DIRECTOR_GENERAL_READ_METHODS
+            or method_name == "close_day"
+        )
 
     if method_name in _READ_METHODS:
         if role == "Gestionnaire de stock":
             method_text = method_name.lower()
             return "stock" in method_text or method_name in {"get_day_closure", "is_day_closed", "list_day_closures"}
+        if role == "Chargé de la production":
+            return method_name in {
+                "get_production_for_date",
+                "get_production_summary_for_date",
+                "list_productions",
+                "list_productions_by_date",
+                "get_global_production_summary",
+                "get_orders_summary_for_date",
+                "get_stock_sacks_used_for_date",
+                "get_day_closure",
+                "is_day_closed",
+                "list_day_closures",
+            }
         return True
 
     if method_name in _WORKER_READ_METHODS:
@@ -266,6 +351,8 @@ def _is_method_allowed_for_session(method_name: str, args: list[Any], session: d
 
     if role == "Gestionnaire de stock":
         return method_name in _STOCK_WRITE_METHODS
+    if role == "Chargé de la production":
+        return method_name in _PRODUCTION_WRITE_METHODS
     if role == "Gestionnaire des commandes":
         return method_name in _ORDER_WRITE_METHODS
     if role == "Caissier":
@@ -311,11 +398,35 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
 
         server_token = str(getattr(self.server, "api_token", "") or "")
         request_token = str(payload.get("token", "") or "")
-        if server_token and request_token != server_token:
+        if not server_token:
+            self._send_json(503, {"ok": False, "error": {"message": "Jeton serveur non configuré."}})
+            return
+        if not hmac.compare_digest(request_token, server_token):
             self._send_json(403, {"ok": False, "error": {"message": "Jeton serveur invalide."}})
             return
 
         method_name = str(payload.get("method", "")).strip()
+        if method_name == "get_setup_status":
+            try:
+                DatabaseHelper = _database_helper()
+                result = DatabaseHelper.invoke_local_method("get_setup_status")
+                self._send_json(200, {"ok": True, "result": serialize_value(result)})
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "error": {"message": str(exc), "type": exc.__class__.__name__}})
+            return
+        if method_name == "create_initial_admin":
+            try:
+                args = deserialize_value(payload.get("args", []))
+                if not isinstance(args, list) or len(args) < 4:
+                    raise ValueError("Informations du premier administrateur incomplètes.")
+                DatabaseHelper = _database_helper()
+                DatabaseHelper.invoke_local_method("create_initial_admin", *args[:4])
+                self._send_json(200, {"ok": True, "result": None})
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": {"message": str(exc), "type": exc.__class__.__name__}})
+            except Exception as exc:
+                self._send_json(500, {"ok": False, "error": {"message": str(exc), "type": exc.__class__.__name__}})
+            return
         if method_name in {"web_login", "find_user_for_login"}:
             try:
                 args = deserialize_value(payload.get("args", []))
@@ -323,6 +434,19 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("Identifiant et mot de passe requis.")
                 identifiant = str(args[0]).strip()
                 password = str(args[1]).strip()
+                force_value = args[2] if len(args) >= 3 else False
+                force_session = (
+                    force_value
+                    if isinstance(force_value, bool)
+                    else str(force_value).strip().lower() in {"1", "true", "yes", "oui", "on"}
+                )
+                platform = str(args[3]).strip() if len(args) >= 4 else ""
+                if not platform:
+                    platform = "Web" if method_name == "web_login" else "Windows"
+                device_name = str(args[4]).strip() if len(args) >= 5 else ""
+                if not device_name:
+                    device_name = socket.gethostname()
+                client_address = str(self.client_address[0] or "").strip()
                 DatabaseHelper = _database_helper()
                 user = DatabaseHelper.invoke_local_method("find_user_for_login", identifiant, password)
                 if not user and identifiant.lower() != identifiant:
@@ -334,6 +458,30 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
                     self._send_json(403, {"ok": False, "error": {"message": "Identifiant ou mot de passe incorrect."}})
                     return
                 session = _create_web_session(user)
+                session_result = DatabaseHelper.invoke_local_method(
+                    "open_active_session",
+                    str(session.get("identifiant", "")),
+                    platform,
+                    str(session.get("token", "")),
+                    device_name,
+                    client_address,
+                    force_session,
+                )
+                if not session_result.get("ok", False):
+                    _delete_web_session(str(session.get("token", "")))
+                    self._send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "result": serialize_value(
+                                {
+                                    "__session_conflict__": True,
+                                    "activeSession": session_result.get("activeSession") or {},
+                                }
+                            ),
+                        },
+                    )
+                    return
                 self._send_json(
                     200,
                     {
@@ -386,6 +534,9 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._send_json(400, {"ok": False, "error": {"message": "Longueur de requete invalide."}})
             return None
+        if content_length < 0 or content_length > _MAX_JSON_BODY_BYTES:
+            self._send_json(413, {"ok": False, "error": {"message": "Requete trop volumineuse."}})
+            return None
 
         try:
             body = self.rfile.read(content_length).decode("utf-8-sig") if content_length else "{}"
@@ -412,6 +563,11 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
         self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(content_length))
 
@@ -512,6 +668,16 @@ def _run_automatic_backup_loop(stop_event: threading.Event) -> None:
         stop_event.wait(wait_seconds)
 
 
+def _run_email_notification_loop(stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            DatabaseHelper = _database_helper()
+            DatabaseHelper.invoke_local_method("process_pending_email_notifications", 20)
+        except Exception:
+            pass
+        stop_event.wait(_EMAIL_NOTIFICATION_INTERVAL_SECONDS)
+
+
 def is_embedded_server_running() -> bool:
     return _embedded_server_handle is not None
 
@@ -530,14 +696,16 @@ def start_embedded_server(
 
     if _embedded_server_handle is not None:
         return _embedded_server_handle
+    api_token = api_token.strip() or secrets.token_urlsafe(32)
 
     DatabaseHelper = _database_helper()
     if data_dir is not None:
         DatabaseHelper.set_storage_root(Path(data_dir))
+    DatabaseHelper.apply_connection_settings(ConnectionSettings(), persist=False)
     DatabaseHelper.initialize_local_database()
 
     server = ThreadingHTTPServer((host, port), SyncRequestHandler)
-    server.api_token = api_token.strip()
+    server.api_token = api_token
 
     thread = threading.Thread(target=server.serve_forever, name="boulangerie-sync-server", daemon=True)
     thread.start()
@@ -545,7 +713,7 @@ def start_embedded_server(
     discovery_stop_event = threading.Event()
     discovery_thread = threading.Thread(
         target=_run_discovery_listener,
-        args=(discovery_stop_event, port, api_token.strip()),
+        args=(discovery_stop_event, port, api_token),
         name="boulangerie-sync-discovery",
         daemon=True,
     )
@@ -560,6 +728,15 @@ def start_embedded_server(
     )
     automatic_backup_thread.start()
 
+    email_notification_stop_event = threading.Event()
+    email_notification_thread = threading.Thread(
+        target=_run_email_notification_loop,
+        args=(email_notification_stop_event,),
+        name="boulangerie-email-notifications",
+        daemon=True,
+    )
+    email_notification_thread.start()
+
     _embedded_server_handle = EmbeddedServerHandle(
         server=server,
         thread=thread,
@@ -571,6 +748,8 @@ def start_embedded_server(
         discovery_stop_event=discovery_stop_event,
         automatic_backup_thread=automatic_backup_thread,
         automatic_backup_stop_event=automatic_backup_stop_event,
+        email_notification_thread=email_notification_thread,
+        email_notification_stop_event=email_notification_stop_event,
     )
     return _embedded_server_handle
 

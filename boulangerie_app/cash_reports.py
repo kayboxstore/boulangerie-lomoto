@@ -24,7 +24,8 @@ from .reports import ReportGenerationError
 from .version import APP_NAME
 
 
-CASH_REPORT_ROLES = {"Admin", "Caissier"}
+CASH_REPORT_ROLES = {"Admin", "Directeur Général", "Caissier"}
+FULL_CASH_REPORT_ROLES = {"Admin", "Directeur Général"}
 MONEY_FORMAT = '#,##0 "FC"'
 THIN_BORDER = Border(
     left=Side(style="thin", color="AEBFD0"),
@@ -87,7 +88,7 @@ def _cash_totals(rows: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def _payroll_rows(start_date: date, end_date: date, role: str) -> list[dict[str, Any]]:
-    if role != "Admin":
+    if role not in FULL_CASH_REPORT_ROLES:
         return []
     return DatabaseHelper.list_payrolls(start_date=start_date, end_date=end_date)
 
@@ -230,7 +231,7 @@ def create_cash_balance_pdf_report(
     _ensure_cash_report_role(role)
     rows = _cash_rows(start_date, end_date)
     payrolls = _payroll_rows(start_date, end_date, role)
-    show_payrolls = role == "Admin"
+    show_payrolls = role in FULL_CASH_REPORT_ROLES
     payroll_total = _payroll_total(payrolls)
     payrolls_by_date = _payroll_totals_by_date(payrolls)
     totals = _cash_totals(rows)
@@ -365,7 +366,7 @@ def create_cash_balance_excel_report(
     _ensure_cash_report_role(role)
     rows = _cash_rows(start_date, end_date)
     payrolls = _payroll_rows(start_date, end_date, role)
-    show_payrolls = role == "Admin"
+    show_payrolls = role in FULL_CASH_REPORT_ROLES
     payroll_total = _payroll_total(payrolls)
     payrolls_by_date = _payroll_totals_by_date(payrolls)
     totals = _cash_totals(rows)

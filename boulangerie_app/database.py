@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import math
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -14,6 +15,7 @@ import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from html import escape
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -34,10 +36,14 @@ from .version import APP_VERSION
 
 
 DB_DATE_FORMAT = "%Y-%m-%d"
+DIRECTOR_GENERAL_ROLE = "Directeur Général"
 PASSWORD_PREFIX = "PBKDF2$"
-PASSWORD_ITERATIONS = 100_000
+PASSWORD_ITERATIONS = 600_000
+MIN_PASSWORD_LENGTH = 12
+PRIVILEGED_PASSWORD_LENGTH = 14
 LOGIN_FAILURE_LIMIT = 5
 LOGIN_LOCK_DURATIONS_MINUTES = (2, 5, 30)
+ACTIVE_SESSION_TTL_HOURS = 12
 DEFAULT_ADMIN_FULL_NAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_FULL_NAME", "Augustin Kayembe")
 DEFAULT_ADMIN_USERNAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_USERNAME", "a.kayembe")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_PASSWORD", "010203")
@@ -70,6 +76,18 @@ class AuthenticatedUser:
         return value if value else self.identifiant
 
 
+class ActiveSessionConflictError(RuntimeError):
+    def __init__(self, active_session: dict[str, Any] | None = None) -> None:
+        self.active_session = active_session or {}
+        platform = str(self.active_session.get("Plateforme") or "un autre appareil")
+        device_name = str(self.active_session.get("NomAppareil") or "").strip()
+        suffix = f" ({device_name})" if device_name else ""
+        super().__init__(
+            "Ce compte est deja connecte sur "
+            f"{platform}{suffix}. Fermez cette session pour vous connecter ici."
+        )
+
+
 class DatabaseHelper:
     app_data_dir = Path(
         os.environ.get(
@@ -93,6 +111,8 @@ class DatabaseHelper:
     _connection_settings_loaded = False
     _remote_client: RemoteDatabaseClient | None = None
     _execution_context = threading.local()
+    _current_session_identifiant = ""
+    _current_session_token = ""
 
     @classmethod
     def set_storage_root(cls, base_dir: Path) -> None:
@@ -186,6 +206,9 @@ class DatabaseHelper:
         if method_name == "find_user_for_login" and result:
             if not isinstance(result, dict):
                 raise RuntimeError("La réponse du serveur central pour la connexion est invalide.")
+            if result.get("__session_conflict__"):
+                active_session = result.get("activeSession") if isinstance(result.get("activeSession"), dict) else {}
+                raise ActiveSessionConflictError(active_session)
             session_token = str(
                 result.pop("sessionToken", "")
                 or result.pop("session_token", "")
@@ -193,6 +216,7 @@ class DatabaseHelper:
             ).strip()
             if session_token:
                 cls._remote_client.session_token = session_token
+                cls.set_current_session_context(str(result.get("identifiant", "")), session_token)
             result.pop("__remote_dataclass__", None)
             return AuthenticatedUser(
                 identifiant=str(result.get("identifiant", "")),
@@ -242,18 +266,24 @@ class DatabaseHelper:
             cls._create_tables(connection)
             cls._migrate_user_recoverable_password_column(connection)
             cls._migrate_user_login_security_columns(connection)
+            cls._migrate_user_email_column(connection)
+            cls._migrate_worker_email_column(connection)
+            cls._migrate_email_notifications_table(connection)
+            cls._migrate_active_sessions_table(connection)
             cls._migrate_stock_configuration_table(connection)
             cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
             cls._migrate_order_debt_payment_columns(connection)
+            cls._migrate_order_advance_columns(connection)
             cls._migrate_commissions_table(connection)
             cls._migrate_previsions_commandes_table(connection)
             cls._migrate_production_table(connection)
             cls._maybe_reset_database_for_forced_version(connection)
             cls._normalize_status_values(connection)
+            cls._recalculate_order_advances(connection)
             cls._recalculate_debt_payments(connection)
             cls._sync_all_commissions(connection)
-            cls._insert_default_admin(connection)
+            cls._migrate_legacy_admin(connection)
             cls._insert_default_stock_config(connection)
         pragma_connection: sqlite3.Connection | None = None
         try:
@@ -272,6 +302,16 @@ class DatabaseHelper:
         if isinstance(value, date):
             return value
         return datetime.strptime(str(value).strip(), DB_DATE_FORMAT).date()
+
+    @classmethod
+    def ensure_not_future_date(cls, target_date: date | str, label: str = "cet enregistrement") -> date:
+        normalized_date = cls._coerce_date(target_date)
+        if normalized_date > date.today():
+            raise ValueError(
+                f"Impossible d'enregistrer {label.strip() or 'ces données'} "
+                f"pour une date future ({normalized_date.strftime('%d/%m/%Y')})."
+            )
+        return normalized_date
 
     @classmethod
     def build_backup_path(cls, prefix: str = "boulangerie-lomoto-backup") -> Path:
@@ -476,13 +516,15 @@ class DatabaseHelper:
             cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
             cls._migrate_order_debt_payment_columns(connection)
+            cls._migrate_order_advance_columns(connection)
             cls._migrate_commissions_table(connection)
             cls._migrate_previsions_commandes_table(connection)
             cls._migrate_production_table(connection)
             cls._normalize_status_values(connection)
+            cls._recalculate_order_advances(connection)
             cls._recalculate_debt_payments(connection)
             cls._sync_all_commissions(connection)
-            cls._insert_default_admin(connection)
+            cls._migrate_legacy_admin(connection)
             cls._insert_default_stock_config(connection)
 
         return safety_backup, cls.db_path
@@ -495,6 +537,7 @@ class DatabaseHelper:
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 NomComplet TEXT NOT NULL,
                 Identifiant TEXT NOT NULL UNIQUE,
+                Email TEXT NOT NULL DEFAULT '',
                 MotDePasse TEXT NOT NULL,
                 MotDePasseLisible TEXT NOT NULL DEFAULT '',
                 Role TEXT NOT NULL,
@@ -502,6 +545,24 @@ class DatabaseHelper:
                 NiveauBlocage INTEGER NOT NULL DEFAULT 0,
                 VerrouilleJusqua TEXT NOT NULL DEFAULT ''
             );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS UX_Utilisateurs_DirecteurGeneral
+            ON Utilisateurs(Role)
+            WHERE Role = 'Directeur Général';
+
+            CREATE TABLE IF NOT EXISTS SessionsActives (
+                Identifiant TEXT PRIMARY KEY,
+                SessionToken TEXT NOT NULL,
+                Plateforme TEXT NOT NULL,
+                NomAppareil TEXT NOT NULL DEFAULT '',
+                AdresseIP TEXT NOT NULL DEFAULT '',
+                DateConnexion TEXT NOT NULL,
+                DerniereActivite TEXT NOT NULL,
+                ExpireLe TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_actives_expire
+            ON SessionsActives (ExpireLe);
 
             CREATE TABLE IF NOT EXISTS ConfigurationStock (
                 Id INTEGER PRIMARY KEY CHECK (Id = 1),
@@ -617,6 +678,9 @@ class DatabaseHelper:
                 MontantAPercevoir REAL NOT NULL,
                 MontantRecu REAL NOT NULL,
                 Dette REAL NOT NULL,
+                AvanceUtilisee REAL NOT NULL DEFAULT 0,
+                AvanceGeneree REAL NOT NULL DEFAULT 0,
+                SoldeAvance REAL NOT NULL DEFAULT 0,
                 DettePayee REAL NOT NULL DEFAULT 0,
                 DetteSoldee INTEGER NOT NULL DEFAULT 0
             );
@@ -638,6 +702,7 @@ class DatabaseHelper:
                 NomComplet TEXT NOT NULL,
                 Fonction TEXT NOT NULL DEFAULT '',
                 Telephone TEXT NOT NULL DEFAULT '',
+                Email TEXT NOT NULL DEFAULT '',
                 Adresse TEXT NOT NULL DEFAULT '',
                 DateEmbauche TEXT NOT NULL DEFAULT '',
                 SalaireMensuel REAL NOT NULL DEFAULT 0,
@@ -663,6 +728,23 @@ class DatabaseHelper:
 
             CREATE INDEX IF NOT EXISTS idx_paies_travailleurs_date
             ON PaiesTravailleurs (DatePaie);
+
+            CREATE TABLE IF NOT EXISTS NotificationsEmail (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                TypeNotification TEXT NOT NULL,
+                Destinataire TEXT NOT NULL,
+                Sujet TEXT NOT NULL,
+                CorpsTexte TEXT NOT NULL,
+                CorpsHtml TEXT NOT NULL,
+                Statut TEXT NOT NULL DEFAULT 'En attente',
+                NombreTentatives INTEGER NOT NULL DEFAULT 0,
+                DerniereErreur TEXT NOT NULL DEFAULT '',
+                DateCreation TEXT NOT NULL,
+                DateEnvoi TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_email_statut
+            ON NotificationsEmail (Statut, Id);
 
             CREATE TABLE IF NOT EXISTS CloturesJournalieres (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -806,6 +888,9 @@ class DatabaseHelper:
                 MontantAPercevoir REAL NOT NULL,
                 MontantRecu REAL NOT NULL,
                 Dette REAL NOT NULL,
+                AvanceUtilisee REAL NOT NULL DEFAULT 0,
+                AvanceGeneree REAL NOT NULL DEFAULT 0,
+                SoldeAvance REAL NOT NULL DEFAULT 0,
                 DettePayee REAL NOT NULL DEFAULT 0,
                 DetteSoldee INTEGER NOT NULL DEFAULT 0
             )
@@ -872,6 +957,21 @@ class DatabaseHelper:
                 """
                 ALTER TABLE Commandes
                 ADD COLUMN DetteSoldee INTEGER NOT NULL DEFAULT 0
+                """
+            )
+
+    @classmethod
+    def _migrate_order_advance_columns(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "Commandes")
+        if not columns:
+            return
+        for column_name in ("AvanceUtilisee", "AvanceGeneree", "SoldeAvance"):
+            if column_name in columns:
+                continue
+            connection.execute(
+                f"""
+                ALTER TABLE Commandes
+                ADD COLUMN {column_name} REAL NOT NULL DEFAULT 0
                 """
             )
 
@@ -1000,29 +1100,13 @@ class DatabaseHelper:
                 """
             )
 
-        rows = connection.execute(
+        connection.execute(
             """
-            SELECT Identifiant, MotDePasse, IFNULL(MotDePasseLisible, '') AS MotDePasseLisible
-            FROM Utilisateurs
-            WHERE IFNULL(MotDePasseLisible, '') = ''
+            UPDATE Utilisateurs
+            SET MotDePasseLisible = ''
+            WHERE IFNULL(MotDePasseLisible, '') <> ''
             """
-        ).fetchall()
-        for row in rows:
-            stored_password = str(row["MotDePasse"] or "")
-            recoverable_password = ""
-            if stored_password and not cls.is_hashed_password(stored_password):
-                recoverable_password = stored_password
-            elif stored_password and cls.verify_password(DEFAULT_ADMIN_PASSWORD, stored_password):
-                recoverable_password = DEFAULT_ADMIN_PASSWORD
-            if recoverable_password:
-                connection.execute(
-                    """
-                    UPDATE Utilisateurs
-                    SET MotDePasseLisible = ?
-                    WHERE Identifiant = ?
-                    """,
-                    (cls.protect_recoverable_password(recoverable_password), row["Identifiant"]),
-                )
+        )
 
     @classmethod
     def _migrate_user_login_security_columns(cls, connection: sqlite3.Connection) -> None:
@@ -1044,26 +1128,86 @@ class DatabaseHelper:
                 )
 
     @classmethod
-    def _insert_default_admin(cls, connection: sqlite3.Connection) -> None:
+    def _migrate_user_email_column(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "Utilisateurs")
+        if not columns:
+            return
+        if "Email" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE Utilisateurs
+                ADD COLUMN Email TEXT NOT NULL DEFAULT ''
+                """
+            )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS UX_Utilisateurs_Email
+            ON Utilisateurs(LOWER(Email))
+            WHERE TRIM(Email) <> ''
+            """
+        )
+
+    @classmethod
+    def _migrate_worker_email_column(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "Travailleurs")
+        if columns and "Email" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE Travailleurs
+                ADD COLUMN Email TEXT NOT NULL DEFAULT ''
+                """
+            )
+
+    @classmethod
+    def _migrate_email_notifications_table(cls, connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS NotificationsEmail (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                TypeNotification TEXT NOT NULL,
+                Destinataire TEXT NOT NULL,
+                Sujet TEXT NOT NULL,
+                CorpsTexte TEXT NOT NULL,
+                CorpsHtml TEXT NOT NULL,
+                Statut TEXT NOT NULL DEFAULT 'En attente',
+                NombreTentatives INTEGER NOT NULL DEFAULT 0,
+                DerniereErreur TEXT NOT NULL DEFAULT '',
+                DateCreation TEXT NOT NULL,
+                DateEnvoi TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_email_statut
+            ON NotificationsEmail (Statut, Id);
+            """
+        )
+
+    @classmethod
+    def _migrate_active_sessions_table(cls, connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS SessionsActives (
+                Identifiant TEXT PRIMARY KEY,
+                SessionToken TEXT NOT NULL,
+                Plateforme TEXT NOT NULL,
+                NomAppareil TEXT NOT NULL DEFAULT '',
+                AdresseIP TEXT NOT NULL DEFAULT '',
+                DateConnexion TEXT NOT NULL,
+                DerniereActivite TEXT NOT NULL,
+                ExpireLe TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_actives_expire
+            ON SessionsActives (ExpireLe);
+            """
+        )
+
+    @classmethod
+    def _migrate_legacy_admin(cls, connection: sqlite3.Connection) -> None:
         target_admin = connection.execute(
             "SELECT Id FROM Utilisateurs WHERE Identifiant = ?",
             (DEFAULT_ADMIN_USERNAME,),
         ).fetchone()
         if target_admin:
-            connection.execute(
-                """
-                UPDATE Utilisateurs
-                SET NomComplet = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = 'Admin',
-                    EchecsConnexion = 0, NiveauBlocage = 0, VerrouilleJusqua = ''
-                WHERE Id = ?
-                """,
-                (
-                    DEFAULT_ADMIN_FULL_NAME,
-                    cls.hash_password(DEFAULT_ADMIN_PASSWORD),
-                    cls.protect_recoverable_password(DEFAULT_ADMIN_PASSWORD),
-                    target_admin["Id"],
-                ),
-            )
             return
 
         legacy_admin = connection.execute(
@@ -1084,40 +1228,14 @@ class DatabaseHelper:
             connection.execute(
                 """
                 UPDATE Utilisateurs
-                SET NomComplet = ?, Identifiant = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = 'Admin',
-                    EchecsConnexion = 0, NiveauBlocage = 0, VerrouilleJusqua = ''
+                SET Identifiant = ?, Role = 'Admin'
                 WHERE Id = ?
                 """,
                 (
-                    DEFAULT_ADMIN_FULL_NAME,
                     DEFAULT_ADMIN_USERNAME,
-                    cls.hash_password(DEFAULT_ADMIN_PASSWORD),
-                    cls.protect_recoverable_password(DEFAULT_ADMIN_PASSWORD),
                     legacy_admin["Id"],
                 ),
             )
-            return
-
-        count = connection.execute(
-            "SELECT COUNT(*) FROM Utilisateurs WHERE Role = 'Admin'"
-        ).fetchone()[0]
-        if count:
-            return
-
-        connection.execute(
-            """
-            INSERT INTO Utilisateurs
-                (NomComplet, Identifiant, MotDePasse, MotDePasseLisible, Role, EchecsConnexion, NiveauBlocage, VerrouilleJusqua)
-            VALUES (?, ?, ?, ?, ?, 0, 0, '')
-            """,
-            (
-                DEFAULT_ADMIN_FULL_NAME,
-                DEFAULT_ADMIN_USERNAME,
-                cls.hash_password(DEFAULT_ADMIN_PASSWORD),
-                cls.protect_recoverable_password(DEFAULT_ADMIN_PASSWORD),
-                "Admin",
-            ),
-        )
 
     @classmethod
     def _insert_default_stock_config(cls, connection: sqlite3.Connection) -> None:
@@ -1164,6 +1282,7 @@ class DatabaseHelper:
             "Travailleurs",
             "CloturesJournalieres",
             "HistoriqueActions",
+            "SessionsActives",
         ]
 
     @classmethod
@@ -1188,7 +1307,6 @@ class DatabaseHelper:
             f"DELETE FROM sqlite_sequence WHERE name IN ({placeholders})",
             tuple(tables),
         )
-        cls._insert_default_admin(connection)
         cls._insert_default_stock_config(connection)
 
     @classmethod
@@ -1202,11 +1320,17 @@ class DatabaseHelper:
 
     @classmethod
     def reset_database_to_default_admin(cls) -> None:
+        cls.reset_database_to_empty()
+
+    @classmethod
+    def reset_database_to_empty(cls) -> Path | None:
         with cls.local_calls_only():
             cls.initialize_local_database()
+            safety_backup = cls.backup_database(cls.build_backup_path("avant-reinitialisation"))
             with cls.connect() as connection:
                 cls._clear_records_and_insert_defaults(connection)
             cls._write_reset_marker()
+            return safety_backup
 
     @staticmethod
     def hash_password(plain_password: str) -> str:
@@ -1224,41 +1348,11 @@ class DatabaseHelper:
 
     @staticmethod
     def protect_recoverable_password(plain_password: str) -> str:
-        value = plain_password.strip()
-        if not value:
-            return ""
-        try:
-            import win32crypt  # type: ignore[import-not-found]
-
-            encrypted = win32crypt.CryptProtectData(
-                value.encode("utf-8"),
-                "Boulangerie Lomoto - mot de passe utilisateur",
-                None,
-                None,
-                None,
-                0,
-            )
-            return "DPAPI$" + base64.b64encode(encrypted).decode("ascii")
-        except Exception:
-            return "B64$" + base64.b64encode(value.encode("utf-8")).decode("ascii")
+        return ""
 
     @staticmethod
     def unprotect_recoverable_password(stored_password: str) -> str:
-        value = str(stored_password or "").strip()
-        if not value:
-            return ""
-        try:
-            if value.startswith("DPAPI$"):
-                import win32crypt  # type: ignore[import-not-found]
-
-                encrypted = base64.b64decode(value.removeprefix("DPAPI$"))
-                _description, decrypted = win32crypt.CryptUnprotectData(encrypted, None, None, None, 0)
-                return decrypted.decode("utf-8")
-            if value.startswith("B64$"):
-                return base64.b64decode(value.removeprefix("B64$")).decode("utf-8")
-        except Exception:
-            return ""
-        return value
+        return ""
 
     @staticmethod
     def is_hashed_password(stored_password: str) -> bool:
@@ -1289,21 +1383,414 @@ class DatabaseHelper:
         )
         return hmac.compare_digest(expected, digest)
 
+    @staticmethod
+    def _password_policy_min_length(role: str = "") -> int:
+        return PRIVILEGED_PASSWORD_LENGTH if role.strip() in {"Admin", DIRECTOR_GENERAL_ROLE} else MIN_PASSWORD_LENGTH
+
+    @staticmethod
+    def _password_policy_tokens(*values: str) -> set[str]:
+        tokens: set[str] = set()
+        for value in values:
+            normalized = unicodedata.normalize("NFKD", str(value or ""))
+            normalized = "".join(character for character in normalized if not unicodedata.combining(character))
+            for token in re.split(r"[^A-Za-z0-9]+", normalized.lower()):
+                if len(token) >= 4:
+                    tokens.add(token)
+        return tokens
+
     @classmethod
-    def add_user(cls, full_name: str, identifiant: str, password: str, role: str) -> None:
+    def validate_password_strength(
+        cls,
+        password: str,
+        *,
+        role: str = "",
+        identifiant: str = "",
+        full_name: str = "",
+    ) -> None:
+        normalized_password = str(password or "")
+        stripped_password = normalized_password.strip()
+        required_length = cls._password_policy_min_length(role)
+        if len(stripped_password) < required_length:
+            raise ValueError(
+                f"Le mot de passe doit contenir au moins {required_length} caractères."
+            )
+        if stripped_password != normalized_password:
+            raise ValueError("Le mot de passe ne doit pas commencer ou se terminer par un espace.")
+
+        checks = (
+            (r"[a-z]", "une lettre minuscule"),
+            (r"[A-Z]", "une lettre majuscule"),
+            (r"\d", "un chiffre"),
+            (r"[^A-Za-z0-9\s]", "un symbole"),
+        )
+        missing = [label for pattern, label in checks if re.search(pattern, stripped_password) is None]
+        if missing:
+            raise ValueError(
+                "Le mot de passe doit contenir au moins "
+                + ", ".join(missing)
+                + "."
+            )
+
+        lowered_password = stripped_password.lower()
+        weak_values = {"password", "motdepasse", "boulangerie", "lomoto", "admin", "directeur", "010203", "123456"}
+        if any(value in lowered_password for value in weak_values):
+            raise ValueError("Le mot de passe contient un mot trop facile à deviner.")
+
+        for token in cls._password_policy_tokens(identifiant, full_name):
+            if token in lowered_password:
+                raise ValueError("Le mot de passe ne doit pas contenir le nom ou l'identifiant du compte.")
+
+    @staticmethod
+    def password_needs_rehash(stored_password: str) -> bool:
+        if not stored_password.startswith(PASSWORD_PREFIX):
+            return True
+        try:
+            return int(stored_password.split("$", 2)[1]) < PASSWORD_ITERATIONS
+        except (IndexError, TypeError, ValueError):
+            return True
+
+    @staticmethod
+    def _normalize_email(email: str) -> str:
+        normalized = str(email or "").strip().lower()
+        if normalized and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized):
+            raise ValueError("L'adresse e-mail n'est pas valide.")
+        return normalized
+
+    @classmethod
+    def get_setup_status(cls) -> dict[str, Any]:
+        user_count = int(cls._fetch_value("SELECT COUNT(*) FROM Utilisateurs") or 0)
+        return {"required": user_count == 0, "user_count": user_count}
+
+    @classmethod
+    def _queue_email_notification(
+        cls,
+        connection: sqlite3.Connection,
+        notification_type: str,
+        recipient: str,
+        subject: str,
+        text_body: str,
+        html_body: str,
+    ) -> None:
+        normalized_recipient = cls._normalize_email(recipient)
+        if not normalized_recipient:
+            return
+        connection.execute(
+            """
+            INSERT INTO NotificationsEmail (
+                TypeNotification,
+                Destinataire,
+                Sujet,
+                CorpsTexte,
+                CorpsHtml,
+                Statut,
+                NombreTentatives,
+                DerniereErreur,
+                DateCreation,
+                DateEnvoi
+            )
+            VALUES (?, ?, ?, ?, ?, 'En attente', 0, '', ?, '')
+            """,
+            (
+                notification_type.strip(),
+                normalized_recipient,
+                subject.strip(),
+                text_body,
+                html_body,
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+
+    @classmethod
+    def _queue_credentials_email(
+        cls,
+        connection: sqlite3.Connection,
+        full_name: str,
+        identifiant: str,
+        email: str,
+        password: str,
+        role: str,
+    ) -> None:
+        subject = "Vos accès à Boulangerie Lomoto"
+        text_body = (
+            f"Bonjour {full_name},\n\n"
+            "Votre compte Boulangerie Lomoto a été créé.\n\n"
+            f"Identifiant : {identifiant}\n"
+            f"Mot de passe temporaire : {password}\n"
+            f"Rôle : {role}\n\n"
+            "Pour votre sécurité, changez le mot de passe après votre première connexion."
+        )
+        html_body = (
+            f"<p>Bonjour <strong>{escape(full_name)}</strong>,</p>"
+            "<p>Votre compte Boulangerie Lomoto a été créé.</p>"
+            "<ul>"
+            f"<li>Identifiant : <strong>{escape(identifiant)}</strong></li>"
+            f"<li>Mot de passe temporaire : <strong>{escape(password)}</strong></li>"
+            f"<li>Rôle : <strong>{escape(role)}</strong></li>"
+            "</ul>"
+            "<p>Pour votre sécurité, changez le mot de passe après votre première connexion.</p>"
+        )
+        cls._queue_email_notification(
+            connection,
+            "Création utilisateur",
+            email,
+            subject,
+            text_body,
+            html_body,
+        )
+
+    @classmethod
+    def process_pending_email_notifications(cls, limit: int = 20) -> dict[str, int]:
+        from .email_service import load_email_settings, send_transactional_email
+
+        if not load_email_settings().configured:
+            pending = int(
+                cls._fetch_value(
+                    """
+                    SELECT COUNT(*)
+                    FROM NotificationsEmail
+                    WHERE Statut NOT IN ('Envoyé', 'Mis en file')
+                    """
+                )
+                or 0
+            )
+            return {
+                "processed": 0,
+                "sent": 0,
+                "failed": 0,
+                "pending": pending,
+                "configurationRequired": 1,
+            }
+
+        rows = cls._fetch_all(
+            """
+            SELECT Id, Destinataire, Sujet, CorpsTexte, CorpsHtml
+            FROM NotificationsEmail
+            WHERE Statut IN ('En attente', 'Échec', 'Configuration requise')
+              AND NombreTentatives < 8
+            ORDER BY Id
+            LIMIT ?
+            """,
+            (max(int(limit), 1),),
+        )
+        sent_count = 0
+        failed_count = 0
+        for row in rows:
+            result = send_transactional_email(
+                str(row.get("Destinataire", "")),
+                str(row.get("Sujet", "")),
+                str(row.get("CorpsTexte", "")),
+                str(row.get("CorpsHtml", "")),
+            )
+            if result.sent:
+                cls._execute(
+                    """
+                    UPDATE NotificationsEmail
+                    SET Statut = ?,
+                        NombreTentatives = NombreTentatives + 1,
+                        DerniereErreur = '',
+                        DateEnvoi = ?,
+                        CorpsTexte = '',
+                        CorpsHtml = ''
+                    WHERE Id = ?
+                    """,
+                    (
+                        "Envoyé" if result.status == "sent" else "Mis en file",
+                        datetime.now().isoformat(timespec="seconds"),
+                        int(row["Id"]),
+                    ),
+                )
+                sent_count += 1
+            else:
+                status = "Configuration requise" if result.status == "configuration_required" else "Échec"
+                cls._execute(
+                    """
+                    UPDATE NotificationsEmail
+                    SET Statut = ?,
+                        NombreTentatives = NombreTentatives + 1,
+                        DerniereErreur = ?
+                    WHERE Id = ?
+                    """,
+                    (status, result.message[:1000], int(row["Id"])),
+                )
+                failed_count += 1
+        pending_count = int(
+            cls._fetch_value(
+                """
+                SELECT COUNT(*)
+                FROM NotificationsEmail
+                WHERE Statut NOT IN ('Envoyé', 'Mis en file')
+                """
+            )
+            or 0
+        )
+        return {
+            "processed": len(rows),
+            "sent": sent_count,
+            "failed": failed_count,
+            "pending": pending_count,
+            "configurationRequired": 0,
+        }
+
+    @classmethod
+    def list_email_notifications(cls, limit: int = 50) -> list[dict[str, Any]]:
+        return cls._fetch_all(
+            """
+            SELECT
+                Id,
+                TypeNotification,
+                Destinataire,
+                Sujet,
+                Statut,
+                NombreTentatives,
+                DerniereErreur,
+                DateCreation,
+                DateEnvoi
+            FROM NotificationsEmail
+            ORDER BY Id DESC
+            LIMIT ?
+            """,
+            (max(min(int(limit), 200), 1),),
+        )
+
+    @classmethod
+    def get_email_notification_status(cls) -> dict[str, Any]:
+        from .email_service import load_email_settings
+
+        counts = cls._fetch_all(
+            """
+            SELECT Statut, COUNT(*) AS Nombre
+            FROM NotificationsEmail
+            GROUP BY Statut
+            """
+        )
+        count_by_status = {
+            str(row.get("Statut", "")): int(row.get("Nombre", 0) or 0)
+            for row in counts
+        }
+        pending = sum(
+            count
+            for status, count in count_by_status.items()
+            if status not in {"Envoyé", "Mis en file"}
+        )
+        return {
+            "settings": load_email_settings().public_status(),
+            "counts": count_by_status,
+            "pending": pending,
+            "recent": cls.list_email_notifications(20),
+        }
+
+    @classmethod
+    def retry_email_notifications(cls, limit: int = 50) -> dict[str, Any]:
+        cls._execute(
+            """
+            UPDATE NotificationsEmail
+            SET Statut = 'En attente',
+                NombreTentatives = 0,
+                DerniereErreur = ''
+            WHERE Statut NOT IN ('Envoyé', 'Mis en file')
+            """
+        )
+        return cls.process_pending_email_notifications(limit)
+
+    @classmethod
+    def create_initial_admin(
+        cls,
+        full_name: str,
+        identifiant: str,
+        email: str,
+        password: str,
+    ) -> None:
+        normalized_name = str(full_name or "").strip()
+        normalized_identifiant = str(identifiant or "").strip().lower()
+        normalized_email = cls._normalize_email(email)
+        normalized_password = str(password or "").strip()
+        if not normalized_name:
+            raise ValueError("Veuillez saisir le nom complet de l'administrateur.")
+        if not normalized_identifiant:
+            raise ValueError("Veuillez saisir l'identifiant de l'administrateur.")
+        if not normalized_email:
+            raise ValueError("Veuillez saisir l'adresse e-mail de l'administrateur.")
+        cls.validate_password_strength(
+            normalized_password,
+            role="Admin",
+            identifiant=normalized_identifiant,
+            full_name=normalized_name,
+        )
+
         with cls.connect() as connection:
+            if int(connection.execute("SELECT COUNT(*) FROM Utilisateurs").fetchone()[0] or 0) > 0:
+                raise ValueError("La configuration initiale a déjà été effectuée.")
             connection.execute(
                 """
-                INSERT INTO Utilisateurs (NomComplet, Identifiant, MotDePasse, MotDePasseLisible, Role)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO Utilisateurs
+                    (NomComplet, Identifiant, Email, MotDePasse, MotDePasseLisible, Role)
+                VALUES (?, ?, ?, ?, ?, 'Admin')
+                """,
+                (
+                    normalized_name,
+                    normalized_identifiant,
+                    normalized_email,
+                    cls.hash_password(normalized_password),
+                    "",
+                ),
+            )
+            cls._queue_credentials_email(
+                connection,
+                normalized_name,
+                normalized_identifiant,
+                normalized_email,
+                normalized_password,
+                "Admin",
+            )
+
+    @classmethod
+    def add_user(
+        cls,
+        full_name: str,
+        identifiant: str,
+        password: str,
+        role: str,
+        email: str = "",
+    ) -> None:
+        normalized_password = str(password or "").strip()
+        normalized_email = cls._normalize_email(email)
+        if not normalized_email:
+            raise ValueError("Veuillez saisir l'adresse e-mail de l'utilisateur.")
+        cls.validate_password_strength(
+            normalized_password,
+            role=role,
+            identifiant=identifiant,
+            full_name=full_name,
+        )
+        with cls.connect() as connection:
+            if role.strip() == DIRECTOR_GENERAL_ROLE:
+                existing = connection.execute(
+                    "SELECT COUNT(*) FROM Utilisateurs WHERE Role = ?",
+                    (DIRECTOR_GENERAL_ROLE,),
+                ).fetchone()[0]
+                if int(existing or 0) > 0:
+                    raise ValueError("Un seul Directeur Général peut être enregistré.")
+            connection.execute(
+                """
+                INSERT INTO Utilisateurs (NomComplet, Identifiant, Email, MotDePasse, MotDePasseLisible, Role)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     full_name,
                     identifiant,
-                    cls.hash_password(password),
-                    cls.protect_recoverable_password(password),
+                    normalized_email,
+                    cls.hash_password(normalized_password),
+                    "",
                     role,
                 ),
+            )
+            cls._queue_credentials_email(
+                connection,
+                full_name.strip(),
+                identifiant.strip(),
+                normalized_email,
+                normalized_password,
+                role.strip(),
             )
 
     @classmethod
@@ -1313,51 +1800,108 @@ class DatabaseHelper:
         full_name: str,
         password: str,
         role: str,
+        email: str | None = None,
     ) -> int:
+        normalized_email = cls._normalize_email(email or "") if email is not None else None
+        normalized_password = str(password or "").strip()
+        if normalized_password:
+            cls.validate_password_strength(
+                normalized_password,
+                role=role,
+                identifiant=original_identifiant,
+                full_name=full_name,
+            )
         with cls.connect() as connection:
-            if password.strip():
-                cursor = connection.execute(
+            if role.strip() == DIRECTOR_GENERAL_ROLE:
+                existing = connection.execute(
                     """
-                    UPDATE Utilisateurs
-                    SET NomComplet = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = ?
-                    WHERE Identifiant = ?
+                    SELECT COUNT(*)
+                    FROM Utilisateurs
+                    WHERE Role = ? AND Identifiant <> ?
                     """,
-                    (
-                        full_name,
-                        cls.hash_password(password),
-                        cls.protect_recoverable_password(password),
-                        role,
-                        original_identifiant,
-                    ),
-                )
+                    (DIRECTOR_GENERAL_ROLE, original_identifiant),
+                ).fetchone()[0]
+                if int(existing or 0) > 0:
+                    raise ValueError("Un seul Directeur Général peut être enregistré.")
+            if normalized_password:
+                if normalized_email is None:
+                    cursor = connection.execute(
+                        """
+                        UPDATE Utilisateurs
+                        SET NomComplet = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = ?
+                        WHERE Identifiant = ?
+                        """,
+                        (
+                            full_name,
+                            cls.hash_password(normalized_password),
+                            "",
+                            role,
+                            original_identifiant,
+                        ),
+                    )
+                else:
+                    cursor = connection.execute(
+                        """
+                        UPDATE Utilisateurs
+                        SET NomComplet = ?, Email = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = ?
+                        WHERE Identifiant = ?
+                        """,
+                        (
+                            full_name,
+                            normalized_email,
+                            cls.hash_password(normalized_password),
+                            "",
+                            role,
+                            original_identifiant,
+                        ),
+                    )
             else:
-                cursor = connection.execute(
-                    """
-                    UPDATE Utilisateurs
-                    SET NomComplet = ?, Role = ?
-                    WHERE Identifiant = ?
-                    """,
-                    (full_name, role, original_identifiant),
-                )
+                if normalized_email is None:
+                    cursor = connection.execute(
+                        """
+                        UPDATE Utilisateurs
+                        SET NomComplet = ?, Role = ?
+                        WHERE Identifiant = ?
+                        """,
+                        (full_name, role, original_identifiant),
+                    )
+                else:
+                    cursor = connection.execute(
+                        """
+                        UPDATE Utilisateurs
+                        SET NomComplet = ?, Email = ?, Role = ?
+                        WHERE Identifiant = ?
+                        """,
+                        (full_name, normalized_email, role, original_identifiant),
+                    )
             return cursor.rowcount
 
     @classmethod
-    def find_user_for_login(cls, identifiant: str, password: str) -> AuthenticatedUser | None:
+    def find_user_for_login(
+        cls,
+        identifiant: str,
+        password: str,
+        force_session: bool = False,
+        platform: str = "",
+        device_name: str = "",
+    ) -> AuthenticatedUser | None:
         with cls.connect() as connection:
             row = connection.execute(
                 """
                 SELECT
                     NomComplet,
                     Identifiant,
+                    IFNULL(Email, '') AS Email,
                     MotDePasse,
                     Role,
                     IFNULL(EchecsConnexion, 0) AS EchecsConnexion,
                     IFNULL(NiveauBlocage, 0) AS NiveauBlocage,
                     IFNULL(VerrouilleJusqua, '') AS VerrouilleJusqua
                 FROM Utilisateurs
-                WHERE Identifiant = ?
+                WHERE LOWER(Identifiant) = LOWER(?)
+                   OR LOWER(IFNULL(Email, '')) = LOWER(?)
                 """,
-                (identifiant,),
+                (identifiant, identifiant),
             ).fetchone()
             if row is None:
                 return None
@@ -1411,7 +1955,7 @@ class DatabaseHelper:
                 )
                 return None
 
-            if not cls.is_hashed_password(stored_password):
+            if cls.password_needs_rehash(str(stored_password)):
                 connection.execute(
                     """
                     UPDATE Utilisateurs
@@ -1420,7 +1964,7 @@ class DatabaseHelper:
                     """,
                     (
                         cls.hash_password(password),
-                        cls.protect_recoverable_password(password),
+                        "",
                         row["Identifiant"],
                     ),
                 )
@@ -1465,13 +2009,10 @@ class DatabaseHelper:
             raise ValueError("Veuillez saisir le mot de passe actuel.")
         if not new_password.strip():
             raise ValueError("Veuillez saisir le nouveau mot de passe.")
-        if len(new_password.strip()) < 6:
-            raise ValueError("Le nouveau mot de passe doit contenir au moins 6 caracteres.")
-
         with cls.connect() as connection:
             row = connection.execute(
                 """
-                SELECT MotDePasse
+                SELECT MotDePasse, Role, NomComplet
                 FROM Utilisateurs
                 WHERE Identifiant = ?
                 """,
@@ -1479,6 +2020,13 @@ class DatabaseHelper:
             ).fetchone()
             if row is None:
                 raise ValueError("Utilisateur introuvable.")
+
+            cls.validate_password_strength(
+                new_password,
+                role=str(row["Role"] or ""),
+                identifiant=normalized_identifiant,
+                full_name=str(row["NomComplet"] or ""),
+            )
 
             stored_password = str(row["MotDePasse"])
             if not cls.verify_password(current_password, stored_password):
@@ -1494,28 +2042,230 @@ class DatabaseHelper:
                 """,
                 (
                     cls.hash_password(new_password),
-                    cls.protect_recoverable_password(new_password),
+                    "",
                     normalized_identifiant,
                 ),
             )
 
     @classmethod
+    def _session_datetime_text(cls, value: datetime | None = None) -> str:
+        return (value or datetime.now()).isoformat(timespec="seconds")
+
+    @classmethod
+    def _active_session_to_dict(cls, row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        data = dict(row)
+        return {
+            "Identifiant": str(data.get("Identifiant", "") or ""),
+            "Plateforme": str(data.get("Plateforme", "") or ""),
+            "NomAppareil": str(data.get("NomAppareil", "") or ""),
+            "AdresseIP": str(data.get("AdresseIP", "") or ""),
+            "DateConnexion": str(data.get("DateConnexion", "") or ""),
+            "DerniereActivite": str(data.get("DerniereActivite", "") or ""),
+            "ExpireLe": str(data.get("ExpireLe", "") or ""),
+        }
+
+    @classmethod
+    def _delete_expired_active_sessions(cls, connection: sqlite3.Connection, now: datetime | None = None) -> None:
+        connection.execute(
+            "DELETE FROM SessionsActives WHERE ExpireLe <= ?",
+            (cls._session_datetime_text(now),),
+        )
+
+    @classmethod
+    def get_active_session(cls, identifiant: str) -> dict[str, Any] | None:
+        normalized_identifiant = identifiant.strip()
+        if not normalized_identifiant:
+            return None
+        with cls.connect() as connection:
+            cls._delete_expired_active_sessions(connection)
+            row = connection.execute(
+                """
+                SELECT Identifiant, Plateforme, NomAppareil, AdresseIP, DateConnexion, DerniereActivite, ExpireLe
+                FROM SessionsActives
+                WHERE LOWER(Identifiant) = LOWER(?)
+                """,
+                (normalized_identifiant,),
+            ).fetchone()
+            return cls._active_session_to_dict(row)
+
+    @classmethod
+    def open_active_session(
+        cls,
+        identifiant: str,
+        platform: str,
+        session_token: str,
+        device_name: str = "",
+        client_address: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        normalized_identifiant = identifiant.strip()
+        normalized_token = session_token.strip()
+        if not normalized_identifiant or not normalized_token:
+            raise ValueError("Session invalide.")
+
+        platform_text = platform.strip() or "Application"
+        device_text = device_name.strip()[:120]
+        address_text = client_address.strip()[:80]
+        now = datetime.now()
+        now_text = cls._session_datetime_text(now)
+        expires_text = cls._session_datetime_text(now + timedelta(hours=ACTIVE_SESSION_TTL_HOURS))
+
+        with cls.connect() as connection:
+            cls._delete_expired_active_sessions(connection, now)
+            existing = connection.execute(
+                """
+                SELECT Identifiant, SessionToken, Plateforme, NomAppareil, AdresseIP,
+                       DateConnexion, DerniereActivite, ExpireLe
+                FROM SessionsActives
+                WHERE LOWER(Identifiant) = LOWER(?)
+                """,
+                (normalized_identifiant,),
+            ).fetchone()
+
+            if existing is not None and not hmac.compare_digest(str(existing["SessionToken"]), normalized_token):
+                if not force:
+                    return {
+                        "ok": False,
+                        "conflict": True,
+                        "activeSession": cls._active_session_to_dict(existing),
+                    }
+                connection.execute(
+                    "DELETE FROM SessionsActives WHERE LOWER(Identifiant) = LOWER(?)",
+                    (normalized_identifiant,),
+                )
+
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO SessionsActives
+                    (Identifiant, SessionToken, Plateforme, NomAppareil, AdresseIP,
+                     DateConnexion, DerniereActivite, ExpireLe)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_identifiant,
+                    normalized_token,
+                    platform_text,
+                    device_text,
+                    address_text,
+                    now_text,
+                    now_text,
+                    expires_text,
+                ),
+            )
+        return {"ok": True, "conflict": False}
+
+    @classmethod
+    def validate_active_session(cls, identifiant: str, session_token: str) -> bool:
+        normalized_identifiant = identifiant.strip()
+        normalized_token = session_token.strip()
+        if not normalized_identifiant or not normalized_token:
+            return False
+        now = datetime.now()
+        with cls.connect() as connection:
+            cls._delete_expired_active_sessions(connection, now)
+            row = connection.execute(
+                """
+                SELECT SessionToken
+                FROM SessionsActives
+                WHERE LOWER(Identifiant) = LOWER(?)
+                """,
+                (normalized_identifiant,),
+            ).fetchone()
+            if row is None or not hmac.compare_digest(str(row["SessionToken"]), normalized_token):
+                return False
+            connection.execute(
+                """
+                UPDATE SessionsActives
+                SET DerniereActivite = ?, ExpireLe = ?
+                WHERE LOWER(Identifiant) = LOWER(?) AND SessionToken = ?
+                """,
+                (
+                    cls._session_datetime_text(now),
+                    cls._session_datetime_text(now + timedelta(hours=ACTIVE_SESSION_TTL_HOURS)),
+                    normalized_identifiant,
+                    normalized_token,
+                ),
+            )
+            return True
+
+    @classmethod
+    def close_active_session(cls, identifiant: str, session_token: str = "") -> None:
+        normalized_identifiant = identifiant.strip()
+        normalized_token = session_token.strip()
+        if not normalized_identifiant:
+            return
+        with cls.connect() as connection:
+            if normalized_token:
+                connection.execute(
+                    """
+                    DELETE FROM SessionsActives
+                    WHERE LOWER(Identifiant) = LOWER(?) AND SessionToken = ?
+                    """,
+                    (normalized_identifiant, normalized_token),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM SessionsActives WHERE LOWER(Identifiant) = LOWER(?)",
+                    (normalized_identifiant,),
+                )
+
+    @classmethod
+    def set_current_session_context(cls, identifiant: str, session_token: str) -> None:
+        cls._current_session_identifiant = identifiant.strip()
+        cls._current_session_token = session_token.strip()
+
+    @classmethod
+    def get_current_session_token(cls) -> str:
+        if cls._remote_client is not None and cls._remote_client.session_token:
+            return cls._remote_client.session_token.strip()
+        return cls._current_session_token.strip()
+
+    @classmethod
+    def validate_current_session(cls) -> bool:
+        identifiant = cls._current_session_identifiant.strip()
+        token = cls.get_current_session_token()
+        if not identifiant or not token:
+            return True
+        try:
+            return bool(cls.validate_active_session(identifiant, token))
+        except Exception:
+            return False
+
+    @classmethod
+    def close_current_session(cls) -> None:
+        identifiant = cls._current_session_identifiant.strip()
+        token = cls.get_current_session_token()
+        try:
+            if identifiant:
+                cls.close_active_session(identifiant, token)
+        except Exception:
+            pass
+        cls._current_session_identifiant = ""
+        cls._current_session_token = ""
+        if cls._remote_client is not None:
+            cls._remote_client.session_token = ""
+
+    @classmethod
     def search_users_by_identifiant(cls, identifiant: str) -> list[dict[str, Any]]:
         return cls._fetch_all(
             """
-            SELECT Id, NomComplet, Identifiant, '********' AS MotDePasse, Role
+            SELECT Id, NomComplet, Identifiant, IFNULL(Email, '') AS Email,
+                   '********' AS MotDePasse, Role
             FROM Utilisateurs
-            WHERE Identifiant LIKE ?
+            WHERE Identifiant LIKE ? OR Email LIKE ?
             ORDER BY Identifiant
             """,
-            (f"%{identifiant}%",),
+            (f"%{identifiant}%", f"%{identifiant}%"),
         )
 
     @classmethod
     def get_user_for_admin_edit(cls, identifiant: str) -> dict[str, Any]:
         row = cls._fetch_one(
             """
-            SELECT Id, NomComplet, Identifiant, MotDePasse, IFNULL(MotDePasseLisible, '') AS MotDePasseLisible, Role
+            SELECT Id, NomComplet, Identifiant, IFNULL(Email, '') AS Email,
+                   Role
             FROM Utilisateurs
             WHERE Identifiant = ?
             """,
@@ -1524,19 +2274,13 @@ class DatabaseHelper:
         if not row:
             return {}
 
-        stored_password = str(row.get("MotDePasse", "") or "")
-        visible_password = cls.unprotect_recoverable_password(str(row.get("MotDePasseLisible", "") or ""))
-        if not visible_password and stored_password and not cls.is_hashed_password(stored_password):
-            visible_password = stored_password
-        elif not visible_password and stored_password and cls.verify_password(DEFAULT_ADMIN_PASSWORD, stored_password):
-            visible_password = DEFAULT_ADMIN_PASSWORD
-
         return {
             "Id": row.get("Id"),
             "NomComplet": row.get("NomComplet", ""),
             "Identifiant": row.get("Identifiant", ""),
-            "MotDePasse": visible_password,
-            "MotDePasseDisponible": bool(visible_password),
+            "Email": row.get("Email", ""),
+            "MotDePasse": "",
+            "MotDePasseDisponible": False,
             "Role": row.get("Role", ""),
         }
 
@@ -1551,7 +2295,8 @@ class DatabaseHelper:
     def list_users(cls) -> list[dict[str, Any]]:
         return cls._fetch_all(
             """
-            SELECT Id, NomComplet, Identifiant, '********' AS MotDePasse, Role
+            SELECT Id, NomComplet, Identifiant, IFNULL(Email, '') AS Email,
+                   '********' AS MotDePasse, Role
             FROM Utilisateurs
             ORDER BY Id
             """
@@ -1561,6 +2306,15 @@ class DatabaseHelper:
     def count_admins(cls) -> int:
         return int(
             cls._fetch_value("SELECT COUNT(*) FROM Utilisateurs WHERE Role = 'Admin'")
+        )
+
+    @classmethod
+    def count_directors_general(cls) -> int:
+        return int(
+            cls._fetch_value(
+                "SELECT COUNT(*) FROM Utilisateurs WHERE Role = ?",
+                (DIRECTOR_GENERAL_ROLE,),
+            )
         )
 
     @classmethod
@@ -1576,15 +2330,35 @@ class DatabaseHelper:
         return int(cls._fetch_value("SELECT COUNT(*) FROM Utilisateurs"))
 
     @classmethod
+    def _with_worker_seniority(cls, worker: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(worker)
+        hire_date_text = str(enriched.get("DateEmbauche", "") or "").strip()
+        years = 0
+        if hire_date_text:
+            try:
+                hire_date = datetime.strptime(hire_date_text, DB_DATE_FORMAT).date()
+                today = date.today()
+                years = today.year - hire_date.year
+                if (today.month, today.day) < (hire_date.month, hire_date.day):
+                    years -= 1
+                years = max(years, 0)
+            except ValueError:
+                years = 0
+        enriched["AncienneteAnnees"] = years
+        enriched["Anciennete"] = f"{years} an" if years == 1 else f"{years} ans"
+        return enriched
+
+    @classmethod
     def list_workers(cls, include_inactive: bool = True) -> list[dict[str, Any]]:
         status_filter = "" if include_inactive else "WHERE Statut = 'Actif'"
-        return cls._fetch_all(
+        rows = cls._fetch_all(
             f"""
             SELECT
                 t.Id,
                 t.NomComplet,
                 t.Fonction,
                 t.Telephone,
+                IFNULL(t.Email, '') AS Email,
                 t.Adresse,
                 t.DateEmbauche,
                 t.SalaireMensuel,
@@ -1607,16 +2381,18 @@ class DatabaseHelper:
                 t.NomComplet COLLATE NOCASE
             """
         )
+        return [cls._with_worker_seniority(row) for row in rows]
 
     @classmethod
     def get_worker(cls, worker_id: int) -> dict[str, Any]:
-        return cls._fetch_one(
+        row = cls._fetch_one(
             """
             SELECT
                 Id,
                 NomComplet,
                 Fonction,
                 Telephone,
+                IFNULL(Email, '') AS Email,
                 Adresse,
                 DateEmbauche,
                 SalaireMensuel,
@@ -1627,6 +2403,7 @@ class DatabaseHelper:
             """,
             (int(worker_id),),
         ) or {}
+        return cls._with_worker_seniority(row) if row else {}
 
     @classmethod
     def add_worker(
@@ -1634,6 +2411,7 @@ class DatabaseHelper:
         full_name: str,
         function: str,
         phone: str,
+        email: str,
         address: str,
         hire_date: date | str,
         monthly_salary: float,
@@ -1646,7 +2424,10 @@ class DatabaseHelper:
         normalized_salary = float(monthly_salary or 0)
         if normalized_salary < 0:
             raise ValueError("Le salaire mensuel ne peut pas être négatif.")
-        normalized_date = cls._coerce_date(hire_date)
+        normalized_email = cls._normalize_email(email)
+        if not normalized_email:
+            raise ValueError("Veuillez saisir l'adresse e-mail du travailleur.")
+        normalized_date = cls.ensure_not_future_date(hire_date, "un travailleur")
         with cls.connect() as connection:
             cursor = connection.execute(
                 """
@@ -1654,18 +2435,20 @@ class DatabaseHelper:
                     NomComplet,
                     Fonction,
                     Telephone,
+                    Email,
                     Adresse,
                     DateEmbauche,
                     SalaireMensuel,
                     Statut,
                     Observations
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_name,
                     function.strip(),
                     phone.strip(),
+                    normalized_email,
                     address.strip(),
                     normalized_date.strftime(DB_DATE_FORMAT),
                     normalized_salary,
@@ -1682,6 +2465,7 @@ class DatabaseHelper:
         full_name: str,
         function: str,
         phone: str,
+        email: str,
         address: str,
         hire_date: date | str,
         monthly_salary: float,
@@ -1694,13 +2478,17 @@ class DatabaseHelper:
         normalized_salary = float(monthly_salary or 0)
         if normalized_salary < 0:
             raise ValueError("Le salaire mensuel ne peut pas être négatif.")
-        normalized_date = cls._coerce_date(hire_date)
+        normalized_email = cls._normalize_email(email)
+        if not normalized_email:
+            raise ValueError("Veuillez saisir l'adresse e-mail du travailleur.")
+        normalized_date = cls.ensure_not_future_date(hire_date, "un travailleur")
         return cls._execute(
             """
             UPDATE Travailleurs
             SET NomComplet = ?,
                 Fonction = ?,
                 Telephone = ?,
+                Email = ?,
                 Adresse = ?,
                 DateEmbauche = ?,
                 SalaireMensuel = ?,
@@ -1712,6 +2500,7 @@ class DatabaseHelper:
                 normalized_name,
                 function.strip(),
                 phone.strip(),
+                normalized_email,
                 address.strip(),
                 normalized_date.strftime(DB_DATE_FORMAT),
                 normalized_salary,
@@ -1743,6 +2532,66 @@ class DatabaseHelper:
         return cls._execute("DELETE FROM Travailleurs WHERE Id = ?", (worker_id,))
 
     @classmethod
+    def _queue_payroll_email(
+        cls,
+        connection: sqlite3.Connection,
+        worker: dict[str, Any],
+        pay_date: date,
+        period: str,
+        gross: float,
+        bonus: float,
+        advance: float,
+        withholding: float,
+        net_amount: float,
+        payment_mode: str,
+        status: str,
+    ) -> None:
+        recipient = str(worker.get("Email", "") or "").strip()
+        if not recipient:
+            return
+
+        worker_name = str(worker.get("NomComplet", "") or "Travailleur").strip()
+        normalized_status = status.strip() or "Préparée"
+
+        def money(value: float) -> str:
+            return f"{float(value or 0):,.0f}".replace(",", " ") + " FC"
+
+        subject = f"Paie - statut {normalized_status} - {period}"
+        text_body = (
+            f"Bonjour {worker_name},\n\n"
+            f"Votre paie pour la période {period} est au statut : {normalized_status}.\n\n"
+            f"Date : {pay_date.strftime('%d/%m/%Y')}\n"
+            f"Montant brut : {money(gross)}\n"
+            f"Prime : {money(bonus)}\n"
+            f"Avance : {money(advance)}\n"
+            f"Retenue : {money(withholding)}\n"
+            f"Net : {money(net_amount)}\n"
+            f"Mode de paiement : {payment_mode}\n"
+        )
+        html_body = (
+            f"<p>Bonjour <strong>{escape(worker_name)}</strong>,</p>"
+            f"<p>Votre paie pour la période <strong>{escape(period)}</strong> est au statut "
+            f"<strong>{escape(normalized_status)}</strong>.</p>"
+            "<table>"
+            f"<tr><td>Date</td><td>{pay_date.strftime('%d/%m/%Y')}</td></tr>"
+            f"<tr><td>Montant brut</td><td>{money(gross)}</td></tr>"
+            f"<tr><td>Prime</td><td>{money(bonus)}</td></tr>"
+            f"<tr><td>Avance</td><td>{money(advance)}</td></tr>"
+            f"<tr><td>Retenue</td><td>{money(withholding)}</td></tr>"
+            f"<tr><td>Net</td><td><strong>{money(net_amount)}</strong></td></tr>"
+            f"<tr><td>Mode de paiement</td><td>{escape(payment_mode)}</td></tr>"
+            "</table>"
+        )
+        cls._queue_email_notification(
+            connection,
+            "Paie travailleur",
+            recipient,
+            subject,
+            text_body,
+            html_body,
+        )
+
+    @classmethod
     def list_payrolls(
         cls,
         worker_id: int = 0,
@@ -1755,6 +2604,7 @@ class DatabaseHelper:
                 p.TravailleurId,
                 t.NomComplet,
                 t.Fonction,
+                IFNULL(t.Email, '') AS Email,
                 p.DatePaie,
                 p.Periode,
                 p.MontantBrut,
@@ -1807,7 +2657,8 @@ class DatabaseHelper:
         cls.ensure_day_open_for_write(target_date, "les paies")
         if int(worker_id or 0) <= 0:
             raise ValueError("Veuillez choisir un travailleur.")
-        if not cls.get_worker(int(worker_id)):
+        worker = cls.get_worker(int(worker_id))
+        if not worker:
             raise ValueError("Travailleur introuvable.")
         gross = float(gross_amount or 0)
         bonus_value = float(bonus or 0)
@@ -1855,6 +2706,19 @@ class DatabaseHelper:
                     observations.strip(),
                 ),
             )
+            cls._queue_payroll_email(
+                connection,
+                worker,
+                target_date,
+                normalized_period,
+                gross,
+                bonus_value,
+                advance_value,
+                withholding_value,
+                net_amount,
+                payment_mode.strip() or "Espèces",
+                status.strip() or "Payée",
+            )
             return int(cursor.lastrowid)
 
     @classmethod
@@ -1879,7 +2743,8 @@ class DatabaseHelper:
         cls.ensure_day_open_for_write(target_date, "les paies")
         if int(worker_id or 0) <= 0:
             raise ValueError("Veuillez choisir un travailleur.")
-        if not cls.get_worker(int(worker_id)):
+        worker = cls.get_worker(int(worker_id))
+        if not worker:
             raise ValueError("Travailleur introuvable.")
         gross = float(gross_amount or 0)
         bonus_value = float(bonus or 0)
@@ -1894,37 +2759,56 @@ class DatabaseHelper:
             if value < 0:
                 raise ValueError(f"{label} ne peut pas être négatif.")
         net_amount = cls._calculate_payroll_net(gross, bonus_value, advance_value, withholding_value)
-        return cls._execute(
-            """
-            UPDATE PaiesTravailleurs
-            SET TravailleurId = ?,
-                DatePaie = ?,
-                Periode = ?,
-                MontantBrut = ?,
-                Prime = ?,
-                Avance = ?,
-                Retenue = ?,
-                MontantNet = ?,
-                ModePaiement = ?,
-                Statut = ?,
-                Observations = ?
-            WHERE Id = ?
-            """,
-            (
-                int(worker_id),
-                target_date.strftime(DB_DATE_FORMAT),
-                period.strip() or target_date.strftime("%m/%Y"),
-                gross,
-                bonus_value,
-                advance_value,
-                withholding_value,
-                net_amount,
-                payment_mode.strip() or "Espèces",
-                status.strip() or "Payée",
-                observations.strip(),
-                int(payroll_id),
-            ),
-        )
+        normalized_period = period.strip() or target_date.strftime("%m/%Y")
+        normalized_mode = payment_mode.strip() or "Espèces"
+        normalized_status = status.strip() or "Payée"
+        with cls.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE PaiesTravailleurs
+                SET TravailleurId = ?,
+                    DatePaie = ?,
+                    Periode = ?,
+                    MontantBrut = ?,
+                    Prime = ?,
+                    Avance = ?,
+                    Retenue = ?,
+                    MontantNet = ?,
+                    ModePaiement = ?,
+                    Statut = ?,
+                    Observations = ?
+                WHERE Id = ?
+                """,
+                (
+                    int(worker_id),
+                    target_date.strftime(DB_DATE_FORMAT),
+                    normalized_period,
+                    gross,
+                    bonus_value,
+                    advance_value,
+                    withholding_value,
+                    net_amount,
+                    normalized_mode,
+                    normalized_status,
+                    observations.strip(),
+                    int(payroll_id),
+                ),
+            )
+            if cursor.rowcount:
+                cls._queue_payroll_email(
+                    connection,
+                    worker,
+                    target_date,
+                    normalized_period,
+                    gross,
+                    bonus_value,
+                    advance_value,
+                    withholding_value,
+                    net_amount,
+                    normalized_mode,
+                    normalized_status,
+                )
+            return cursor.rowcount
 
     @classmethod
     def delete_payroll(cls, payroll_id: int) -> int:
@@ -2191,6 +3075,18 @@ class DatabaseHelper:
         return int(cls._fetch_value("SELECT COUNT(*) FROM StockSorties"))
 
     @classmethod
+    def count_stock_exits_for_period(cls, start_date: date | str, end_date: date | str) -> int:
+        start = cls._coerce_date(start_date).strftime(DB_DATE_FORMAT)
+        end = cls._coerce_date(end_date).strftime(DB_DATE_FORMAT)
+        return int(
+            cls._fetch_value(
+                "SELECT COUNT(*) FROM StockSorties WHERE DateSortie BETWEEN ? AND ?",
+                (start, end),
+            )
+            or 0
+        )
+
+    @classmethod
     def list_stock_exits(cls) -> list[dict[str, Any]]:
         return cls._fetch_all(
             """
@@ -2340,6 +3236,18 @@ class DatabaseHelper:
     @classmethod
     def count_stock_supplies(cls) -> int:
         return int(cls._fetch_value("SELECT COUNT(*) FROM StockApprovisionnements"))
+
+    @classmethod
+    def count_stock_supplies_for_period(cls, start_date: date | str, end_date: date | str) -> int:
+        start = cls._coerce_date(start_date).strftime(DB_DATE_FORMAT)
+        end = cls._coerce_date(end_date).strftime(DB_DATE_FORMAT)
+        return int(
+            cls._fetch_value(
+                "SELECT COUNT(*) FROM StockApprovisionnements WHERE DateApprovisionnement BETWEEN ? AND ?",
+                (start, end),
+            )
+            or 0
+        )
 
     @classmethod
     def list_stock_supplies(cls) -> list[dict[str, Any]]:
@@ -2882,8 +3790,24 @@ class DatabaseHelper:
 
     @classmethod
     def get_global_production_summary(cls) -> dict[str, Any]:
+        return cls.get_production_summary_for_period()
+
+    @classmethod
+    def get_production_summary_for_period(
+        cls,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
+    ) -> dict[str, Any]:
+        where_clause = ""
+        params: tuple[Any, ...] = ()
+        if start_date is not None and end_date is not None:
+            where_clause = "WHERE DateProduction BETWEEN ? AND ?"
+            params = (
+                cls._coerce_date(start_date).strftime(DB_DATE_FORMAT),
+                cls._coerce_date(end_date).strftime(DB_DATE_FORMAT),
+            )
         production = cls._fetch_one(
-            """
+            f"""
             SELECT
                 COUNT(*) AS JoursProduction,
                 IFNULL(SUM(NombreBacsCommandes), 0) AS TotalBacsCommandes,
@@ -2897,7 +3821,9 @@ class DatabaseHelper:
                 IFNULL(SUM(NombreSacsUtilises), 0) AS TotalSacsUtilises,
                 IFNULL(SUM(NombreBacsRestants), 0) AS TotalBacsDisponibles
             FROM ProductionJournaliere
-            """
+            {where_clause}
+            """,
+            params,
         ) or {}
         ordered_trays = int(float(production.get("TotalBacsCommandes", 0) or 0))
         produced_trays = int(float(production.get("TotalBacsProduits", 0) or 0))
@@ -3039,6 +3965,8 @@ class DatabaseHelper:
                 IFNULL(SUM(NombreBacs), 0) AS NombreTotalBacs,
                 IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
                 IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
+                IFNULL(SUM(AvanceUtilisee), 0) AS AvancesUtilisees,
+                IFNULL(SUM(AvanceGeneree), 0) AS AvancesGenerees,
                 IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS TotalDettes
             FROM Commandes
             WHERE DateCommande = ?
@@ -3049,6 +3977,22 @@ class DatabaseHelper:
 
     @classmethod
     def get_global_orders_summary(cls) -> dict[str, Any]:
+        return cls.get_orders_summary_for_period()
+
+    @classmethod
+    def get_orders_summary_for_period(
+        cls,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
+    ) -> dict[str, Any]:
+        where_clause = ""
+        params: tuple[Any, ...] = ()
+        if start_date is not None and end_date is not None:
+            where_clause = "WHERE DateCommande BETWEEN ? AND ?"
+            params = (
+                cls._coerce_date(start_date).strftime(DB_DATE_FORMAT),
+                cls._coerce_date(end_date).strftime(DB_DATE_FORMAT),
+            )
         row = cls._fetch_one(
             f"""
             SELECT
@@ -3056,12 +4000,19 @@ class DatabaseHelper:
                 IFNULL(SUM(NombreBacs), 0) AS TotalBacs,
                 IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
                 IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
+                IFNULL(SUM(AvanceUtilisee), 0) AS AvancesUtilisees,
+                IFNULL(SUM(AvanceGeneree), 0) AS AvancesGenerees,
+                IFNULL(SUM(AvanceGeneree - AvanceUtilisee), 0) AS AvancesDisponibles,
                 IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS TotalDettes,
                 IFNULL(SUM(CASE WHEN {OUTSTANDING_DEBT_SQL} > 0 THEN 1 ELSE 0 END), 0) AS NombreAvecDette
             FROM Commandes
-            """
+            {where_clause}
+            """,
+            params,
         )
-        return row or {}
+        summary = row or {}
+        summary["AvancesDisponibles"] = cls.get_total_client_advances()
+        return summary
 
     @classmethod
     def get_cash_for_date(cls, target_date: date) -> dict[str, Any]:
@@ -3132,6 +4083,70 @@ class DatabaseHelper:
             ),
         }
 
+    @staticmethod
+    def _normalize_client_key(value: str) -> str:
+        normalized = unicodedata.normalize("NFD", str(value or "").casefold())
+        normalized = "".join(
+            character for character in normalized if unicodedata.category(character) != "Mn"
+        )
+        return " ".join(normalized.split())
+
+    @classmethod
+    def _recalculate_order_advances(cls, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT
+                Id,
+                DateCommande,
+                Client,
+                IFNULL(MontantAPercevoir, 0) AS MontantAPercevoir,
+                IFNULL(MontantRecu, 0) AS MontantRecu
+            FROM Commandes
+            ORDER BY DateCommande ASC, Id ASC
+            """
+        ).fetchall()
+        grouped: dict[str, dict[str, list[sqlite3.Row]]] = {}
+        for row in rows:
+            client_key = cls._normalize_client_key(str(row["Client"] or ""))
+            grouped.setdefault(client_key, {}).setdefault(str(row["DateCommande"]), []).append(row)
+
+        for date_groups in grouped.values():
+            available_advance = 0.0
+            for date_text in sorted(date_groups):
+                opening_advance = available_advance
+                advance_remaining_for_day = opening_advance
+                generated_during_day = 0.0
+                calculated_rows: list[tuple[sqlite3.Row, float, float]] = []
+                for row in date_groups[date_text]:
+                    amount_due = max(float(row["MontantAPercevoir"] or 0), 0.0)
+                    cash_received = max(float(row["MontantRecu"] or 0), 0.0)
+                    advance_used = min(advance_remaining_for_day, amount_due)
+                    cash_needed = max(amount_due - advance_used, 0.0)
+                    advance_generated = max(cash_received - cash_needed, 0.0)
+                    debt = max(cash_needed - cash_received, 0.0)
+                    advance_remaining_for_day -= advance_used
+                    generated_during_day += advance_generated
+                    calculated_rows.append((row, advance_used, advance_generated))
+                    connection.execute(
+                        """
+                        UPDATE Commandes
+                        SET AvanceUtilisee = ?,
+                            AvanceGeneree = ?,
+                            Dette = ?
+                        WHERE Id = ?
+                        """,
+                        (advance_used, advance_generated, debt, row["Id"]),
+                    )
+
+                available_advance = advance_remaining_for_day + generated_during_day
+                running_balance = opening_advance
+                for row, advance_used, advance_generated in calculated_rows:
+                    running_balance = max(running_balance - advance_used, 0.0) + advance_generated
+                    connection.execute(
+                        "UPDATE Commandes SET SoldeAvance = ? WHERE Id = ?",
+                        (running_balance, row["Id"]),
+                    )
+
     @classmethod
     def _recalculate_debt_payments(cls, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -3200,6 +4215,7 @@ class DatabaseHelper:
     @classmethod
     def recalculate_debt_payments(cls) -> None:
         with cls.connect() as connection:
+            cls._recalculate_order_advances(connection)
             cls._recalculate_debt_payments(connection)
             cls._sync_all_commissions(connection)
 
@@ -3212,6 +4228,7 @@ class DatabaseHelper:
         paid_debts_today: float = 0.0,
         paid_debts_details: str = "",
     ) -> None:
+        target_date = cls._coerce_date(target_date)
         cls.ensure_day_open_for_write(target_date, "la caisse")
         if total_expenses < 0:
             raise ValueError("Le montant total des dépenses ne peut pas être négatif.")
@@ -3484,6 +4501,29 @@ class DatabaseHelper:
         return float(value or 0)
 
     @classmethod
+    def get_cash_total_for_period(cls, start_date: date | str, end_date: date | str) -> float:
+        start = cls._coerce_date(start_date).strftime(DB_DATE_FORMAT)
+        end = cls._coerce_date(end_date).strftime(DB_DATE_FORMAT)
+        received = float(
+            cls._fetch_value(
+                "SELECT IFNULL(SUM(MontantRecu), 0) FROM Commandes WHERE DateCommande BETWEEN ? AND ?",
+                (start, end),
+            )
+            or 0
+        )
+        cash = cls._fetch_one(
+            """
+            SELECT
+                IFNULL(SUM(DettesPayeesAujourdHui), 0) AS DettesPayees,
+                IFNULL(SUM(MontantTotalDepenses), 0) AS Depenses
+            FROM CaisseJournaliere
+            WHERE DateCaisse BETWEEN ? AND ?
+            """,
+            (start, end),
+        ) or {}
+        return received + float(cash.get("DettesPayees", 0) or 0) - float(cash.get("Depenses", 0) or 0)
+
+    @classmethod
     def list_orders(cls) -> list[dict[str, Any]]:
         return cls._fetch_all(
             f"""
@@ -3495,6 +4535,9 @@ class DatabaseHelper:
                 NombreBacs,
                 MontantAPercevoir,
                 MontantRecu,
+                IFNULL(AvanceUtilisee, 0) AS AvanceUtilisee,
+                IFNULL(AvanceGeneree, 0) AS AvanceGeneree,
+                IFNULL(SoldeAvance, 0) AS SoldeAvance,
                 Dette AS DetteInitiale,
                 IFNULL(DettePayee, 0) AS DettePayee,
                 {OUTSTANDING_DEBT_SQL} AS Dette,
@@ -3516,6 +4559,9 @@ class DatabaseHelper:
                 NombreBacs,
                 MontantAPercevoir,
                 MontantRecu,
+                IFNULL(AvanceUtilisee, 0) AS AvanceUtilisee,
+                IFNULL(AvanceGeneree, 0) AS AvanceGeneree,
+                IFNULL(SoldeAvance, 0) AS SoldeAvance,
                 Dette AS DetteInitiale,
                 IFNULL(DettePayee, 0) AS DettePayee,
                 {OUTSTANDING_DEBT_SQL} AS Dette,
@@ -3555,10 +4601,6 @@ class DatabaseHelper:
         if not math.isfinite(received) or received < 0:
             raise ValueError("Le montant reçu est invalide.")
         due = float(trays * ORDER_STATUS_RATES[normalized_status])
-        if received > due:
-            raise ValueError(
-                "Le montant reçu ne peut pas dépasser le montant à percevoir."
-            )
 
         debt = max(due - received, 0.0)
         return normalized_client, normalized_status, trays, due, received, debt
@@ -3574,6 +4616,7 @@ class DatabaseHelper:
         amount_received: float,
         debt: float,
     ) -> None:
+        target_date = cls._coerce_date(target_date)
         client, status, number_of_trays, amount_due, amount_received, debt = cls._validate_order_amounts(
             client,
             status,
@@ -3603,6 +4646,49 @@ class DatabaseHelper:
     @classmethod
     def count_orders_with_debt(cls) -> int:
         return int(cls._fetch_value(f"SELECT COUNT(*) FROM Commandes WHERE {OUTSTANDING_DEBT_SQL} > 0"))
+
+    @classmethod
+    def get_client_advance_balance(
+        cls,
+        client: str,
+        before_date: date | str | None = None,
+        exclude_id: int = 0,
+    ) -> float:
+        normalized_client = cls._normalize_client_key(client)
+        if not normalized_client:
+            return 0.0
+        target_date = cls._coerce_date(before_date) if before_date else None
+        balance = 0.0
+        for row in cls._fetch_all(
+            """
+            SELECT Id, DateCommande, Client,
+                   IFNULL(AvanceGeneree, 0) AS AvanceGeneree,
+                   IFNULL(AvanceUtilisee, 0) AS AvanceUtilisee
+            FROM Commandes
+            ORDER BY DateCommande ASC, Id ASC
+            """
+        ):
+            if int(row.get("Id", 0) or 0) == int(exclude_id or 0):
+                continue
+            if cls._normalize_client_key(str(row.get("Client", ""))) != normalized_client:
+                continue
+            if target_date is not None and cls._coerce_date(str(row.get("DateCommande", ""))) >= target_date:
+                continue
+            balance += float(row.get("AvanceGeneree", 0) or 0)
+            balance -= float(row.get("AvanceUtilisee", 0) or 0)
+        return max(balance, 0.0)
+
+    @classmethod
+    def get_total_client_advances(cls) -> float:
+        value = cls._fetch_value(
+            """
+            SELECT IFNULL(SUM(
+                IFNULL(AvanceGeneree, 0) - IFNULL(AvanceUtilisee, 0)
+            ), 0)
+            FROM Commandes
+            """
+        )
+        return max(float(value or 0), 0.0)
 
     @classmethod
     def get_debt_alerts(cls, limit: int = 10) -> list[dict[str, Any]]:
@@ -3635,6 +4721,7 @@ class DatabaseHelper:
         amount_received: float,
         debt: float,
     ) -> int:
+        target_date = cls._coerce_date(target_date)
         client, status, number_of_trays, amount_due, amount_received, debt = cls._validate_order_amounts(
             client,
             status,
@@ -3729,6 +4816,9 @@ class DatabaseHelper:
                 NombreBacs,
                 MontantAPercevoir,
                 MontantRecu,
+                IFNULL(AvanceUtilisee, 0) AS AvanceUtilisee,
+                IFNULL(AvanceGeneree, 0) AS AvanceGeneree,
+                IFNULL(SoldeAvance, 0) AS SoldeAvance,
                 Dette AS DetteInitiale,
                 IFNULL(DettePayee, 0) AS DettePayee,
                 {OUTSTANDING_DEBT_SQL} AS Dette,
@@ -3802,7 +4892,7 @@ class DatabaseHelper:
                 TRIM(Client) AS Nom,
                 'Maman' AS Statut,
                 IFNULL(SUM(NombreBacs), 0) AS NombreBacs,
-                IFNULL(SUM(MontantRecu), 0) AS MontantPaye,
+                IFNULL(SUM(MontantAPercevoir - {OUTSTANDING_DEBT_SQL}), 0) AS MontantPaye,
                 IFNULL(SUM(
                     CASE
                         WHEN Statut = 'Maman' THEN NombreBacs * 1650
@@ -3853,7 +4943,7 @@ class DatabaseHelper:
             SELECT
                 'Maman' AS Statut,
                 IFNULL(SUM(NombreBacs), 0) AS NombreBacs,
-                IFNULL(SUM(MontantRecu), 0) AS MontantPaye,
+                IFNULL(SUM(MontantAPercevoir - {OUTSTANDING_DEBT_SQL}), 0) AS MontantPaye,
                 IFNULL(SUM(
                     CASE
                         WHEN Statut = 'Maman' THEN NombreBacs * 1650
@@ -3962,6 +5052,21 @@ class DatabaseHelper:
         return float(value or 0)
 
     @classmethod
+    def get_total_commissions_for_period(cls, start_date: date | str, end_date: date | str) -> float:
+        value = cls._fetch_value(
+            """
+            SELECT IFNULL(SUM(Commissions), 0)
+            FROM Commissions
+            WHERE DateCommission BETWEEN ? AND ?
+            """,
+            (
+                cls._coerce_date(start_date).strftime(DB_DATE_FORMAT),
+                cls._coerce_date(end_date).strftime(DB_DATE_FORMAT),
+            ),
+        )
+        return float(value or 0)
+
+    @classmethod
     def _decorate_day_closure_row(cls, row: dict[str, Any] | None) -> dict[str, Any]:
         if not row:
             return {}
@@ -4031,7 +5136,7 @@ class DatabaseHelper:
 
     @classmethod
     def ensure_day_open_for_write(cls, target_date: date | str, module_name: str) -> None:
-        normalized_date = cls._coerce_date(target_date)
+        normalized_date = cls.ensure_not_future_date(target_date, module_name)
         closure = cls.get_day_closure(normalized_date)
         if not closure or bool(closure.get("EstReouverte", False)):
             return

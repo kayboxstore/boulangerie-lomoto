@@ -1,0 +1,8 @@
+{
+  "appId": "com.kayboxstore.boulangerielomoto",
+  "appName": "Boulangerie Lomoto",
+  "webDir": "../web-mobile-app/dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}

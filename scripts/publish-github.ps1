@@ -129,6 +129,7 @@ function Build-ReleaseArtifacts {
             --icon ".\boulangerie_app\assets\logo-boulangerie-lomoto.ico" `
             --add-data ".\boulangerie_app\assets;boulangerie_app\assets" `
             --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" `
+            --add-data ".\boulangerie_web_pro\static;boulangerie_web_pro\static" `
             main.py
         if ($LASTEXITCODE -ne 0) {
             throw "Le build PyInstaller de l'application a echoue."
@@ -146,6 +147,7 @@ function Build-ReleaseArtifacts {
             --icon ".\boulangerie_app\assets\logo-boulangerie-lomoto.ico" `
             --add-data ".\boulangerie_app\assets;boulangerie_app\assets" `
             --add-data ".\boulangerie_app\fonts;boulangerie_app\fonts" `
+            --add-data ".\boulangerie_web_pro\static;boulangerie_web_pro\static" `
             serveur_windows_service.py
         if ($LASTEXITCODE -ne 0) {
             throw "Le build PyInstaller du service Windows a echoue."

@@ -1,0 +1,9 @@
+tunnel: REMPLACER_PAR_ID_DU_TUNNEL
+credentials-file: C:\Users\AIO\.cloudflared\REMPLACER_PAR_ID_DU_TUNNEL.json
+
+ingress:
+  - hostname: boulangerie-lomoto.com
+    service: http://127.0.0.1:8787
+  - hostname: www.boulangerie-lomoto.com
+    service: http://127.0.0.1:8787
+  - service: http_status:404

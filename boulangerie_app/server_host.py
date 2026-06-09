@@ -4,6 +4,7 @@ import ctypes
 import json
 import locale
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -21,10 +22,12 @@ WINDOWS_SERVICE_DESCRIPTION = (
     "Service Windows du serveur central Boulangerie Lomoto pour le mode connecté."
 )
 WINDOWS_SERVICE_EXECUTABLE_NAME = "Boulangerie Lomoto Service.exe"
+SERVER_INSTALLATION_MARKER_NAME = "server-installation.flag"
 SERVER_HOST_SETTINGS_FILENAME = "server-host-settings.json"
 SERVER_DATA_FOLDER_NAME = "central-server-data"
 FIREWALL_RULE_TCP_NAME = f"{APP_NAME} - Serveur central TCP"
 FIREWALL_RULE_UDP_NAME = f"{APP_NAME} - Découverte serveur UDP"
+SERVER_API_TOKEN_BYTES = 32
 
 
 def get_server_root_dir() -> Path:
@@ -44,6 +47,16 @@ def get_service_runtime_directory() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
+
+
+def is_server_installation() -> bool:
+    forced_mode = os.environ.get("BOULANGERIE_INSTALLATION_MODE", "").strip().lower()
+    if forced_mode:
+        return forced_mode == "server"
+    marker_path = get_service_runtime_directory() / SERVER_INSTALLATION_MARKER_NAME
+    if marker_path.exists():
+        return True
+    return get_windows_service_status().installed
 
 
 def get_service_management_command_prefix() -> list[str]:
@@ -137,6 +150,20 @@ def save_central_server_settings(settings: CentralServerSettings) -> Path:
     )
     settings.normalized_data_dir().mkdir(parents=True, exist_ok=True)
     return settings_path
+
+
+def generate_central_server_token() -> str:
+    return secrets.token_urlsafe(SERVER_API_TOKEN_BYTES)
+
+
+def ensure_central_server_token(settings: CentralServerSettings) -> CentralServerSettings:
+    if settings.normalized_token():
+        return settings
+    return CentralServerSettings(
+        port=settings.normalized_port(),
+        api_token=generate_central_server_token(),
+        data_dir=str(settings.normalized_data_dir()),
+    )
 
 
 def prepare_central_server_data(source_data_dir: str | Path | None = None) -> bool:
@@ -323,6 +350,7 @@ def get_windows_service_status() -> WindowsServiceStatus:
 
 
 def install_or_update_windows_service(settings: CentralServerSettings, source_data_dir: str | Path | None = None) -> str:
+    settings = ensure_central_server_token(settings)
     save_central_server_settings(settings)
     prepare_central_server_data(source_data_dir)
     firewall_message = ensure_windows_firewall_rules(settings.normalized_port())
@@ -341,6 +369,10 @@ def install_or_update_windows_service(settings: CentralServerSettings, source_da
 
 
 def start_windows_service(wait_seconds: int = 30) -> str:
+    current_settings = load_central_server_settings()
+    secured_settings = ensure_central_server_token(current_settings)
+    if secured_settings.normalized_token() != current_settings.normalized_token():
+        save_central_server_settings(secured_settings)
     firewall_message = ensure_windows_firewall_rules()
     status_before_start = get_windows_service_status()
     if status_before_start.installed and status_before_start.is_running:

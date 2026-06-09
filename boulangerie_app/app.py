@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import os
+import secrets
 import sys
 import threading
 import unicodedata
@@ -40,7 +41,7 @@ from .connected_server import (
     start_embedded_server,
     stop_embedded_server,
 )
-from .database import AUTO_BACKUP_PREFIX, AuthenticatedUser, DatabaseHelper
+from .database import AUTO_BACKUP_PREFIX, ActiveSessionConflictError, AuthenticatedUser, DatabaseHelper
 from .excel_reports import create_daily_excel_report, create_monthly_excel_report, create_period_excel_report
 from .reports import (
     ReportGenerationError,
@@ -57,6 +58,7 @@ from .server_host import (
     get_windows_service_status,
     install_or_update_windows_service,
     is_running_as_administrator,
+    is_server_installation,
     load_central_server_settings,
     prepare_central_server_data,
     relaunch_current_process_as_administrator,
@@ -113,19 +115,27 @@ _BRAND_IMAGE_CACHE: dict[tuple[str, int, int], ImageTk.PhotoImage] = {}
 
 ROLES = [
     "Admin",
+    "Directeur Général",
     "Caissier",
+    "Chargé de la production",
     "Gestionnaire de stock",
     "Gestionnaire des commandes",
 ]
 ROLE_MODULE_ACCESS = {
     "Admin": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
+    "Directeur Général": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
     "Caissier": {"Caisse", "Production", "Commandes", "Commissions", "Travailleurs"},
+    "Chargé de la production": {"Production"},
     "Gestionnaire de stock": {"Stock"},
-    "Gestionnaire des commandes": {"Production", "Commandes", "Commissions"},
+    "Gestionnaire des commandes": {"Commandes", "Commissions"},
 }
 ROLE_READ_ONLY_MODULES = {
+    "Directeur Général": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
     "Caissier": {"Production", "Commandes", "Commissions"},
 }
+
+FULL_VISIBILITY_ROLES = {"Admin", "Directeur Général"}
+CLOSURE_ROLES = {"Admin", "Directeur Général"}
 
 
 def _package_root() -> Path:
@@ -376,6 +386,7 @@ def run_app() -> None:
             return
         return
 
+    setup_required = prepare_startup_connection()
     DatabaseHelper.initialize_database()
     post_update_notice = UpdateChecker.consume_post_update_notice()
     root = tk.Tk()
@@ -386,9 +397,80 @@ def run_app() -> None:
     apply_window_icon(root)
     configure_styles()
     root.resizable(True, True)
-    LoginWindow(root, post_update_notice)
+
+    def show_login_after_setup() -> None:
+        root.title(f"{APP_NAME} - Connexion - v{APP_VERSION}")
+        root.geometry("660x500")
+        LoginWindow(root, post_update_notice)
+        center_window(root)
+
+    if setup_required:
+        root.title(f"{APP_NAME} - Première configuration - v{APP_VERSION}")
+        root.geometry("720x650")
+        FirstRunSetupWindow(root, show_login_after_setup)
+    else:
+        LoginWindow(root, post_update_notice)
     center_window(root)
     root.mainloop()
+
+
+def prepare_startup_connection() -> bool:
+    if APP_DEMO:
+        DatabaseHelper.apply_connection_settings(ConnectionSettings(), persist=False)
+        DatabaseHelper.initialize_local_database()
+        return bool(DatabaseHelper.get_setup_status().get("required", False))
+
+    candidates: list[ConnectionSettings] = []
+    seen: set[str] = set()
+
+    def add_candidate(settings: ConnectionSettings | None) -> None:
+        if settings is None or not settings.is_remote():
+            return
+        url = settings.normalized_url()
+        if url in seen:
+            return
+        seen.add(url)
+        candidates.append(settings)
+
+    if is_server_installation():
+        service_status = get_windows_service_status()
+        if service_status.installed and not service_status.is_running:
+            try:
+                start_windows_service()
+            except Exception:
+                pass
+        host_settings = load_central_server_settings()
+        for server_url in build_local_server_addresses(host_settings.normalized_port()):
+            add_candidate(
+                ConnectionSettings(
+                    mode="remote",
+                    server_url=server_url,
+                    api_token=host_settings.normalized_token(),
+                )
+            )
+
+    saved_settings = load_connection_settings(DatabaseHelper.app_data_dir)
+    add_candidate(saved_settings)
+    try:
+        add_candidate(fetch_public_server_directory().to_connection_settings())
+    except Exception:
+        pass
+
+    for settings in candidates:
+        try:
+            RemoteDatabaseClient(
+                settings.normalized_url(),
+                api_token=settings.api_token,
+                timeout_seconds=3,
+            ).ping()
+            DatabaseHelper.apply_connection_settings(settings, persist=False)
+            status = DatabaseHelper.get_setup_status()
+            return bool(status.get("required", False)) and is_server_installation()
+        except Exception:
+            continue
+
+    DatabaseHelper.apply_connection_settings(ConnectionSettings(), persist=False)
+    return False
 
 
 def configure_styles() -> None:
@@ -696,6 +778,31 @@ def open_file(target_path: str | Path) -> None:
     webbrowser.open(path.as_uri())
 
 
+def email_delivery_message(result: dict[str, Any] | None) -> str:
+    if not isinstance(result, dict):
+        return ""
+    sent = int(result.get("sent", 0) or 0)
+    failed = int(result.get("failed", 0) or 0)
+    pending = int(result.get("pending", 0) or 0)
+    configuration_required = bool(result.get("configurationRequired", 0))
+    if sent:
+        return f" Notification e-mail envoyée ({sent})."
+    if configuration_required and pending:
+        return " Notification e-mail en attente : configurez le service e-mail dans Utilisateurs."
+    if failed:
+        return " Notification e-mail non envoyée : consultez les notifications e-mail."
+    if pending:
+        return " Notification e-mail en attente."
+    return ""
+
+
+def process_email_notifications_for_ui(limit: int = 20) -> str:
+    try:
+        return email_delivery_message(DatabaseHelper.process_pending_email_notifications(limit))
+    except Exception as exc:
+        return f" Notification e-mail non traitée : {exc}"
+
+
 def resolve_dashboard_user(widget: tk.Misc) -> AuthenticatedUser | None:
     current: Any = widget
     while current is not None:
@@ -759,8 +866,9 @@ def build_day_lock_notice(target_date: date, closure: dict[str, Any], module_lab
 
 
 class DateField(ttk.Frame):
-    def __init__(self, parent: tk.Misc, initial: str | None = None) -> None:
+    def __init__(self, parent: tk.Misc, initial: str | None = None, *, allow_future: bool = False) -> None:
         super().__init__(parent)
+        self.allow_future = allow_future
         self.var = tk.StringVar(value=initial or today_iso())
         self.entry = ttk.Entry(self, textvariable=self.var, width=14)
         self.entry.grid(row=0, column=0, sticky="ew")
@@ -801,7 +909,13 @@ class DateField(ttk.Frame):
         month_var = tk.IntVar(value=selected_date.month)
         header = ttk.Frame(picker, padding=10)
         header.pack(fill="x")
-        ttk.Spinbox(header, from_=2000, to=2100, textvariable=year_var, width=7).grid(row=0, column=0, padx=4)
+        ttk.Spinbox(
+            header,
+            from_=2000,
+            to=2100 if self.allow_future else date.today().year,
+            textvariable=year_var,
+            width=7,
+        ).grid(row=0, column=0, padx=4)
         ttk.Combobox(
             header,
             textvariable=month_var,
@@ -828,12 +942,16 @@ class DateField(ttk.Frame):
                     if day_number == 0:
                         ttk.Label(days_frame, text="").grid(row=row_index, column=column, padx=2, pady=2)
                         continue
-                    ttk.Button(
+                    candidate_date = date(int(year_var.get()), int(month_var.get()), day_number)
+                    day_button = ttk.Button(
                         days_frame,
                         text=str(day_number),
                         width=4,
                         command=lambda value=day_number: select_day(value),
-                    ).grid(row=row_index, column=column, padx=2, pady=2)
+                    )
+                    day_button.grid(row=row_index, column=column, padx=2, pady=2)
+                    if not self.allow_future and candidate_date > date.today():
+                        day_button.state(["disabled"])
 
         year_var.trace_add("write", render_days)
         month_var.trace_add("write", render_days)
@@ -841,7 +959,10 @@ class DateField(ttk.Frame):
         center_window(picker)
 
     def get_date(self) -> date:
-        return parse_date(self.var.get())
+        selected = parse_date(self.var.get())
+        if not self.allow_future and selected > date.today():
+            raise ValueError("Une date future ne peut pas être utilisée pour cet enregistrement.")
+        return selected
 
     def set_date(self, value: date | str) -> None:
         if isinstance(value, date):
@@ -1279,6 +1400,90 @@ class ScrollableContent(ttk.Frame):
         return x_root - self.canvas.winfo_rootx(), y_root - self.canvas.winfo_rooty()
 
 
+class FirstRunSetupWindow(ttk.Frame):
+    def __init__(self, root: tk.Tk, on_complete: Callable[[], None]) -> None:
+        super().__init__(root, padding=20)
+        self.root = root
+        self.on_complete = on_complete
+        self.full_name_var = tk.StringVar()
+        self.email_var = tk.StringVar()
+        self.identifiant_var = tk.StringVar()
+        self.password_var = tk.StringVar()
+        self.confirm_var = tk.StringVar()
+        self.message_var = tk.StringVar()
+        self.pack(fill="both", expand=True)
+        self.build_ui()
+
+    def build_ui(self) -> None:
+        card = ttk.LabelFrame(self, text="Première configuration", style="Card.TLabelframe", padding=20)
+        card.pack(anchor="n", fill="x", pady=(10, 0))
+        logo = create_logo_widget(card, 90)
+        if logo is not None:
+            logo.grid(row=0, column=0, columnspan=2, pady=(0, 8))
+        ttk.Label(card, text="Créer l'administrateur", style="Header.TLabel").grid(
+            row=1, column=0, columnspan=2, pady=(0, 8)
+        )
+        ttk.Label(
+            card,
+            text=(
+                "Ce compte sera le premier administrateur. Il pourra configurer les utilisateurs, "
+                "les accès, les sauvegardes et le serveur."
+            ),
+            wraplength=560,
+            justify="center",
+        ).grid(row=2, column=0, columnspan=2, pady=(0, 16))
+
+        fields = (
+            ("Nom complet", self.full_name_var, ""),
+            ("Adresse e-mail", self.email_var, ""),
+            ("Identifiant", self.identifiant_var, ""),
+            ("Mot de passe", self.password_var, "*"),
+            ("Confirmation", self.confirm_var, "*"),
+        )
+        first_entry: ttk.Entry | None = None
+        for index, (label, variable, mask) in enumerate(fields, start=3):
+            ttk.Label(card, text=label).grid(row=index, column=0, sticky="w", pady=6)
+            entry = ttk.Entry(card, textvariable=variable, show=mask, width=38)
+            entry.grid(row=index, column=1, sticky="ew", pady=6)
+            if first_entry is None:
+                first_entry = entry
+
+        ttk.Label(
+            card,
+            textvariable=self.message_var,
+            foreground=DANGER_COLOR,
+            wraplength=520,
+            justify="center",
+        ).grid(row=8, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            card,
+            text="Terminer la configuration",
+            style="Primary.TButton",
+            command=self.save,
+        ).grid(row=9, column=0, columnspan=2, pady=(16, 0))
+        card.columnconfigure(1, weight=1)
+        if first_entry is not None:
+            first_entry.focus()
+
+    def save(self) -> None:
+        password = self.password_var.get()
+        if password != self.confirm_var.get():
+            self.message_var.set("La confirmation ne correspond pas au mot de passe.")
+            return
+        try:
+            DatabaseHelper.create_initial_admin(
+                self.full_name_var.get(),
+                self.identifiant_var.get(),
+                self.email_var.get(),
+                password,
+            )
+        except Exception as exc:
+            self.message_var.set(str(exc))
+            return
+        self.destroy()
+        self.on_complete()
+
+
 class LoginWindow(ttk.Frame):
     def __init__(self, root: tk.Tk, post_update_notice: SessionNotice | None = None) -> None:
         super().__init__(root, padding=(18, 8, 18, 18))
@@ -1337,10 +1542,10 @@ class LoginWindow(ttk.Frame):
             self.after(self.post_update_notice.remaining_ms(), self.hide_notice)
             row_index += 1
 
-        ttk.Label(card, text="Identifiant").grid(row=row_index, column=0, sticky="w", pady=6)
+        ttk.Label(card, text="Identifiant ou e-mail").grid(row=row_index, column=0, sticky="w", pady=6)
         self.user_var = tk.StringVar()
-        user_entry = ttk.Entry(card, textvariable=self.user_var, width=30)
-        user_entry.grid(row=row_index, column=1, sticky="ew", pady=6)
+        self.user_entry = ttk.Entry(card, textvariable=self.user_var, width=30)
+        self.user_entry.grid(row=row_index, column=1, sticky="ew", pady=6)
         row_index += 1
 
         ttk.Label(card, text="Mot de passe").grid(row=row_index, column=0, sticky="w", pady=6)
@@ -1376,9 +1581,9 @@ class LoginWindow(ttk.Frame):
         button_row.columnconfigure(1, weight=1)
         card.columnconfigure(1, weight=1)
         add_copyright_footer(self, wraplength=560).pack(side="bottom", fill="x", pady=(8, 0))
-        user_entry.focus()
-        user_entry.bind("<Return>", lambda _event: self.password_entry.focus())
+        self.user_entry.bind("<Return>", lambda _event: self.password_entry.focus())
         self.password_entry.bind("<Return>", lambda _event: self.login())
+        self.user_entry.focus()
 
     def refresh_connection_status(self) -> None:
         self.connection_status_var.set(DatabaseHelper.get_connection_status_text())
@@ -1665,7 +1870,7 @@ class LoginWindow(ttk.Frame):
         add_setting(saved_remote_settings)
         add_setting(public_server_settings)
         add_setting(self._discover_remote_settings(use_cached=True))
-        if not any(setting.is_remote() for setting in plan) and not central_server_required:
+        if APP_DEMO and not any(setting.is_remote() for setting in plan) and not central_server_required:
             add_setting(ConnectionSettings())
         return plan
 
@@ -1674,13 +1879,54 @@ class LoginWindow(ttk.Frame):
         settings: ConnectionSettings,
         identifiant: str,
         mot_de_passe: str,
+        force_session: bool = False,
     ) -> tuple[AuthenticatedUser | None, str | None]:
         self._apply_session_connection_settings(settings)
+        device_name = os.environ.get("COMPUTERNAME") or "Poste Windows"
         try:
-            user = DatabaseHelper.find_user_for_login(identifiant, mot_de_passe)
+            user = DatabaseHelper.find_user_for_login(
+                identifiant,
+                mot_de_passe,
+                force_session,
+                "Windows",
+                device_name,
+            )
+            if user is not None and not DatabaseHelper.is_remote_mode():
+                session_token = secrets.token_urlsafe(32)
+                session_result = DatabaseHelper.open_active_session(
+                    user.identifiant,
+                    "Windows",
+                    session_token,
+                    device_name,
+                    "",
+                    force_session,
+                )
+                if not session_result.get("ok", False):
+                    active_session = (
+                        session_result.get("activeSession")
+                        if isinstance(session_result.get("activeSession"), dict)
+                        else {}
+                    )
+                    raise ActiveSessionConflictError(active_session)
+                DatabaseHelper.set_current_session_context(user.identifiant, session_token)
+        except ActiveSessionConflictError:
+            raise
         except Exception as exc:
             return None, str(exc)
         return user, None
+
+    def _confirm_replace_active_session(self, conflict: ActiveSessionConflictError) -> bool:
+        active_session = conflict.active_session
+        platform = str(active_session.get("Plateforme") or "un autre appareil")
+        device_name = str(active_session.get("NomAppareil") or "").strip()
+        connected_at = str(active_session.get("DateConnexion") or "").strip()
+        details = f"Ce compte est deja connecte sur {platform}."
+        if device_name:
+            details += f"\nAppareil : {device_name}"
+        if connected_at:
+            details += f"\nConnecte depuis : {connected_at}"
+        details += "\n\nVoulez-vous fermer cette session et vous connecter ici ?"
+        return messagebox.askyesno("Session deja active", details)
 
     def _promote_admin_session_to_principal_server(
         self,
@@ -1699,6 +1945,7 @@ class LoginWindow(ttk.Frame):
             local_server_settings,
             identifiant,
             mot_de_passe,
+            force_session=True,
         )
         if error_message is not None or remote_user is None:
             self._apply_session_connection_settings(ConnectionSettings())
@@ -1733,7 +1980,25 @@ class LoginWindow(ttk.Frame):
             return
 
         for settings in connection_plan:
-            candidate_user, error_message = self._try_login_with_settings(settings, identifiant, mot_de_passe)
+            try:
+                candidate_user, error_message = self._try_login_with_settings(settings, identifiant, mot_de_passe)
+            except ActiveSessionConflictError as conflict:
+                if not self._confirm_replace_active_session(conflict):
+                    self.password_var.set("")
+                    self.password_entry.focus()
+                    return
+                try:
+                    candidate_user, error_message = self._try_login_with_settings(
+                        settings,
+                        identifiant,
+                        mot_de_passe,
+                        force_session=True,
+                    )
+                except ActiveSessionConflictError as retry_conflict:
+                    messagebox.showerror("Session deja active", str(retry_conflict))
+                    self.password_var.set("")
+                    self.password_entry.focus()
+                    return
             if error_message is not None:
                 if settings.is_remote():
                     remote_errors.append(error_message)
@@ -1781,6 +2046,8 @@ class LoginWindow(ttk.Frame):
             pass
         self.root.withdraw()
         dashboard = DashboardWindow(self.root, user, self.show_login, self.post_update_notice)
+        if DatabaseHelper.is_using_default_password(user.identifiant):
+            dashboard.after(250, dashboard.require_initial_password_change)
         self.root.wait_window(dashboard)
 
     def hide_notice(self) -> None:
@@ -2544,6 +2811,7 @@ class DashboardWindow(tk.Toplevel):
         self.live_refresh_after_id: str | None = None
         self.summary_refresh_after_id: str | None = None
         self.auto_lock_after_id: str | None = None
+        self.session_guard_after_id: str | None = None
         self.module_opening = False
         self.module_opening_overlay: tk.Toplevel | None = None
         self.critical_alerts_shown = False
@@ -2573,6 +2841,7 @@ class DashboardWindow(tk.Toplevel):
         if self.is_live_sync_enabled():
             self.schedule_live_refresh()
         self.install_auto_lock()
+        self.schedule_session_guard()
 
     def build_ui(self) -> None:
         container = self.body
@@ -2620,7 +2889,7 @@ class DashboardWindow(tk.Toplevel):
             ("Commissions", self.open_commissions),
             ("Travailleurs", self.open_workers_payroll),
         ]
-        if self.user.role == "Admin":
+        if self.user.role in FULL_VISIBILITY_ROLES:
             buttons.append(("Utilisateurs", self.open_users))
 
         self.module_buttons: dict[str, ttk.Button] = {}
@@ -2659,20 +2928,23 @@ class DashboardWindow(tk.Toplevel):
             cards_grid.columnconfigure(index % 4, weight=1)
             self.metric_cards.append(card)
 
-        alerts_frame = ttk.LabelFrame(container, text="Alertes prioritaires", style="Card.TLabelframe")
-        alerts_frame.pack(fill="x", pady=(0, 18))
-        if self.user.role in {"Admin", "Gestionnaire de stock"}:
+        stock_alert_roles = {"Admin", "Directeur Général", "Gestionnaire de stock"}
+        debt_alert_roles = {"Admin", "Directeur Général", "Caissier", "Gestionnaire des commandes"}
+        if self.user.role in stock_alert_roles | debt_alert_roles:
+            alerts_frame = ttk.LabelFrame(container, text="Alertes prioritaires", style="Card.TLabelframe")
+            alerts_frame.pack(fill="x", pady=(0, 18))
+        if self.user.role in stock_alert_roles:
             stock_box = ttk.Frame(alerts_frame)
             stock_box.pack(fill="x", pady=(0, 10))
             ttk.Label(stock_box, text="Stock faible", foreground=DANGER_COLOR).pack(anchor="w")
             ttk.Label(stock_box, textvariable=self.stock_alerts_var, justify="left", wraplength=760).pack(fill="x")
-        if self.user.role in {"Admin", "Caissier", "Gestionnaire des commandes"}:
+        if self.user.role in debt_alert_roles:
             debt_box = ttk.Frame(alerts_frame)
             debt_box.pack(fill="x")
             ttk.Label(debt_box, text="Dettes en attente", foreground=DANGER_COLOR).pack(anchor="w")
             ttk.Label(debt_box, textvariable=self.debt_alerts_var, justify="left", wraplength=760).pack(fill="x")
 
-        if self.user.role == "Admin":
+        if self.user.role in FULL_VISIBILITY_ROLES:
             admin_frame = ttk.LabelFrame(container, text="Historique des actions", style="Card.TLabelframe")
             admin_frame.pack(fill="x", pady=(0, 18))
             ttk.Label(
@@ -2706,16 +2978,20 @@ class DashboardWindow(tk.Toplevel):
             self.closure_date_field.bind_change(self.refresh_closure_status)
             closure_buttons = ttk.Frame(closure_frame)
             closure_buttons.pack(anchor="center", pady=(0, 10))
-            ttk.Button(
+            self.close_day_button = ttk.Button(
                 closure_buttons,
                 text="Clôturer la journée",
                 command=deferred_ui_command(self, self.close_selected_day),
-            ).grid(row=0, column=0, padx=6, pady=4)
-            ttk.Button(
+            )
+            self.close_day_button.grid(row=0, column=0, padx=6, pady=4)
+            self.reopen_day_button = ttk.Button(
                 closure_buttons,
                 text="Réouvrir la journée",
                 command=deferred_ui_command(self, self.reopen_selected_day),
-            ).grid(row=0, column=1, padx=6, pady=4)
+            )
+            self.reopen_day_button.grid(row=0, column=1, padx=6, pady=4)
+            if self.user.role != "Admin":
+                self.reopen_day_button.state(["disabled"])
             ttk.Button(
                 closure_buttons,
                 text="Historique des clôtures",
@@ -2768,7 +3044,7 @@ class DashboardWindow(tk.Toplevel):
             row=0, column=2, padx=6, pady=4
         )
 
-        if self.user.role == "Admin":
+        if self.user.role in FULL_VISIBILITY_ROLES:
             maintenance_frame = ttk.LabelFrame(container, text="Sauvegarde et restauration", style="Card.TLabelframe")
             maintenance_frame.pack(fill="x", pady=(0, 18))
             ttk.Label(
@@ -2798,6 +3074,16 @@ class DashboardWindow(tk.Toplevel):
                 command=deferred_ui_command(self, self.open_backups_folder),
             )
             self.backup_folder_button.grid(row=0, column=2, padx=6, pady=4)
+            self.reset_database_button = ttk.Button(
+                maintenance_buttons,
+                text="Réinitialiser la base",
+                command=deferred_ui_command(self, self.reset_database),
+            )
+            self.reset_database_button.grid(row=0, column=3, padx=6, pady=4)
+            if self.user.role != "Admin":
+                self.backup_button.state(["disabled"])
+                self.restore_button.state(["disabled"])
+                self.reset_database_button.state(["disabled"])
 
         actions = ttk.Frame(container)
         actions.pack(anchor="center", pady=(8, 0))
@@ -2830,7 +3116,12 @@ class DashboardWindow(tk.Toplevel):
         self.auto_lock_after_id = self.after(AUTO_LOCK_TIMEOUT_MS, self.lock_due_to_inactivity)
 
     def cancel_dashboard_timers(self) -> None:
-        for attribute_name in ("summary_refresh_after_id", "live_refresh_after_id", "auto_lock_after_id"):
+        for attribute_name in (
+            "summary_refresh_after_id",
+            "live_refresh_after_id",
+            "auto_lock_after_id",
+            "session_guard_after_id",
+        ):
             after_id = getattr(self, attribute_name, None)
             if after_id is not None:
                 try:
@@ -2856,8 +3147,37 @@ class DashboardWindow(tk.Toplevel):
             parent=self,
         )
         self.cancel_dashboard_timers()
+        DatabaseHelper.close_current_session()
         self.destroy()
         self.on_logout_callback()
+
+    def schedule_session_guard(self) -> None:
+        if self.session_guard_after_id is not None:
+            try:
+                self.after_cancel(self.session_guard_after_id)
+            except tk.TclError:
+                pass
+        self.session_guard_after_id = self.after(15000, self.perform_session_guard)
+
+    def perform_session_guard(self) -> None:
+        self.session_guard_after_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if not DatabaseHelper.validate_current_session():
+            messagebox.showinfo(
+                "Session fermee",
+                "Cette session a ete fermee parce que ce compte s'est connecte ailleurs.",
+                parent=self,
+            )
+            self.cancel_dashboard_timers()
+            DatabaseHelper.close_current_session()
+            self.destroy()
+            self.on_logout_callback()
+            return
+        self.schedule_session_guard()
 
     def is_live_sync_enabled(self) -> bool:
         return DatabaseHelper.is_remote_mode() or is_embedded_server_running()
@@ -2937,6 +3257,8 @@ class DashboardWindow(tk.Toplevel):
         role = self.user.role
         if role == "Gestionnaire de stock":
             return self.build_stock_summary()
+        if role == "Chargé de la production":
+            return self.build_production_summary()
         if role == "Gestionnaire des commandes":
             return self.build_orders_and_commissions_summary(include_cash=False)
         if role == "Caissier":
@@ -2944,10 +3266,12 @@ class DashboardWindow(tk.Toplevel):
         return self.build_admin_summary()
 
     def build_admin_summary(self) -> str:
-        orders_summary = DatabaseHelper.get_global_orders_summary()
-        production_summary = DatabaseHelper.get_global_production_summary()
-        payroll_summary = DatabaseHelper.get_workers_payroll_summary()
         today = date.today()
+        month_start = today.replace(day=1)
+        orders_summary = DatabaseHelper.get_orders_summary_for_period(month_start, today)
+        outstanding_orders = DatabaseHelper.get_global_orders_summary()
+        production_summary = DatabaseHelper.get_production_summary_for_period(month_start, today)
+        payroll_summary = DatabaseHelper.get_workers_payroll_summary(month_start, today)
         stock_journal = DatabaseHelper.get_stock_journal(today)
         stock_line = "Journal stock du jour indisponible."
         if stock_journal:
@@ -2957,17 +3281,19 @@ class DashboardWindow(tk.Toplevel):
                 f"Clôture farine : {format_number(float(stock_journal.get('FarineCloture', 0) or 0))}"
             )
         return (
-            f"Utilisateurs : {DatabaseHelper.count_users()} | Approvisionnements : {DatabaseHelper.count_stock_supplies()} | "
-            f"Sorties stock : {DatabaseHelper.count_stock_exits()} | "
-            f"Commandes avec dette : {DatabaseHelper.count_orders_with_debt()}\n"
+            f"Indicateurs de {today.strftime('%m/%Y')} | Utilisateurs : {DatabaseHelper.count_users()} | "
+            f"Approvisionnements : {DatabaseHelper.count_stock_supplies_for_period(month_start, today)} | "
+            f"Sorties stock : {DatabaseHelper.count_stock_exits_for_period(month_start, today)}\n"
             f"Commandes : {int(orders_summary.get('NombreCommandes', 0) or 0)} | "
             f"Total bacs : {int(orders_summary.get('TotalBacs', 0) or 0)} | "
             f"Montant attendu : {format_fc(float(orders_summary.get('MontantAttendu', 0) or 0))}\n"
             f"Production : {int(production_summary.get('TotalBacsProduits', 0) or 0)} bacs produits | "
             f"Écart avec commandes : {int(production_summary.get('EcartCommandes', 0) or 0)}\n"
-            f"Total caisse : {format_fc(DatabaseHelper.get_total_cash())} | "
-            f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())} | "
-            f"Paies travailleurs : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}\n"
+            f"Caisse du mois : {format_fc(DatabaseHelper.get_cash_total_for_period(month_start, today))} | "
+            f"Commissions non payées : {format_fc(DatabaseHelper.get_total_commissions())} | "
+            f"Paies du mois : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}\n"
+            f"Dettes non payées : {format_fc(float(outstanding_orders.get('TotalDettes', 0) or 0))} | "
+            f"Commandes avec dette : {DatabaseHelper.count_orders_with_debt()}\n"
             f"{stock_line}"
         )
 
@@ -2994,13 +3320,31 @@ class DashboardWindow(tk.Toplevel):
             f"Huile : {format_number(float(stock_journal.get('HuileCloture', 0) or 0))}"
         )
 
+    def build_production_summary(self) -> str:
+        today = date.today()
+        summary = DatabaseHelper.get_production_summary_for_period(today.replace(day=1), today)
+        return (
+            f"Production du mois {today.strftime('%m/%Y')}\n"
+            f"Commandés : {int(summary.get('TotalBacsCommandes', 0) or 0)} bacs | "
+            f"Produits : {int(summary.get('TotalBacsProduits', 0) or 0)} bacs | "
+            f"Écart : {int(summary.get('EcartCommandes', 0) or 0)}\n"
+            f"Livrés aux dépositaires : {int(summary.get('TotalBacsLivresDepositaires', 0) or 0)} | "
+            f"Livrés aux mamans : {int(summary.get('TotalBacsLivresMamans', 0) or 0)}\n"
+            f"Restants : {int(summary.get('TotalBacsRestants', 0) or 0)} | "
+            f"Foutus : {int(summary.get('TotalBacsFoutus', 0) or 0)} | "
+            f"Couverture : {format_number(float(summary.get('TauxCouverture', 0) or 0))} %"
+        )
+
     def build_orders_and_commissions_summary(self, include_cash: bool) -> str:
-        orders_summary = DatabaseHelper.get_global_orders_summary()
+        today = date.today()
+        month_start = today.replace(day=1)
+        orders_summary = DatabaseHelper.get_orders_summary_for_period(month_start, today)
+        outstanding_orders = DatabaseHelper.get_global_orders_summary()
         lines = [
-            "Commandes et commissions",
+            f"Commandes et commissions - {today.strftime('%m/%Y')}",
             (
                 f"Nombre de commandes : {int(orders_summary.get('NombreCommandes', 0) or 0)} | "
-                f"Commandes avec dette : {int(orders_summary.get('NombreAvecDette', 0) or 0)}"
+                f"Commandes avec dette : {int(outstanding_orders.get('NombreAvecDette', 0) or 0)}"
             ),
             (
                 f"Total bacs : {int(orders_summary.get('TotalBacs', 0) or 0)} | "
@@ -3008,22 +3352,18 @@ class DashboardWindow(tk.Toplevel):
             ),
             (
                 f"Montant reçu : {format_fc(float(orders_summary.get('MontantRecu', 0) or 0))} | "
-                f"Dettes : {format_fc(float(orders_summary.get('TotalDettes', 0) or 0))}"
+                f"Dettes non payées : {format_fc(float(outstanding_orders.get('TotalDettes', 0) or 0))}"
             ),
-            f"Total commissions : {format_fc(DatabaseHelper.get_total_commissions())}",
+            f"Avances clients disponibles : {format_fc(float(outstanding_orders.get('AvancesDisponibles', 0) or 0))}",
+            f"Commissions non payées : {format_fc(DatabaseHelper.get_total_commissions())}",
         ]
-        production_today = DatabaseHelper.get_production_summary_for_date(date.today())
-        lines.append(
-            "Production du jour : "
-            f"{int(production_today.get('NombreBacsProduits', 0) or 0)} bacs produits | "
-            f"Écart : {int(production_today.get('EcartCommandes', 0) or 0)}"
-        )
         if include_cash:
             cash_today = DatabaseHelper.get_cash_for_date(date.today())
             expenses_today = float(cash_today.get("MontantTotalDepenses", 0) or 0)
-            payroll_summary = DatabaseHelper.get_workers_payroll_summary()
+            payroll_summary = DatabaseHelper.get_workers_payroll_summary(month_start, today)
             lines.append(
-                f"Dépenses du jour : {format_fc(expenses_today)} | Solde global : {format_fc(DatabaseHelper.get_total_cash())}"
+                f"Dépenses du jour : {format_fc(expenses_today)} | Caisse du mois : "
+                f"{format_fc(DatabaseHelper.get_cash_total_for_period(month_start, today))}"
             )
             lines.append(
                 "Travailleurs : "
@@ -3045,12 +3385,20 @@ class DashboardWindow(tk.Toplevel):
 
     def build_metric_cards_data(self) -> list[tuple[str, str, str]]:
         today = date.today()
-        orders_summary = DatabaseHelper.get_global_orders_summary()
-        low_stock = DatabaseHelper.get_low_stock_alerts()
+        month_start = today.replace(day=1)
+        month_label = today.strftime("%m/%Y")
+        orders_summary = DatabaseHelper.get_orders_summary_for_period(month_start, today)
+        outstanding_orders = DatabaseHelper.get_global_orders_summary()
+        orders_summary["TotalDettes"] = outstanding_orders.get("TotalDettes", 0)
+        orders_summary["NombreAvecDette"] = outstanding_orders.get("NombreAvecDette", 0)
+        orders_summary["AvancesDisponibles"] = outstanding_orders.get("AvancesDisponibles", 0)
         debt_alerts = DatabaseHelper.get_debt_alerts(limit=5)
         commission_total = DatabaseHelper.get_total_commissions()
-        cash_total = DatabaseHelper.get_total_cash()
-        production_today = DatabaseHelper.get_production_summary_for_date(today)
+        cash_total = DatabaseHelper.get_cash_total_for_period(month_start, today)
+        production_month = DatabaseHelper.get_production_summary_for_period(month_start, today)
+        payroll_summary = DatabaseHelper.get_workers_payroll_summary(month_start, today)
+        cash_rows = DatabaseHelper.list_cash_balance_by_period(month_start, today)
+        paid_debts_month = sum(float(row.get("DettesPayeesAujourdHui", 0) or 0) for row in cash_rows)
 
         if self.user.role == "Gestionnaire de stock":
             configuration = DatabaseHelper.get_stock_configuration()
@@ -3063,39 +3411,44 @@ class DashboardWindow(tk.Toplevel):
             ]
         if self.user.role == "Gestionnaire des commandes":
             return [
-                ("Commandes", str(int(orders_summary.get("NombreCommandes", 0) or 0)), "Nombre total enregistré"),
-                ("Total bacs", str(int(orders_summary.get("TotalBacs", 0) or 0)), "Toutes commandes confondues"),
-                ("Production", str(int(production_today.get("NombreBacsProduits", 0) or 0)), f"Écart : {int(production_today.get('EcartCommandes', 0) or 0)} bacs"),
-                ("Commissions", format_fc(commission_total), "Total cumulé"),
+                ("Commandes du mois", str(int(orders_summary.get("NombreCommandes", 0) or 0)), month_label),
+                ("Bacs du mois", str(int(orders_summary.get("TotalBacs", 0) or 0)), month_label),
+                ("Avances clients", format_fc(float(orders_summary.get("AvancesDisponibles", 0) or 0)), "Solde à reporter"),
+                ("Commissions non payées", format_fc(commission_total), "Solde cumulé"),
+            ]
+        if self.user.role == "Chargé de la production":
+            return [
+                ("Bacs commandés ce mois", str(int(production_month.get("TotalBacsCommandes", 0) or 0)), month_label),
+                ("Bacs produits ce mois", str(int(production_month.get("TotalBacsProduits", 0) or 0)), f"Écart : {int(production_month.get('EcartCommandes', 0) or 0)}"),
+                ("Bacs restants ce mois", str(int(production_month.get("TotalBacsRestants", 0) or 0)), month_label),
+                ("Bacs foutus ce mois", str(int(production_month.get("TotalBacsFoutus", 0) or 0)), f"Couverture : {format_number(float(production_month.get('TauxCouverture', 0) or 0))} %"),
             ]
         if self.user.role == "Caissier":
-            payroll_summary = DatabaseHelper.get_workers_payroll_summary()
             return [
-                ("Montant reçu", format_fc(float(orders_summary.get("MontantRecu", 0) or 0)), "Reçus cumulés"),
-                ("Dettes payées", format_fc(sum(float(row.get("DettesPayeesAujourdHui", 0) or 0) for row in DatabaseHelper.list_cash_days())), "Historique des paiements"),
-                ("Caisse globale", format_fc(cash_total), "Entrées moins dépenses"),
+                ("Montant reçu ce mois", format_fc(float(orders_summary.get("MontantRecu", 0) or 0)), month_label),
+                ("Dettes payées ce mois", format_fc(paid_debts_month), month_label),
+                ("Caisse du mois", format_fc(cash_total), "Entrées moins dépenses"),
                 ("Dettes ouvertes", format_fc(float(orders_summary.get("TotalDettes", 0) or 0)), f"{len(debt_alerts)} client(s) prioritaire(s)"),
+                ("Avances clients", format_fc(float(orders_summary.get("AvancesDisponibles", 0) or 0)), "Montants à reporter"),
                 (
                     "Travailleurs",
                     str(int(payroll_summary.get("TravailleursActifs", 0) or 0)),
-                    f"Paies : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}",
+                    f"Paies du mois : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}",
                 ),
             ]
         stock_summary = DatabaseHelper.get_stock_summary()
-        production_global = DatabaseHelper.get_global_production_summary()
-        payroll_summary = DatabaseHelper.get_workers_payroll_summary()
         return [
             ("Stock", format_number(float(stock_summary.get("FarineRestante", 0) or 0)), "Farine restante"),
-            ("Approvisionnements", str(DatabaseHelper.count_stock_supplies()), "Entrées de stock"),
-            ("Commandes", str(int(orders_summary.get("NombreCommandes", 0) or 0)), f"{int(orders_summary.get('TotalBacs', 0) or 0)} bacs cumulés"),
-            ("Production", str(int(production_global.get("TotalBacsProduits", 0) or 0)), f"Écart global : {int(production_global.get('EcartCommandes', 0) or 0)} bacs"),
-            ("Caisse", format_fc(cash_total), "Solde global"),
-            ("Commissions", format_fc(commission_total), "Total à payer"),
+            ("Approvisionnements du mois", str(DatabaseHelper.count_stock_supplies_for_period(month_start, today)), month_label),
+            ("Commandes du mois", str(int(orders_summary.get("NombreCommandes", 0) or 0)), f"{int(orders_summary.get('TotalBacs', 0) or 0)} bacs"),
+            ("Production du mois", str(int(production_month.get("TotalBacsProduits", 0) or 0)), f"Écart : {int(production_month.get('EcartCommandes', 0) or 0)} bacs"),
+            ("Caisse du mois", format_fc(cash_total), month_label),
+            ("Commissions non payées", format_fc(commission_total), "Solde cumulé"),
             ("Dettes ouvertes", format_fc(float(orders_summary.get("TotalDettes", 0) or 0)), f"{len(debt_alerts)} alerte(s) prioritaires"),
             (
                 "Travailleurs",
                 str(int(payroll_summary.get("TravailleursActifs", 0) or 0)),
-                f"Paies : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}",
+                f"Paies du mois : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}",
             ),
         ]
 
@@ -3134,7 +3487,7 @@ class DashboardWindow(tk.Toplevel):
         self.critical_alerts_shown = True
         messages: list[str] = []
         try:
-            if self.user.role in {"Admin", "Gestionnaire de stock"}:
+            if self.user.role in {"Admin", "Directeur Général", "Gestionnaire de stock"}:
                 stock_alerts = DatabaseHelper.get_low_stock_alerts()
                 if stock_alerts:
                     lines = ["Stock critique :"]
@@ -3143,7 +3496,7 @@ class DashboardWindow(tk.Toplevel):
                             f"- {row['Article']} : restant {format_number(float(row['StockRestant']))} {row['Unite']}"
                         )
                     messages.append("\n".join(lines))
-            if self.user.role in {"Admin", "Caissier", "Gestionnaire des commandes"}:
+            if self.user.role in {"Admin", "Directeur Général", "Caissier", "Gestionnaire des commandes"}:
                 debt_alerts = DatabaseHelper.get_debt_alerts(limit=5)
                 if debt_alerts:
                     lines = ["Dettes critiques :"]
@@ -3161,7 +3514,7 @@ class DashboardWindow(tk.Toplevel):
         )
 
     def refresh_recent_activity(self) -> None:
-        if self.user.role != "Admin":
+        if self.user.role not in FULL_VISIBILITY_ROLES:
             return
         try:
             rows = DatabaseHelper.get_recent_activity_summary(limit=5)
@@ -3179,7 +3532,7 @@ class DashboardWindow(tk.Toplevel):
         self.recent_activity_var.set("\n".join(lines))
 
     def refresh_closure_status(self) -> None:
-        if self.user.role != "Admin":
+        if self.user.role not in FULL_VISIBILITY_ROLES:
             return
         date_field = getattr(self, "closure_date_field", None)
         if date_field is None:
@@ -3227,7 +3580,7 @@ class DashboardWindow(tk.Toplevel):
         self.closure_status_var.set("\n".join(lines))
 
     def close_selected_day(self) -> None:
-        if self.user.role != "Admin":
+        if self.user.role not in CLOSURE_ROLES:
             messagebox.showwarning("Clôture journalière", "Accès non autorisé.")
             return
         date_field = getattr(self, "closure_date_field", None)
@@ -3322,7 +3675,7 @@ class DashboardWindow(tk.Toplevel):
         )
 
     def open_closure_history(self) -> None:
-        if self.user.role != "Admin":
+        if self.user.role not in FULL_VISIBILITY_ROLES:
             messagebox.showwarning("Accès refusé", "Accès non autorisé.")
             return
         window = DayClosuresWindow(self)
@@ -3406,6 +3759,9 @@ class DashboardWindow(tk.Toplevel):
             self.show_update_dialog(result)
 
     def backup_database(self) -> None:
+        if self.user.role != "Admin":
+            messagebox.showwarning("Sauvegarde", "Accès non autorisé.")
+            return
         try:
             backup_path = DatabaseHelper.backup_database()
         except Exception as exc:
@@ -3431,6 +3787,9 @@ class DashboardWindow(tk.Toplevel):
             self.open_backups_folder()
 
     def restore_database(self) -> None:
+        if self.user.role != "Admin":
+            messagebox.showwarning("Restauration", "Accès non autorisé.")
+            return
         if DatabaseHelper.is_remote_mode():
             selected_backup = self.choose_remote_backup_for_restore()
             if selected_backup is None:
@@ -3484,6 +3843,53 @@ class DashboardWindow(tk.Toplevel):
         messagebox.showinfo("Restauration terminée", details)
         self.root.destroy()
 
+    def reset_database(self) -> None:
+        if self.user.role != "Admin":
+            messagebox.showwarning("Réinitialisation", "Accès non autorisé.")
+            return
+
+        if DatabaseHelper.is_remote_mode():
+            warning_text = (
+                "Cette action va remettre à zéro la base du serveur central : commandes, caisse, stock, "
+                "production, travailleurs, utilisateurs, rapports internes et historique.\n\n"
+                "Une sauvegarde de sécurité sera créée automatiquement avant la réinitialisation.\n\n"
+                "Tous les postes et la version web devront ensuite recréer le premier Admin et se reconnecter.\n\n"
+                "Voulez-vous continuer ?"
+            )
+        else:
+            warning_text = (
+                "Cette action va remettre à zéro la base de ce poste : commandes, caisse, stock, production, "
+                "travailleurs, utilisateurs, rapports internes et historique.\n\n"
+                "Une sauvegarde de sécurité sera créée automatiquement avant la réinitialisation.\n\n"
+                "L'application redemandera la création du premier Admin au prochain démarrage.\n\n"
+                "Voulez-vous continuer ?"
+            )
+
+        if not messagebox.askyesno("Réinitialiser la base", warning_text, parent=self):
+            return
+
+        confirmation = simpledialog.askstring(
+            "Confirmation",
+            "Tapez REINITIALISER pour confirmer la remise à zéro complète.",
+            parent=self,
+        )
+        if confirmation != "REINITIALISER":
+            messagebox.showinfo("Réinitialisation annulée", "La base n'a pas été modifiée.", parent=self)
+            return
+
+        try:
+            safety_backup = DatabaseHelper.reset_database_to_empty()
+        except Exception as exc:
+            messagebox.showerror("Réinitialisation impossible", str(exc), parent=self)
+            return
+
+        details = "La base a été remise à zéro."
+        if safety_backup is not None:
+            details += f"\n\nSauvegarde de sécurité : {safety_backup}"
+        details += "\n\nL'application va se fermer. Relancez-la pour créer le premier administrateur."
+        messagebox.showinfo("Réinitialisation terminée", details, parent=self)
+        self.root.destroy()
+
     def open_backups_folder(self) -> None:
         if DatabaseHelper.is_remote_mode():
             self.show_server_backups_browser()
@@ -3503,7 +3909,7 @@ class DashboardWindow(tk.Toplevel):
         open_folder(DatabaseHelper.get_reports_dir_for_user(self.user.identifiant))
 
     def open_activity_history(self) -> None:
-        if self.user.role != "Admin":
+        if self.user.role not in FULL_VISIBILITY_ROLES:
             messagebox.showwarning("Accès refusé", "Accès non autorisé.")
             return
         window = ActivityHistoryWindow(self)
@@ -3545,6 +3951,7 @@ class DashboardWindow(tk.Toplevel):
             messagebox.showwarning("Mise à jour obligatoire", message)
             webbrowser.open(update_info.download_url)
             self.cancel_dashboard_timers()
+            DatabaseHelper.close_current_session()
             self.root.destroy()
             return
 
@@ -3675,7 +4082,7 @@ class DashboardWindow(tk.Toplevel):
         self.open_large_module(WorkersPayrollWindow, "les travailleurs et paies")
 
     def open_users(self) -> None:
-        if self.user.role != "Admin":
+        if self.user.role not in FULL_VISIBILITY_ROLES:
             messagebox.showwarning("Accès refusé", "Accès non autorisé.")
             return
         self.open_large_module(UsersWindow, "les utilisateurs")
@@ -3684,6 +4091,7 @@ class DashboardWindow(tk.Toplevel):
         if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment vous déconnecter ?"):
             return
         self.cancel_dashboard_timers()
+        DatabaseHelper.close_current_session()
         self.destroy()
         self.on_logout_callback()
 
@@ -3692,6 +4100,24 @@ class DashboardWindow(tk.Toplevel):
         self.wait_window(window)
         self.refresh_security_notice()
 
+    def require_initial_password_change(self) -> None:
+        messagebox.showwarning(
+            "Sécurité obligatoire",
+            "Le mot de passe initial doit être remplacé avant de continuer.",
+            parent=self,
+        )
+        self.open_change_password()
+        if DatabaseHelper.is_using_default_password(self.user.identifiant):
+            messagebox.showerror(
+                "Sécurité obligatoire",
+                "Le changement de mot de passe n'a pas été effectué. La session va être fermée.",
+                parent=self,
+            )
+            self.cancel_dashboard_timers()
+            DatabaseHelper.close_current_session()
+            self.destroy()
+            self.on_logout_callback()
+
     def open_about(self) -> None:
         AboutWindow(self)
 
@@ -3699,10 +4125,24 @@ class DashboardWindow(tk.Toplevel):
         if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment quitter l'application ?"):
             return
         self.cancel_dashboard_timers()
+        DatabaseHelper.close_current_session()
         self.root.destroy()
 
 
 class BaseModuleWindow(tk.Toplevel):
+    DIRECTOR_DISABLED_BUTTON_PREFIXES = (
+        "Enregistrer",
+        "Modifier",
+        "Supprimer",
+        "Nouveau",
+        "Nouvelle",
+        "Ajouter",
+        "Approvisionner",
+        "Paramètres",
+        "Restaurer",
+        "Sauvegarder",
+    )
+
     def __init__(
         self,
         parent: DashboardWindow,
@@ -3740,6 +4180,29 @@ class BaseModuleWindow(tk.Toplevel):
             center_window(self)
         if self.parent.is_live_sync_enabled():
             self.schedule_live_refresh()
+        self.after_idle(self.apply_director_read_only_mode)
+
+    def apply_director_read_only_mode(self) -> None:
+        if self.parent.user.role != "Directeur Général" or not self.winfo_exists():
+            return
+
+        def visit(widget: tk.Misc) -> None:
+            for child in widget.winfo_children():
+                try:
+                    text = str(child.cget("text") or "").strip()
+                except tk.TclError:
+                    text = ""
+                if text.startswith(self.DIRECTOR_DISABLED_BUTTON_PREFIXES):
+                    try:
+                        child.state(["disabled"])
+                    except (AttributeError, tk.TclError):
+                        try:
+                            child.configure(state="disabled")
+                        except tk.TclError:
+                            pass
+                visit(child)
+
+        visit(self.body)
 
     def close_window(self) -> None:
         if self.live_refresh_after_id is not None:
@@ -3787,8 +4250,25 @@ class BaseModuleWindow(tk.Toplevel):
     def is_read_only_module(self, module_name: str) -> bool:
         return self.parent.is_module_read_only(module_name)
 
+    def ensure_module_writable(self, module_name: str, title: str | None = None) -> bool:
+        if not self.is_read_only_module(module_name):
+            return True
+        messagebox.showwarning(
+            title or module_name,
+            "Ce module est en lecture seule pour votre profil.",
+            parent=self,
+        )
+        return False
+
     def hide_read_only_buttons(self, module_name: str, buttons: list[tk.Misc]) -> None:
         if not self.is_read_only_module(module_name):
+            return
+        if self.parent.user.role == "Directeur Général":
+            for button in buttons:
+                try:
+                    button.state(["disabled"])
+                except AttributeError:
+                    button.configure(state="disabled")
             return
         for button in buttons:
             try:
@@ -3827,6 +4307,8 @@ class BaseModuleWindow(tk.Toplevel):
         self.refresh_day_lock_state()
 
     def set_day_lock_write_buttons_enabled(self, enabled: bool) -> None:
+        if self.parent.user.role == "Directeur Général":
+            enabled = False
         for button in getattr(self, "day_lock_write_buttons", []):
             try:
                 button.state(["!disabled"] if enabled else ["disabled"])
@@ -4169,7 +4651,6 @@ class PdfReportWindow(BaseModuleWindow):
         self.identifiant = parent.user.identifiant
         self.role = parent.user.role
         self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
-        self.open_after_generation_var = tk.BooleanVar(value=True)
         self.report_mode_var = tk.StringVar(value="daily")
         self.required_monthly = required_monthly
         self.message_var = tk.StringVar(value="")
@@ -4208,7 +4689,7 @@ class PdfReportWindow(BaseModuleWindow):
         ttk.Radiobutton(mode_row, text="Mensuel", value="monthly", variable=self.report_mode_var).grid(row=0, column=1)
         ttk.Radiobutton(mode_row, text="Période", value="period", variable=self.report_mode_var).grid(row=0, column=2, padx=(10, 0))
 
-        if self.role in {"Admin", "Caissier"}:
+        if self.role in {"Admin", "Directeur Général", "Caissier"}:
             ttk.Radiobutton(mode_row, text="Caisse hebdo", value="cash_weekly", variable=self.report_mode_var).grid(row=1, column=0, padx=(0, 10), pady=(6, 0))
             ttk.Radiobutton(mode_row, text="Bilan caisse mensuel", value="cash_monthly", variable=self.report_mode_var).grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
 
@@ -4229,12 +4710,6 @@ class PdfReportWindow(BaseModuleWindow):
             wraplength=520,
             justify="left",
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
-
-        ttk.Checkbutton(
-            form,
-            text="Proposer l'ouverture du PDF apres generation",
-            variable=self.open_after_generation_var,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         actions = ttk.Frame(form)
         actions.grid(row=5, column=0, columnspan=2, pady=(14, 0))
@@ -4381,16 +4856,10 @@ class PdfReportWindow(BaseModuleWindow):
             "Rapport généré",
             f"Mode : {mode} | Fichier : {report_path.name}",
         )
-        message = f"Le rapport PDF a été créé avec succès.\n\nFichier : {report_path}"
-        if self.open_after_generation_var.get():
-            message += "\n\nVoulez-vous l'ouvrir maintenant ?"
-            if messagebox.askyesno("Rapport PDF", message):
-                open_file(report_path)
-            return
-
-        message += "\n\nVoulez-vous ouvrir le dossier qui contient ce rapport ?"
-        if messagebox.askyesno("Rapport PDF", message):
-            self.open_reports_folder()
+        try:
+            open_file(report_path)
+        except Exception as exc:
+            self.message_var.set(f"Rapport créé, mais ouverture automatique impossible : {exc}")
 
     def open_reports_folder(self) -> None:
         open_folder(self.reports_dir)
@@ -4402,7 +4871,6 @@ class ExcelReportWindow(BaseModuleWindow):
         self.identifiant = parent.user.identifiant
         self.role = parent.user.role
         self.reports_dir = DatabaseHelper.get_reports_dir_for_user(self.identifiant)
-        self.open_after_generation_var = tk.BooleanVar(value=True)
         self.report_mode_var = tk.StringVar(value="daily")
         self.message_var = tk.StringVar(value="")
         self.build_ui()
@@ -4440,7 +4908,7 @@ class ExcelReportWindow(BaseModuleWindow):
         ttk.Radiobutton(mode_row, text="Mensuel", value="monthly", variable=self.report_mode_var).grid(row=0, column=1)
         ttk.Radiobutton(mode_row, text="Période", value="period", variable=self.report_mode_var).grid(row=0, column=2, padx=(10, 0))
 
-        if self.role in {"Admin", "Caissier"}:
+        if self.role in {"Admin", "Directeur Général", "Caissier"}:
             ttk.Radiobutton(mode_row, text="Caisse hebdo", value="cash_weekly", variable=self.report_mode_var).grid(row=1, column=0, padx=(0, 10), pady=(6, 0))
             ttk.Radiobutton(mode_row, text="Bilan caisse mensuel", value="cash_monthly", variable=self.report_mode_var).grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
 
@@ -4461,12 +4929,6 @@ class ExcelReportWindow(BaseModuleWindow):
             wraplength=520,
             justify="left",
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
-
-        ttk.Checkbutton(
-            form,
-            text="Proposer l'ouverture du fichier Excel après génération",
-            variable=self.open_after_generation_var,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         actions = ttk.Frame(form)
         actions.grid(row=5, column=0, columnspan=2, pady=(14, 0))
@@ -4611,16 +5073,10 @@ class ExcelReportWindow(BaseModuleWindow):
             "Rapport généré",
             f"Mode : {mode} | Fichier : {report_path.name}",
         )
-        message = f"Le rapport Excel a été créé avec succès.\n\nFichier : {report_path}"
-        if self.open_after_generation_var.get():
-            message += "\n\nVoulez-vous l'ouvrir maintenant ?"
-            if messagebox.askyesno("Rapport Excel", message):
-                open_file(report_path)
-            return
-
-        message += "\n\nVoulez-vous ouvrir le dossier qui contient ce rapport ?"
-        if messagebox.askyesno("Rapport Excel", message):
-            self.open_reports_folder()
+        try:
+            open_file(report_path)
+        except Exception as exc:
+            self.message_var.set(f"Rapport créé, mais ouverture automatique impossible : {exc}")
 
     def open_reports_folder(self) -> None:
         open_folder(self.reports_dir)
@@ -4657,7 +5113,7 @@ class ChangePasswordWindow(BaseModuleWindow):
         else:
             description_text = (
                 "Saisissez votre mot de passe actuel, puis choisissez un nouveau mot de passe "
-                "d'au moins 6 caracteres."
+                "fort : 12 caracteres minimum, 14 pour Admin/DG, avec majuscule, minuscule, chiffre et symbole."
             )
             description_color = SUCCESS_COLOR
 
@@ -4707,6 +5163,13 @@ class ChangePasswordWindow(BaseModuleWindow):
         self.confirm_entry.bind("<Return>", lambda _event: self.save_password())
 
     def save_password(self) -> None:
+        if self.parent.user.role == "Directeur Général":
+            messagebox.showwarning(
+                "Sécurité",
+                "Ce compte est en lecture seule. Le mot de passe doit être géré par un administrateur.",
+                parent=self,
+            )
+            return
         current_password = self.current_password_var.get()
         new_password = self.new_password_var.get()
         confirm_password = self.confirm_password_var.get()
@@ -4763,11 +5226,15 @@ class UsersWindow(BaseModuleWindow):
         self.identifiant_entry = ttk.Entry(form, textvariable=self.identifiant_var, width=34)
         self.identifiant_entry.grid(row=1, column=1, sticky="ew", pady=6)
 
-        ttk.Label(form, text="Mot de passe").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Adresse e-mail").grid(row=2, column=0, sticky="w", pady=6)
+        self.email_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.email_var, width=34).grid(row=2, column=1, sticky="ew", pady=6)
+
+        ttk.Label(form, text="Mot de passe").grid(row=3, column=0, sticky="w", pady=6)
         self.password_var = tk.StringVar()
         self.show_password_var = tk.BooleanVar(value=False)
         password_row = ttk.Frame(form)
-        password_row.grid(row=2, column=1, sticky="ew", pady=6)
+        password_row.grid(row=3, column=1, sticky="ew", pady=6)
         self.password_entry = ttk.Entry(password_row, textvariable=self.password_var, show="*", width=26)
         self.password_entry.grid(row=0, column=0, sticky="ew")
         ttk.Checkbutton(
@@ -4778,13 +5245,13 @@ class UsersWindow(BaseModuleWindow):
         ).grid(row=0, column=1, padx=(8, 0), sticky="w")
         password_row.columnconfigure(0, weight=1)
 
-        ttk.Label(form, text="Rôle").grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Rôle").grid(row=4, column=0, sticky="w", pady=6)
         self.role_var = tk.StringVar(value=ROLES[0])
         self.role_combo = ttk.Combobox(form, textvariable=self.role_var, values=ROLES, state="readonly", width=31)
-        self.role_combo.grid(row=3, column=1, sticky="ew", pady=6)
+        self.role_combo.grid(row=4, column=1, sticky="ew", pady=6)
 
         button_bar = ttk.Frame(form)
-        button_bar.grid(row=4, column=0, columnspan=2, pady=(14, 0))
+        button_bar.grid(row=5, column=0, columnspan=2, pady=(14, 0))
         ttk.Button(button_bar, text="Enregistrer", command=self.save_user).grid(row=0, column=0, padx=4, pady=4)
         ttk.Button(button_bar, text="Modifier", command=self.load_user_for_edit).grid(row=0, column=1, padx=4, pady=4)
         ttk.Button(button_bar, text="Supprimer", command=self.delete_user).grid(row=0, column=2, padx=4, pady=4)
@@ -4796,7 +5263,7 @@ class UsersWindow(BaseModuleWindow):
 
         self.message_var = tk.StringVar(value="")
         ttk.Label(form, textvariable=self.message_var, foreground=DANGER_COLOR, wraplength=320).grid(
-            row=5, column=0, columnspan=2, sticky="ew", pady=(12, 0)
+            row=6, column=0, columnspan=2, sticky="ew", pady=(12, 0)
         )
 
         table_frame = ttk.LabelFrame(top, text="Liste", style="Card.TLabelframe")
@@ -4808,10 +5275,11 @@ class UsersWindow(BaseModuleWindow):
         rows = DatabaseHelper.list_users()
         self.table.set_data(
             rows,
-            columns=["Id", "NomComplet", "Identifiant", "MotDePasse", "Role"],
+            columns=["Id", "NomComplet", "Identifiant", "Email", "MotDePasse", "Role"],
             headings={
                 "NomComplet": "Nom complet",
                 "Identifiant": "Identifiant",
+                "Email": "Adresse e-mail",
                 "MotDePasse": "Mot de passe",
                 "Role": "Rôle",
             },
@@ -4833,10 +5301,11 @@ class UsersWindow(BaseModuleWindow):
         rows = DatabaseHelper.search_users_by_identifiant(identifiant)
         self.table.set_data(
             rows,
-            columns=["Id", "NomComplet", "Identifiant", "MotDePasse", "Role"],
+            columns=["Id", "NomComplet", "Identifiant", "Email", "MotDePasse", "Role"],
             headings={
                 "NomComplet": "Nom complet",
                 "Identifiant": "Identifiant",
+                "Email": "Adresse e-mail",
                 "MotDePasse": "Mot de passe",
                 "Role": "Rôle",
             },
@@ -4845,12 +5314,15 @@ class UsersWindow(BaseModuleWindow):
         self.message_var.set("Recherche terminée." if rows else "Aucun utilisateur trouvé.")
 
     def save_user(self) -> None:
+        if not self.ensure_module_writable("Utilisateurs"):
+            return
         name = self.name_var.get().strip()
         identifiant = self.identifiant_var.get().strip()
+        email = self.email_var.get().strip()
         password = self.password_var.get().strip()
         role = self.role_var.get().strip()
 
-        if not name or not identifiant or not role:
+        if not name or not identifiant or not email or not role:
             messagebox.showwarning("Utilisateurs", "Veuillez remplir tous les champs.")
             return
         if not self.edit_mode and not password:
@@ -4859,7 +5331,7 @@ class UsersWindow(BaseModuleWindow):
 
         try:
             if self.edit_mode:
-                updated = DatabaseHelper.update_user(self.original_identifiant, name, password, role)
+                updated = DatabaseHelper.update_user(self.original_identifiant, name, password, role, email)
                 message = "Utilisateur modifié avec succès." if updated else "Aucune modification effectuée."
                 if updated:
                     log_user_action(
@@ -4869,9 +5341,10 @@ class UsersWindow(BaseModuleWindow):
                         f"{self.original_identifiant} -> rôle {role}",
                     )
             else:
-                DatabaseHelper.add_user(name, identifiant, password, role)
+                DatabaseHelper.add_user(name, identifiant, password, role, email)
                 message = "Utilisateur ajouté avec succès."
                 log_user_action(self, "Utilisateurs", "Utilisateur ajouté", f"{identifiant} | rôle {role}")
+            message += process_email_notifications_for_ui()
             self.reset_form()
             self.refresh_users()
             self.message_var.set(message)
@@ -4889,25 +5362,22 @@ class UsersWindow(BaseModuleWindow):
             return
         self.name_var.set(str(user.get("NomComplet", "")))
         self.identifiant_var.set(str(user.get("Identifiant", "")))
-        visible_password = str(user.get("MotDePasse", "") or "")
-        self.password_var.set(visible_password)
+        self.email_var.set(str(user.get("Email", "")))
+        self.password_var.set("")
         self.show_password_var.set(False)
         self.toggle_password_visibility()
         self.role_var.set(str(user.get("Role", "")))
         self.original_identifiant = str(user.get("Identifiant", ""))
         self.edit_mode = True
         self.identifiant_entry.state(["disabled"])
-        if visible_password:
-            self.message_var.set(
-                "Toutes les informations ont été chargées. Cochez Afficher pour lire le mot de passe."
-            )
-        else:
-            self.message_var.set(
-                "Ce mot de passe appartient à un ancien compte sécurisé et ne peut pas être récupéré. "
-                "Laissez le champ vide pour le conserver, ou saisissez un nouveau mot de passe."
-            )
+        self.message_var.set(
+            "Le mot de passe actuel n'est jamais affiché. Laissez le champ vide pour le conserver, "
+            "ou saisissez un mot de passe fort conforme au rôle."
+        )
 
     def delete_user(self) -> None:
+        if not self.ensure_module_writable("Utilisateurs"):
+            return
         identifiant = self.identifiant_var.get().strip()
         if not identifiant:
             messagebox.showwarning("Utilisateurs", "Veuillez saisir l'identifiant à supprimer.")
@@ -4934,6 +5404,7 @@ class UsersWindow(BaseModuleWindow):
     def reset_form(self) -> None:
         self.name_var.set("")
         self.identifiant_var.set("")
+        self.email_var.set("")
         self.password_var.set("")
         self.show_password_var.set(False)
         self.toggle_password_visibility()
@@ -4985,6 +5456,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         self.worker_name_var = tk.StringVar()
         self.worker_function_var = tk.StringVar()
         self.worker_phone_var = tk.StringVar()
+        self.worker_email_var = tk.StringVar()
         self.worker_address_var = tk.StringVar()
         self.worker_salary_var = tk.StringVar(value="0")
         self.worker_status_var = tk.StringVar(value="Actif")
@@ -4996,25 +5468,27 @@ class WorkersPayrollWindow(BaseModuleWindow):
         ttk.Entry(worker_form, textvariable=self.worker_function_var).grid(row=1, column=1, sticky="ew", pady=5)
         ttk.Label(worker_form, text="Téléphone").grid(row=2, column=0, sticky="w", pady=5)
         ttk.Entry(worker_form, textvariable=self.worker_phone_var).grid(row=2, column=1, sticky="ew", pady=5)
-        ttk.Label(worker_form, text="Adresse").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(worker_form, textvariable=self.worker_address_var).grid(row=3, column=1, sticky="ew", pady=5)
-        ttk.Label(worker_form, text="Date d'embauche").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Label(worker_form, text="Adresse e-mail").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_email_var).grid(row=3, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Adresse").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_address_var).grid(row=4, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Date d'embauche").grid(row=5, column=0, sticky="w", pady=5)
         self.hire_date_field = DateField(worker_form, today_iso())
-        self.hire_date_field.grid(row=4, column=1, sticky="ew", pady=5)
-        ttk.Label(worker_form, text="Salaire mensuel").grid(row=5, column=0, sticky="w", pady=5)
-        ttk.Entry(worker_form, textvariable=self.worker_salary_var).grid(row=5, column=1, sticky="ew", pady=5)
-        ttk.Label(worker_form, text="Statut").grid(row=6, column=0, sticky="w", pady=5)
+        self.hire_date_field.grid(row=5, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Salaire mensuel").grid(row=6, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_salary_var).grid(row=6, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Statut").grid(row=7, column=0, sticky="w", pady=5)
         ttk.Combobox(
             worker_form,
             textvariable=self.worker_status_var,
             values=["Actif", "Suspendu", "Inactif"],
             state="readonly",
-        ).grid(row=6, column=1, sticky="ew", pady=5)
-        ttk.Label(worker_form, text="Observations").grid(row=7, column=0, sticky="w", pady=5)
-        ttk.Entry(worker_form, textvariable=self.worker_observations_var).grid(row=7, column=1, sticky="ew", pady=5)
+        ).grid(row=7, column=1, sticky="ew", pady=5)
+        ttk.Label(worker_form, text="Observations").grid(row=8, column=0, sticky="w", pady=5)
+        ttk.Entry(worker_form, textvariable=self.worker_observations_var).grid(row=8, column=1, sticky="ew", pady=5)
 
         worker_buttons = ttk.Frame(worker_form)
-        worker_buttons.grid(row=8, column=0, columnspan=2, pady=(12, 0))
+        worker_buttons.grid(row=9, column=0, columnspan=2, pady=(12, 0))
         ttk.Button(worker_buttons, text="Enregistrer", command=self.save_worker).grid(row=0, column=0, padx=4, pady=4)
         ttk.Button(worker_buttons, text="Modifier", command=self.load_worker_for_edit).grid(row=0, column=1, padx=4, pady=4)
         ttk.Button(worker_buttons, text="Supprimer / désactiver", command=self.delete_worker).grid(
@@ -5034,7 +5508,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         self.payroll_withholding_var = tk.StringVar(value="0")
         self.payroll_net_var = tk.StringVar(value="0 FC")
         self.payroll_mode_var = tk.StringVar(value="Espèces")
-        self.payroll_status_var = tk.StringVar(value="Payée")
+        self.payroll_status_var = tk.StringVar(value="Préparée")
         self.payroll_observations_var = tk.StringVar()
 
         ttk.Label(payroll_form, text="Travailleur").grid(row=0, column=0, sticky="w", pady=5)
@@ -5073,7 +5547,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         ttk.Combobox(
             payroll_form,
             textvariable=self.payroll_status_var,
-            values=["Payée", "En attente", "Avance seulement"],
+            values=["Préparée", "Validée", "Payée", "En attente", "Avance seulement"],
             state="readonly",
         ).grid(row=9, column=1, sticky="ew", pady=5)
         ttk.Label(payroll_form, text="Observations").grid(row=10, column=0, sticky="w", pady=5)
@@ -5133,7 +5607,9 @@ class WorkersPayrollWindow(BaseModuleWindow):
                 "NomComplet",
                 "Fonction",
                 "Telephone",
+                "Email",
                 "DateEmbauche",
+                "Anciennete",
                 "SalaireMensuel",
                 "Statut",
                 "TotalPaye",
@@ -5143,7 +5619,9 @@ class WorkersPayrollWindow(BaseModuleWindow):
                 "NomComplet": "Nom complet",
                 "Fonction": "Fonction",
                 "Telephone": "Téléphone",
+                "Email": "Adresse e-mail",
                 "DateEmbauche": "Embauche",
+                "Anciennete": "Ancienneté",
                 "SalaireMensuel": "Salaire mensuel",
                 "Statut": "Statut",
                 "TotalPaye": "Total payé",
@@ -5231,6 +5709,8 @@ class WorkersPayrollWindow(BaseModuleWindow):
             self.payroll_net_var.set("Calcul impossible")
 
     def save_worker(self) -> None:
+        if not self.ensure_module_writable("Travailleurs"):
+            return
         try:
             salary = parse_optional_float(self.worker_salary_var.get())
             if self.worker_edit_id:
@@ -5239,6 +5719,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
                     self.worker_name_var.get(),
                     self.worker_function_var.get(),
                     self.worker_phone_var.get(),
+                    self.worker_email_var.get(),
                     self.worker_address_var.get(),
                     self.hire_date_field.get_date(),
                     salary,
@@ -5252,6 +5733,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
                     self.worker_name_var.get(),
                     self.worker_function_var.get(),
                     self.worker_phone_var.get(),
+                    self.worker_email_var.get(),
                     self.worker_address_var.get(),
                     self.hire_date_field.get_date(),
                     salary,
@@ -5277,6 +5759,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         self.worker_name_var.set(str(row.get("NomComplet", "")))
         self.worker_function_var.set(str(row.get("Fonction", "")))
         self.worker_phone_var.set(str(row.get("Telephone", "")))
+        self.worker_email_var.set(str(row.get("Email", "")))
         self.worker_address_var.set(str(row.get("Adresse", "")))
         self.hire_date_field.set_date(str(row.get("DateEmbauche", today_iso()) or today_iso()))
         self.worker_salary_var.set(format_number(float(row.get("SalaireMensuel", 0) or 0)))
@@ -5286,6 +5769,8 @@ class WorkersPayrollWindow(BaseModuleWindow):
         self.message_var.set("Travailleur chargé. Modifiez les informations puis enregistrez.")
 
     def delete_worker(self) -> None:
+        if not self.ensure_module_writable("Travailleurs"):
+            return
         row = self.workers_table.selected_row()
         if row is None:
             messagebox.showwarning("Travailleurs", "Veuillez sélectionner un travailleur.")
@@ -5314,6 +5799,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         self.worker_name_var.set("")
         self.worker_function_var.set("")
         self.worker_phone_var.set("")
+        self.worker_email_var.set("")
         self.worker_address_var.set("")
         self.hire_date_field.set_date(today_iso())
         self.worker_salary_var.set("0")
@@ -5327,6 +5813,8 @@ class WorkersPayrollWindow(BaseModuleWindow):
                 return
 
     def save_payroll(self) -> None:
+        if not self.ensure_module_writable("Travailleurs", "Paies"):
+            return
         try:
             worker_id = self.selected_worker_id_for_payroll()
             gross = parse_optional_float(self.payroll_gross_var.get())
@@ -5365,6 +5853,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
                 message = "Paie enregistrée avec succès."
                 action = "Paie enregistrée"
             log_user_action(self, "Travailleurs", action, self.payroll_worker_var.get())
+            message += process_email_notifications_for_ui()
             self.reset_payroll_form()
             self.refresh_all()
             self.message_var.set(message)
@@ -5391,6 +5880,8 @@ class WorkersPayrollWindow(BaseModuleWindow):
         self.message_var.set("Paie chargée. Modifiez les informations puis enregistrez.")
 
     def delete_payroll(self) -> None:
+        if not self.ensure_module_writable("Travailleurs", "Paies"):
+            return
         row = self.payrolls_table.selected_row()
         if row is None:
             messagebox.showwarning("Paies", "Veuillez sélectionner une paie.")
@@ -5422,7 +5913,7 @@ class WorkersPayrollWindow(BaseModuleWindow):
         self.payroll_advance_var.set("0")
         self.payroll_withholding_var.set("0")
         self.payroll_mode_var.set("Espèces")
-        self.payroll_status_var.set("Payée")
+        self.payroll_status_var.set("Préparée")
         self.payroll_observations_var.set("")
         self.update_payroll_net_preview()
 
@@ -5440,7 +5931,10 @@ class StockWindow(BaseModuleWindow):
         self.after_idle(self.finish_initial_load)
 
     def finish_initial_load(self) -> None:
-        self.first_open_of_day = DatabaseHelper.initialize_stock_day(date.today())
+        if self.is_read_only_module("Stock"):
+            self.first_open_of_day = False
+        else:
+            self.first_open_of_day = DatabaseHelper.initialize_stock_day(date.today())
         self.refresh_data()
         if self.first_open_of_day:
             self.show_opening_message()
@@ -5511,7 +6005,8 @@ class StockWindow(BaseModuleWindow):
         self.refresh_data()
 
     def refresh_data(self) -> None:
-        DatabaseHelper.update_stock_closing(date.today())
+        if not self.is_read_only_module("Stock"):
+            DatabaseHelper.update_stock_closing(date.today())
         journal = DatabaseHelper.get_stock_journal(date.today())
         if journal:
             self.opening_var.set(
@@ -5608,6 +6103,8 @@ class StockWindow(BaseModuleWindow):
         return target_date, sacs, paquets, sel, huile
 
     def save_exit(self) -> None:
+        if not self.ensure_module_writable("Stock"):
+            return
         validated = self.validate_exit()
         if validated is None:
             return
@@ -5659,6 +6156,8 @@ class StockWindow(BaseModuleWindow):
         messagebox.showinfo("Stock", "La sortie a été chargée. Modifiez-la puis enregistrez.")
 
     def delete_exit(self) -> None:
+        if not self.ensure_module_writable("Stock"):
+            return
         row = self.table.selected_row()
         if row is None:
             messagebox.showwarning("Stock", "Veuillez sélectionner une sortie dans la grille.")
@@ -5685,6 +6184,8 @@ class StockWindow(BaseModuleWindow):
             messagebox.showerror("Stock", str(exc))
 
     def edit_stock_parameters(self) -> None:
+        if not self.ensure_module_writable("Stock"):
+            return
         current = DatabaseHelper.get_stock_configuration()
         if not current:
             messagebox.showwarning("Stock", "Impossible de charger la configuration du stock.")
@@ -5770,6 +6271,8 @@ class StockWindow(BaseModuleWindow):
         center_window(dialog)
 
     def open_stock_supply_window(self) -> None:
+        if not self.ensure_module_writable("Stock"):
+            return
         dialog = StockSupplyDialog(self)
         self.wait_window(dialog)
         self.refresh_data()
@@ -5785,7 +6288,7 @@ class StockWindow(BaseModuleWindow):
         self.refresh_day_lock_state()
 
     def close_window(self) -> None:
-        if not self.closing_message_shown:
+        if not self.is_read_only_module("Stock") and not self.closing_message_shown:
             DatabaseHelper.update_stock_closing(date.today())
             journal = DatabaseHelper.get_stock_journal(date.today())
             if journal:
@@ -6048,7 +6551,7 @@ class PrevisionWindow(BaseModuleWindow):
         form.pack(side="left", fill="y", padx=(0, 12))
 
         ttk.Label(form, text="Date prévue").grid(row=0, column=0, sticky="w", pady=6)
-        self.date_field = DateField(form, tomorrow_iso())
+        self.date_field = DateField(form, tomorrow_iso(), allow_future=True)
         self.date_field.grid(row=0, column=1, sticky="ew", pady=6)
         self.date_field.bind_change(self._on_date_change)
 
@@ -7077,6 +7580,7 @@ class OrdersWindow(BaseModuleWindow):
         self.selected_order_id = 0
         self.show_all_dates = False
         self.loaded_amount_due_rate: float | None = None
+        self.available_advance = 0.0
         self._clearing_order_selection = False
         self.build_ui()
         self.reset_form()
@@ -7100,7 +7604,9 @@ class OrdersWindow(BaseModuleWindow):
 
         ttk.Label(form, text="Client").grid(row=1, column=0, sticky="w", pady=6)
         self.client_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.client_var, width=28).grid(row=1, column=1, sticky="ew", pady=6)
+        self.client_entry = ttk.Entry(form, textvariable=self.client_var, width=28)
+        self.client_entry.grid(row=1, column=1, sticky="ew", pady=6)
+        self.client_entry.bind("<FocusOut>", lambda _event: self.refresh_client_advance())
 
         ttk.Label(form, text="Statut").grid(row=2, column=0, sticky="w", pady=6)
         self.status_var = tk.StringVar(value=ORDER_STATUSES[0])
@@ -7129,13 +7635,31 @@ class OrdersWindow(BaseModuleWindow):
         self.amount_received_var = tk.StringVar(value="0")
         ttk.Entry(form, textvariable=self.amount_received_var, width=28).grid(row=5, column=1, sticky="ew", pady=6)
 
-        ttk.Label(form, text="Dette").grid(row=6, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="Avance disponible").grid(row=6, column=0, sticky="w", pady=6)
+        self.advance_available_var = tk.StringVar(value=format_fc(0))
+        ttk.Label(form, textvariable=self.advance_available_var, foreground=PRIMARY_DARK_COLOR).grid(
+            row=6, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Avance utilisée").grid(row=7, column=0, sticky="w", pady=6)
+        self.advance_used_var = tk.StringVar(value=format_fc(0))
+        ttk.Label(form, textvariable=self.advance_used_var, foreground=PRIMARY_DARK_COLOR).grid(
+            row=7, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Nouvelle avance").grid(row=8, column=0, sticky="w", pady=6)
+        self.advance_generated_var = tk.StringVar(value=format_fc(0))
+        ttk.Label(form, textvariable=self.advance_generated_var, foreground=SUCCESS_COLOR).grid(
+            row=8, column=1, sticky="w", pady=6
+        )
+
+        ttk.Label(form, text="Dette").grid(row=9, column=0, sticky="w", pady=6)
         self.debt_var = tk.StringVar(value=format_fc(0))
         self.debt_label = ttk.Label(form, textvariable=self.debt_var, foreground=SUCCESS_COLOR)
-        self.debt_label.grid(row=6, column=1, sticky="w", pady=6)
+        self.debt_label.grid(row=9, column=1, sticky="w", pady=6)
 
         actions = ttk.Frame(form)
-        actions.grid(row=7, column=0, columnspan=2, pady=(14, 0))
+        actions.grid(row=10, column=0, columnspan=2, pady=(14, 0))
         self.save_button = ttk.Button(actions, text="Enregistrer", command=self.save_order)
         self.save_button.grid(row=0, column=0, padx=4, pady=4)
         self.edit_button = ttk.Button(actions, text="Modifier", command=self.load_order_for_edit)
@@ -7147,7 +7671,7 @@ class OrdersWindow(BaseModuleWindow):
 
         self.summary_var = tk.StringVar()
         ttk.Label(form, textvariable=self.summary_var, wraplength=360, justify="left").grid(
-            row=8, column=0, columnspan=2, sticky="ew", pady=(14, 0)
+            row=11, column=0, columnspan=2, sticky="ew", pady=(14, 0)
         )
 
         tables_container = ttk.Frame(content)
@@ -7215,6 +7739,9 @@ class OrdersWindow(BaseModuleWindow):
                 "NombreBacs",
                 "MontantAPercevoir",
                 "MontantRecu",
+                "AvanceUtilisee",
+                "AvanceGeneree",
+                "SoldeAvance",
                 "DetteInitiale",
                 "DettePayee",
                 "Dette",
@@ -7225,6 +7752,9 @@ class OrdersWindow(BaseModuleWindow):
                 "NombreBacs": "Bacs",
                 "MontantAPercevoir": "À percevoir",
                 "MontantRecu": "Reçu",
+                "AvanceUtilisee": "Avance utilisée",
+                "AvanceGeneree": "Nouvelle avance",
+                "SoldeAvance": "Solde avance",
                 "DetteInitiale": "Dette initiale",
                 "DettePayee": "Dette payée",
                 "Dette": "Dette restante",
@@ -7236,6 +7766,9 @@ class OrdersWindow(BaseModuleWindow):
                 "NombreBacs": lambda value: f"{int(value)}",
                 "MontantAPercevoir": lambda value: format_fc(float(value)),
                 "MontantRecu": lambda value: format_fc(float(value)),
+                "AvanceUtilisee": lambda value: format_fc(float(value)),
+                "AvanceGeneree": lambda value: format_fc(float(value)),
+                "SoldeAvance": lambda value: format_fc(float(value)),
                 "DetteInitiale": lambda value: format_fc(float(value)),
                 "DettePayee": lambda value: format_fc(float(value)),
                 "Dette": lambda value: format_fc(float(value)),
@@ -7244,6 +7777,7 @@ class OrdersWindow(BaseModuleWindow):
 
     def _on_date_change(self) -> None:
         self.show_all_dates = False
+        self.refresh_client_advance()
         self.refresh_orders()
 
     def _on_status_change(self, _event: object | None = None) -> None:
@@ -7257,6 +7791,21 @@ class OrdersWindow(BaseModuleWindow):
             return float(self.loaded_amount_due_rate)
         return float(ORDER_STATUS_RATES.get(normalized_status, 0))
 
+    def refresh_client_advance(self) -> None:
+        client = self.client_var.get().strip()
+        if not client:
+            self.available_advance = 0.0
+        else:
+            try:
+                self.available_advance = DatabaseHelper.get_client_advance_balance(
+                    client,
+                    self.date_field.get_date(),
+                    self.selected_order_id if self.edit_mode else 0,
+                )
+            except Exception:
+                self.available_advance = 0.0
+        self.recalculate_amounts()
+
     def recalculate_amounts(self) -> None:
         try:
             trays = int(float(self.trays_var.get() or "0"))
@@ -7267,12 +7816,14 @@ class OrdersWindow(BaseModuleWindow):
             amount_received = parse_optional_float(self.amount_received_var.get())
         except ValueError:
             amount_received = 0
-        debt = amount_due - amount_received
+        advance_used = min(self.available_advance, amount_due)
+        cash_needed = max(amount_due - advance_used, 0.0)
+        debt = max(cash_needed - amount_received, 0.0)
+        advance_generated = max(amount_received - cash_needed, 0.0)
         self.amount_due_var.set(format_fc(amount_due))
-        if amount_received > amount_due:
-            self.debt_var.set("Paiement trop élevé")
-            self.debt_label.configure(foreground=DANGER_COLOR)
-            return
+        self.advance_available_var.set(format_fc(self.available_advance))
+        self.advance_used_var.set(format_fc(advance_used))
+        self.advance_generated_var.set(format_fc(advance_generated))
         self.debt_var.set(format_fc(debt))
         self.debt_label.configure(foreground=DANGER_COLOR if debt > 0 else SUCCESS_COLOR)
 
@@ -7286,6 +7837,15 @@ class OrdersWindow(BaseModuleWindow):
         client = self.client_var.get().strip()
         if not client:
             messagebox.showwarning("Commandes", "Veuillez saisir le nom du client.")
+            return None
+        try:
+            self.available_advance = DatabaseHelper.get_client_advance_balance(
+                client,
+                target_date,
+                self.selected_order_id if self.edit_mode else 0,
+            )
+        except Exception as exc:
+            messagebox.showwarning("Commandes", str(exc))
             return None
         status = normalize_status_form_label(self.status_var.get().strip())
         if not status:
@@ -7311,13 +7871,8 @@ class OrdersWindow(BaseModuleWindow):
             return None
 
         amount_due = trays * self.get_status_rate(status)
-        if amount_received > amount_due:
-            messagebox.showwarning(
-                "Commandes",
-                "Le montant reçu ne peut pas dépasser le montant à percevoir.",
-            )
-            return None
-        debt = amount_due - amount_received
+        advance_used = min(self.available_advance, amount_due)
+        debt = max(amount_due - advance_used - amount_received, 0.0)
         return target_date, client, status, trays, amount_due, amount_received, debt
 
     def handle_duplicate_order(
@@ -7520,7 +8075,8 @@ class OrdersWindow(BaseModuleWindow):
                 f"Total bacs : {int(summary.get('TotalBacs', 0))}\n"
                 f"Montant attendu : {format_fc(float(summary.get('MontantAttendu', 0)))} | "
                 f"Montant reçu : {format_fc(float(summary.get('MontantRecu', 0)))} | "
-                f"Dettes : {format_fc(float(summary.get('TotalDettes', 0)))}"
+                f"Dettes : {format_fc(float(summary.get('TotalDettes', 0)))}\n"
+                f"Avances disponibles : {format_fc(float(summary.get('AvancesDisponibles', 0)))}"
             )
         else:
             try:
@@ -7530,6 +8086,8 @@ class OrdersWindow(BaseModuleWindow):
             total_bacs = sum(int(row["NombreBacs"]) for row in rows)
             total_due = sum(float(row["MontantAPercevoir"]) for row in rows)
             total_received = sum(float(row["MontantRecu"]) for row in rows)
+            advances_used = sum(float(row.get("AvanceUtilisee", 0) or 0) for row in rows)
+            advances_generated = sum(float(row.get("AvanceGeneree", 0) or 0) for row in rows)
             total_debt = sum(float(row["Dette"]) for row in rows)
             with_debt = sum(1 for row in rows if float(row["Dette"]) > 0)
             text = (
@@ -7538,7 +8096,9 @@ class OrdersWindow(BaseModuleWindow):
                 f"Total bacs : {total_bacs}\n"
                 f"Montant attendu : {format_fc(total_due)} | "
                 f"Montant reçu : {format_fc(total_received)} | "
-                f"Dettes : {format_fc(total_debt)}"
+                f"Dettes : {format_fc(total_debt)}\n"
+                f"Avances utilisées : {format_fc(advances_used)} | "
+                f"Nouvelles avances : {format_fc(advances_generated)}"
             )
         self.summary_var.set(text)
 
@@ -7550,6 +8110,11 @@ class OrdersWindow(BaseModuleWindow):
         self.status_var.set(normalize_status_form_label(row["Statut"]))
         self.trays_var.set(str(int(row["NombreBacs"])))
         self.amount_received_var.set(format_number(float(row["MontantRecu"])))
+        self.available_advance = DatabaseHelper.get_client_advance_balance(
+            str(row["Client"]),
+            str(row["DateCommande"]),
+            self.selected_order_id,
+        )
         if is_legacy_depositary_6000_status(row["Statut"]) and int(row["NombreBacs"]) > 0:
             self.loaded_amount_due_rate = float(row["MontantAPercevoir"]) / int(row["NombreBacs"])
         elif normalize_status_form_label(row["Statut"]) == DEPOSITARY_STATUS and int(row["NombreBacs"]) > 0:
@@ -7663,6 +8228,7 @@ class OrdersWindow(BaseModuleWindow):
         self.selected_order_id = 0
         self.loaded_amount_due_rate = None
         self.show_all_dates = False
+        self.available_advance = 0.0
         self.recalculate_amounts()
         self.refresh_day_lock_state()
 
@@ -8002,6 +8568,8 @@ class CashWindow(BaseModuleWindow):
         self.refresh_data()
 
     def save_cash(self) -> None:
+        if not self.ensure_module_writable("Caisse"):
+            return
         try:
             target_date = self.date_field.get_date()
             paid_debts = parse_optional_float(self.paid_debts_var.get())
@@ -8069,6 +8637,8 @@ class CashWindow(BaseModuleWindow):
         messagebox.showinfo("Caisse", "La fiche de caisse a été chargée.")
 
     def delete_cash(self) -> None:
+        if not self.ensure_module_writable("Caisse"):
+            return
         row = self.table.selected_row()
         if row is None:
             messagebox.showwarning("Caisse", "Veuillez sélectionner une fiche dans la grille.")
@@ -8437,6 +9007,8 @@ class CommissionsWindow(BaseModuleWindow):
         return False
 
     def save_commission(self) -> None:
+        if not self.ensure_module_writable("Commissions"):
+            return
         validated = self.validate_commission()
         if validated is None:
             return
@@ -8523,6 +9095,8 @@ class CommissionsWindow(BaseModuleWindow):
         messagebox.showinfo("Commissions", "La commission a été chargée. Modifiez-la puis enregistrez.")
 
     def delete_commission(self) -> None:
+        if not self.ensure_module_writable("Commissions"):
+            return
         row = self.table.selected_row()
         if row is None:
             messagebox.showwarning("Commissions", "Veuillez sélectionner une commission dans la grille.")

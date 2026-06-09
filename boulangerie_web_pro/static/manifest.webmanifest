@@ -1,0 +1,18 @@
+{
+  "name": "Boulangerie Lomoto Web Pro",
+  "short_name": "Lomoto",
+  "description": "Gestion connectée de la Boulangerie Lomoto",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f6f8",
+  "theme_color": "#b71924",
+  "icons": [
+    {
+      "src": "/brand-assets/logo-boulangerie-lomoto.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

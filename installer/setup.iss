@@ -2,7 +2,7 @@
   #define MyAppName "Boulangerie Lomoto"
 #endif
 #ifndef MyAppVersion
-#define MyAppVersion "1.3.18"
+#define MyAppVersion "1.4.0"
 #endif
 #ifndef MyAppPublisher
   #define MyAppPublisher "Kay Box Store"
@@ -43,15 +43,19 @@ Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Créer un raccourci sur le Bureau"; GroupDescription: "Raccourcis :"
+Name: "servermode"; Description: "PC serveur principal - héberge la base et l'accès Web"; GroupDescription: "Type d'installation :"; Flags: exclusive
+Name: "clientmode"; Description: "Poste client - se connecte au serveur principal existant"; GroupDescription: "Type d'installation :"; Flags: exclusive unchecked
 
 [Files]
 Source: "..\dist\Boulangerie Lomoto\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\deploy\email-settings.example.json"; DestDir: "{commonappdata}\BoulangerieLomoto"; DestName: "email-settings.example.json"; Flags: ignoreversion; Tasks: servermode
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Boulangerie Lomoto Web Pro 8787"""; Flags: runhidden; Tasks: servermode
 Filename: "{app}\{#MyAppExeName}"; Description: "Lancer {#MyAppName}"; Flags: nowait postinstall skipifsilent shellexec; Verb: "runas"
 
 [Code]
@@ -60,6 +64,7 @@ const
   WindowsServiceName = 'BoulangerieLomotoCentralServer';
   MainExeImageName = 'Boulangerie Lomoto.exe';
   ServiceExeImageName = 'Boulangerie Lomoto Service.exe';
+  ServerMarkerName = 'server-installation.flag';
 
 var
   RestartWindowsServiceAfterInstall: Boolean;
@@ -91,11 +96,41 @@ begin
 end;
 
 procedure RestartWindowsServiceIfNeeded();
+var
+  ResultCode: Integer;
 begin
-  if RestartWindowsServiceAfterInstall then
+  if not IsWindowsServiceInstalled() then
   begin
-    RunHiddenCommand('sc.exe start "' + WindowsServiceName + '"');
-    Sleep(2000);
+    Exec(
+      ExpandConstant('{app}\' + ServiceExeImageName),
+      '--startup auto install',
+      ExpandConstant('{app}'),
+      SW_HIDE,
+      ewWaitUntilTerminated,
+      ResultCode
+    );
+  end;
+  RunHiddenCommand('sc.exe config "' + WindowsServiceName + '" start= auto');
+  RunHiddenCommand('sc.exe start "' + WindowsServiceName + '"');
+  Sleep(2000);
+end;
+
+procedure ConfigureInstallationMode();
+var
+  MarkerPath: String;
+begin
+  MarkerPath := ExpandConstant('{app}\' + ServerMarkerName);
+  if WizardIsTaskSelected('servermode') then
+  begin
+    SaveStringToFile(MarkerPath, 'server', False);
+    RestartWindowsServiceIfNeeded();
+  end
+  else
+  begin
+    DeleteFile(MarkerPath);
+    RunHiddenCommand('sc.exe stop "' + WindowsServiceName + '"');
+    RunHiddenCommand('sc.exe delete "' + WindowsServiceName + '"');
+    RunHiddenCommand('netsh.exe advfirewall firewall delete rule name="Boulangerie Lomoto Web Pro 8787"');
   end;
 end;
 
@@ -205,5 +240,5 @@ begin
   if CurStep = ssInstall then
     StopInstalledProcesses()
   else if CurStep = ssPostInstall then
-    RestartWindowsServiceIfNeeded();
+    ConfigureInstallationMode();
 end;
