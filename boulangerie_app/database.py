@@ -44,6 +44,7 @@ PRIVILEGED_PASSWORD_LENGTH = 14
 LOGIN_FAILURE_LIMIT = 5
 LOGIN_LOCK_DURATIONS_MINUTES = (2, 5, 30)
 ACTIVE_SESSION_TTL_HOURS = 12
+ACTIVE_SESSION_STALE_MINUTES = 3
 DEFAULT_ADMIN_FULL_NAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_FULL_NAME", "Augustin Kayembe")
 DEFAULT_ADMIN_USERNAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_USERNAME", "a.kayembe")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_PASSWORD", "010203")
@@ -117,6 +118,8 @@ class DatabaseHelper:
     _execution_context = threading.local()
     _current_session_identifiant = ""
     _current_session_token = ""
+    _email_delivery_lock = threading.Lock()
+    _email_delivery_running = False
 
     @classmethod
     def set_storage_root(cls, base_dir: Path) -> None:
@@ -1651,6 +1654,59 @@ class DatabaseHelper:
         )
 
     @classmethod
+    def _queue_password_changed_email(
+        cls,
+        connection: sqlite3.Connection,
+        full_name: str,
+        identifiant: str,
+        email: str,
+        password: str,
+        role: str,
+    ) -> None:
+        subject = "Boulangerie Lomoto - Nouveau mot de passe"
+        text_body = (
+            f"Bonjour {full_name},\n\n"
+            "Le mot de passe de votre compte Boulangerie Lomoto a ete modifie.\n\n"
+            f"Identifiant : {identifiant}\n"
+            f"Nouveau mot de passe : {password}\n"
+            f"Role : {role}\n"
+            f"Application : {APP_PUBLIC_URL}\n\n"
+            "Si vous n'avez pas demande cette modification, contactez immediatement l'administrateur.\n"
+            "Ne transmettez jamais votre mot de passe a une autre personne."
+            + cls._email_text_footer()
+        )
+        details = (
+            '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" '
+            'style="border-collapse:collapse;border:1px solid #d9e1ec;border-radius:8px;overflow:hidden;">'
+            '<tr><td style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Identifiant</td>'
+            f'<td style="padding:12px 14px;border-bottom:1px solid #e2e8f0;font-weight:700;">{escape(identifiant)}</td></tr>'
+            '<tr><td style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Nouveau mot de passe</td>'
+            f'<td style="padding:12px 14px;border-bottom:1px solid #e2e8f0;font-weight:700;">{escape(password)}</td></tr>'
+            '<tr><td style="padding:12px 14px;background:#f8fafc;color:#64748b;">Role</td>'
+            f'<td style="padding:12px 14px;font-weight:700;">{escape(role)}</td></tr>'
+            "</table>"
+            f'<p style="margin:18px 0 0;"><a href="{escape(APP_PUBLIC_URL)}" '
+            'style="display:inline-block;background:#c5162d;color:#ffffff;text-decoration:none;'
+            'font-weight:700;padding:12px 18px;border-radius:7px;">Ouvrir l\'application</a></p>'
+            '<div style="margin-top:18px;padding:14px 16px;border-left:4px solid #c5162d;background:#fff7ed;color:#7c2d12;">'
+            "<strong>Securite :</strong> si cette modification ne vient pas de vous, contactez l'administrateur."
+            "</div>"
+        )
+        html_body = cls._email_html_layout(
+            "Nouveau mot de passe",
+            f"Bonjour {full_name}, votre mot de passe Boulangerie Lomoto a ete modifie.",
+            details,
+        )
+        cls._queue_email_notification(
+            connection,
+            "Mot de passe modifie",
+            email,
+            subject,
+            text_body,
+            html_body,
+        )
+
+    @classmethod
     def process_pending_email_notifications(cls, limit: int = 20) -> dict[str, int]:
         from .email_service import load_email_settings, send_transactional_email
 
@@ -1803,6 +1859,39 @@ class DatabaseHelper:
             """
         )
         return cls.process_pending_email_notifications(limit)
+
+    @classmethod
+    def trigger_email_delivery_async(cls, limit: int = 20) -> dict[str, Any]:
+        pending = int(
+            cls._fetch_value(
+                """
+                SELECT COUNT(*)
+                FROM NotificationsEmail
+                WHERE Statut NOT IN ('Envoye', 'EnvoyÃ©', 'Mis en file')
+                """
+            )
+            or 0
+        )
+
+        with cls._email_delivery_lock:
+            if cls._email_delivery_running:
+                return {"queued": pending, "workerStarted": 0, "alreadyRunning": 1}
+            cls._email_delivery_running = True
+
+        def worker() -> None:
+            try:
+                cls.process_pending_email_notifications(limit)
+            finally:
+                with cls._email_delivery_lock:
+                    cls._email_delivery_running = False
+
+        thread = threading.Thread(
+            target=worker,
+            name="boulangerie-email-delivery",
+            daemon=True,
+        )
+        thread.start()
+        return {"queued": pending, "workerStarted": 1, "alreadyRunning": 0}
 
     @classmethod
     def create_initial_admin(
@@ -2001,6 +2090,24 @@ class DatabaseHelper:
                         """,
                         (full_name, normalized_email, role, original_identifiant),
                     )
+            if normalized_password and cursor.rowcount:
+                updated_user = connection.execute(
+                    """
+                    SELECT NomComplet, Identifiant, IFNULL(Email, '') AS Email, Role
+                    FROM Utilisateurs
+                    WHERE Identifiant = ?
+                    """,
+                    (original_identifiant,),
+                ).fetchone()
+                if updated_user is not None:
+                    cls._queue_password_changed_email(
+                        connection,
+                        str(updated_user["NomComplet"] or full_name),
+                        str(updated_user["Identifiant"] or normalized_identifiant),
+                        str(updated_user["Email"] or ""),
+                        normalized_password,
+                        str(updated_user["Role"] or role),
+                    )
             return cursor.rowcount
 
     @classmethod
@@ -2139,7 +2246,7 @@ class DatabaseHelper:
         with cls.connect() as connection:
             row = connection.execute(
                 """
-                SELECT MotDePasse, Role, NomComplet
+                SELECT MotDePasse, Role, NomComplet, IFNULL(Email, '') AS Email
                 FROM Utilisateurs
                 WHERE Identifiant = ?
                 """,
@@ -2161,17 +2268,34 @@ class DatabaseHelper:
             if cls.verify_password(new_password, stored_password):
                 raise ValueError("Le nouveau mot de passe doit etre different de l'ancien.")
 
+            normalized_email = cls._normalize_email(str(row["Email"] or ""))
+            if not normalized_email:
+                normalized_email = cls._user_email_for_save(
+                    connection,
+                    "",
+                    normalized_identifiant,
+                    normalized_identifiant,
+                )
             connection.execute(
                 """
                 UPDATE Utilisateurs
-                SET MotDePasse = ?, MotDePasseLisible = ?
+                SET MotDePasse = ?, MotDePasseLisible = ?, Email = ?
                 WHERE Identifiant = ?
                 """,
                 (
                     cls.hash_password(new_password),
                     "",
+                    normalized_email,
                     normalized_identifiant,
                 ),
+            )
+            cls._queue_password_changed_email(
+                connection,
+                str(row["NomComplet"] or normalized_identifiant),
+                normalized_identifiant,
+                normalized_email,
+                new_password,
+                str(row["Role"] or ""),
             )
 
     @classmethod
@@ -2201,12 +2325,41 @@ class DatabaseHelper:
         )
 
     @classmethod
+    def _delete_inactive_active_sessions(cls, connection: sqlite3.Connection, now: datetime | None = None) -> None:
+        cutoff = (now or datetime.now()) - timedelta(minutes=ACTIVE_SESSION_STALE_MINUTES)
+        connection.execute(
+            "DELETE FROM SessionsActives WHERE DerniereActivite <= ?",
+            (cls._session_datetime_text(cutoff),),
+        )
+
+    @staticmethod
+    def _same_session_context(
+        row: sqlite3.Row | dict[str, Any],
+        platform: str,
+        device_name: str,
+        client_address: str,
+    ) -> bool:
+        data = dict(row)
+        existing_platform = str(data.get("Plateforme", "") or "").strip().lower()
+        platform_text = platform.strip().lower()
+        existing_device = str(data.get("NomAppareil", "") or "").strip()
+        device_text = device_name.strip()[:120]
+        existing_address = str(data.get("AdresseIP", "") or "").strip()
+        address_text = client_address.strip()[:80]
+        if existing_platform != platform_text:
+            return False
+        if platform_text == "web":
+            return bool(existing_device and existing_device == device_text)
+        return bool(existing_device and existing_device == device_text and existing_address == address_text)
+
+    @classmethod
     def get_active_session(cls, identifiant: str) -> dict[str, Any] | None:
         normalized_identifiant = identifiant.strip()
         if not normalized_identifiant:
             return None
         with cls.connect() as connection:
             cls._delete_expired_active_sessions(connection)
+            cls._delete_inactive_active_sessions(connection)
             row = connection.execute(
                 """
                 SELECT Identifiant, Plateforme, NomAppareil, AdresseIP, DateConnexion, DerniereActivite, ExpireLe
@@ -2241,6 +2394,7 @@ class DatabaseHelper:
 
         with cls.connect() as connection:
             cls._delete_expired_active_sessions(connection, now)
+            cls._delete_inactive_active_sessions(connection, now)
             existing = connection.execute(
                 """
                 SELECT Identifiant, SessionToken, Plateforme, NomAppareil, AdresseIP,
@@ -2252,7 +2406,8 @@ class DatabaseHelper:
             ).fetchone()
 
             if existing is not None and not hmac.compare_digest(str(existing["SessionToken"]), normalized_token):
-                if not force:
+                same_context = cls._same_session_context(existing, platform_text, device_text, address_text)
+                if not force and not same_context:
                     return {
                         "ok": False,
                         "conflict": True,
@@ -2292,6 +2447,7 @@ class DatabaseHelper:
         now = datetime.now()
         with cls.connect() as connection:
             cls._delete_expired_active_sessions(connection, now)
+            cls._delete_inactive_active_sessions(connection, now)
             row = connection.execute(
                 """
                 SELECT SessionToken
@@ -2314,8 +2470,27 @@ class DatabaseHelper:
                     normalized_identifiant,
                     normalized_token,
                 ),
-            )
+                )
             return True
+
+    @classmethod
+    def list_active_sessions(cls) -> list[dict[str, Any]]:
+        with cls.connect() as connection:
+            cls._delete_expired_active_sessions(connection)
+            cls._delete_inactive_active_sessions(connection)
+            rows = connection.execute(
+                """
+                SELECT Identifiant, Plateforme, NomAppareil, AdresseIP,
+                       DateConnexion, DerniereActivite, ExpireLe
+                FROM SessionsActives
+                ORDER BY DerniereActivite DESC
+                """
+            ).fetchall()
+            return [
+                result
+                for result in (cls._active_session_to_dict(row) for row in rows)
+                if result is not None
+            ]
 
     @classmethod
     def close_active_session(cls, identifiant: str, session_token: str = "") -> None:
@@ -2420,14 +2595,32 @@ class DatabaseHelper:
 
     @classmethod
     def list_users(cls) -> list[dict[str, Any]]:
-        return cls._fetch_all(
-            """
-            SELECT Id, NomComplet, Identifiant, IFNULL(Email, '') AS Email,
-                   '********' AS MotDePasse, Role
-            FROM Utilisateurs
-            ORDER BY Id
-            """
-        )
+        with cls.connect() as connection:
+            cls._delete_expired_active_sessions(connection)
+            cls._delete_inactive_active_sessions(connection)
+            rows = connection.execute(
+                """
+                SELECT
+                    u.Id,
+                    u.NomComplet,
+                    u.Identifiant,
+                    IFNULL(u.Email, '') AS Email,
+                    '********' AS MotDePasse,
+                    u.Role,
+                    CASE WHEN s.Identifiant IS NULL THEN 'Hors ligne' ELSE 'En ligne' END AS ConnexionStatut,
+                    CASE WHEN s.Identifiant IS NULL THEN 0 ELSE 1 END AS SessionActive,
+                    IFNULL(s.Plateforme, '') AS SessionPlateforme,
+                    IFNULL(s.NomAppareil, '') AS SessionAppareil,
+                    IFNULL(s.AdresseIP, '') AS SessionAdresseIP,
+                    IFNULL(s.DateConnexion, '') AS DateConnexion,
+                    IFNULL(s.DerniereActivite, '') AS DerniereActivite
+                FROM Utilisateurs u
+                LEFT JOIN SessionsActives s
+                  ON LOWER(s.Identifiant) = LOWER(u.Identifiant)
+                ORDER BY u.Id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     @classmethod
     def count_admins(cls) -> int:

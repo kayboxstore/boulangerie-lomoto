@@ -273,6 +273,14 @@ def _delete_user_sessions(identifiant: str) -> None:
         pass
 
 
+def _trigger_email_delivery(limit: int = 20) -> dict[str, Any]:
+    try:
+        return DatabaseHelper.trigger_email_delivery_async(limit)
+    except Exception:
+        _log_internal_error("email delivery trigger")
+        return {"queued": 0, "workerStarted": 0, "error": 1}
+
+
 def _ensure_login_allowed(client_ip: str) -> None:
     now = time.time()
     with LOGIN_LOCK:
@@ -875,6 +883,9 @@ class WebProHandler(BaseHTTPRequestHandler):
         if path == "/api/me":
             self._send_json({"ok": True, "user": _public_session(session)})
             return
+        if path == "/api/session/ping":
+            self._send_json({"ok": True, "user": _public_session(session)})
+            return
         if session.get("mustChangePassword"):
             raise PermissionError("Vous devez changer le mot de passe initial avant de continuer.")
         if path == "/api/dashboard":
@@ -1067,6 +1078,15 @@ class WebProHandler(BaseHTTPRequestHandler):
                 _record_login_failure(client_ip)
                 raise PermissionError("Identifiant ou mot de passe incorrect.")
             _clear_login_failures(client_ip)
+            existing_token = self._session_token()
+            existing_session = _get_session(existing_token)
+            if existing_session is not None and str(existing_session.get("identifiant", "")).lower() == str(user.identifiant).lower():
+                _log_web_activity(existing_session, "Connexion", "Session web reprise", "Reconnexion sur le meme navigateur.")
+                self._send_json(
+                    {"ok": True, "user": _public_session(existing_session)},
+                    extra_headers=self._session_cookie_headers(existing_token),
+                )
+                return
             session = _create_session(user)
             session_result = DatabaseHelper.open_active_session(
                 str(session.get("identifiant", "")),
@@ -1113,12 +1133,24 @@ class WebProHandler(BaseHTTPRequestHandler):
                 _clean(payload.get("currentPassword")),
                 _clean(payload.get("newPassword")),
             )
+            email_result = _trigger_email_delivery(20)
             _log_web_activity(session, "Utilisateurs", "Mot de passe modifié", str(session.get("identifiant", "")))
             _delete_user_sessions(str(session.get("identifiant", "")))
             self._send_json(
-                {"ok": True, "reauthenticate": True},
+                {"ok": True, "reauthenticate": True, "email": email_result},
                 extra_headers=self._session_cookie_headers(clear=True),
             )
+            return
+        if path == "/api/users/disconnect":
+            _require_admin(session, "la deconnexion d'un utilisateur")
+            identifiant = _clean(payload.get("identifiant")).lower()
+            if not identifiant:
+                raise ValueError("Identifiant utilisateur manquant.")
+            if identifiant == str(session.get("identifiant", "")).lower():
+                raise ValueError("Vous ne pouvez pas fermer votre propre session depuis cette action.")
+            _delete_user_sessions(identifiant)
+            _log_web_activity(session, "Utilisateurs", "Session utilisateur fermee", identifiant)
+            self._send_json({"ok": True, "rows": DatabaseHelper.list_users()})
             return
         if path == "/api/email/retry":
             _require_admin(session, "la relance des notifications par e-mail")
@@ -1359,7 +1391,7 @@ class WebProHandler(BaseHTTPRequestHandler):
             else:
                 payroll_id = DatabaseHelper.add_payroll(*args)
                 _log_web_activity(session, "Travailleurs", "Paie enregistrée", f"{payroll_id} | {args[1].isoformat()} | Travailleur {args[0]}")
-            email_result = DatabaseHelper.process_pending_email_notifications(20)
+            email_result = _trigger_email_delivery(20)
             self._send_json(
                 {
                     "ok": True,
@@ -1404,7 +1436,7 @@ class WebProHandler(BaseHTTPRequestHandler):
                     raise ValueError("Le mot de passe est obligatoire pour un nouvel utilisateur.")
                 DatabaseHelper.add_user(full_name, identifiant, password, role, email)
                 _log_web_activity(session, "Utilisateurs", "Utilisateur ajouté", f"{identifiant} | {role}")
-            email_result = DatabaseHelper.process_pending_email_notifications(20)
+            email_result = _trigger_email_delivery(20)
             self._send_json({"ok": True, "email": email_result, "emailStatus": DatabaseHelper.get_email_notification_status()})
             return
         if path == "/api/reports/generate":

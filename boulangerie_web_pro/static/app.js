@@ -46,6 +46,8 @@ const state = {
   historyPage: 1,
 };
 
+let heartbeatTimer = null;
+
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -88,6 +90,7 @@ function isDirectorGeneral() {
 
 function setState(patch) {
   Object.assign(state, patch);
+  syncHeartbeat();
   render();
 }
 
@@ -121,6 +124,31 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function syncHeartbeat() {
+  if (state.user && !heartbeatTimer) {
+    heartbeatTimer = window.setInterval(sendHeartbeat, 30000);
+  } else if (!state.user && heartbeatTimer) {
+    window.clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+async function sendHeartbeat() {
+  if (!state.user) return;
+  try {
+    await api("/api/session/ping");
+  } catch {
+    if (!state.user) return;
+    state.user = null;
+    state.active = "dashboard";
+    state.loading = false;
+    state.notice = "";
+    state.error = "Votre session a ete fermee. Reconnectez-vous pour continuer.";
+    syncHeartbeat();
+    render();
+  }
+}
+
 async function boot() {
   localStorage.removeItem("lomoto.webpro.token");
   try {
@@ -140,6 +168,7 @@ async function boot() {
   } catch {
     state.user = null;
   }
+  syncHeartbeat();
   render();
 }
 
@@ -174,7 +203,7 @@ function loginView() {
       <section class="login-card">
         <div class="brand-mark">
           <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Logo" />
-          <span>Version web professionnelle 1.4.5</span>
+          <span>Version web professionnelle 1.4.6</span>
         </div>
         <p class="eyebrow">Application connectée</p>
         <h1>BOULANGERIE LOMOTO</h1>
@@ -205,7 +234,7 @@ function shell(content) {
             <div>
               <strong>BOULANGERIE LOMOTO</strong>
               <span>Pain Lia o Tonda</span>
-              <small>Données Windows v${escapeHtml(state.user?.appVersion || "1.4.5")}</small>
+              <small>Données Windows v${escapeHtml(state.user?.appVersion || "1.4.6")}</small>
             </div>
           </div>
           <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-expanded="false" aria-controls="sidebarMenu" title="Ouvrir le menu">☰</button>
@@ -231,7 +260,7 @@ function shell(content) {
             </div>
             <div class="version-card">
               <span>Version</span>
-              <strong>${escapeHtml(state.user?.appVersion || "1.4.5")}</strong>
+              <strong>${escapeHtml(state.user?.appVersion || "1.4.6")}</strong>
             </div>
           </div>
         </header>
@@ -293,7 +322,7 @@ function table(rows, columns, headings, actions = []) {
             ${rows?.length ? rows.map((row) => `
               <tr>
                 ${columns.map((key) => `<td>${formatCell(key, row[key])}</td>`).join("")}
-                ${actions.length ? `<td class="row-actions">${actions.map((action) => `<button data-row-action="${action.name}" data-row="${encodeURIComponent(JSON.stringify(row))}">${escapeHtml(action.label)}</button>`).join("")}</td>` : ""}
+                ${actions.length ? `<td class="row-actions">${rowActionButtons(row, actions)}</td>` : ""}
               </tr>
             `).join("") : `<tr><td colspan="${columns.length + (actions.length ? 1 : 0)}">Aucune donnée disponible.</td></tr>`}
           </tbody>
@@ -303,8 +332,21 @@ function table(rows, columns, headings, actions = []) {
   `;
 }
 
+function rowActionButtons(row, actions) {
+  const visibleActions = actions.filter((action) => !action.visible || action.visible(row));
+  if (!visibleActions.length) return `<span class="muted-cell">-</span>`;
+  return visibleActions.map((action) => {
+    const disabled = action.disabled && action.disabled(row);
+    return `<button data-row-action="${action.name}" data-row="${encodeURIComponent(JSON.stringify(row))}" ${disabled ? "disabled" : ""}>${escapeHtml(action.label)}</button>`;
+  }).join("");
+}
+
 function formatCell(key, value) {
   const lower = key.toLowerCase();
+  if (key === "ConnexionStatut") {
+    const online = String(value || "").toLowerCase().includes("en ligne");
+    return `<span class="session-status ${online ? "online" : "offline"}">${escapeHtml(value || "Hors ligne")}</span>`;
+  }
   if (lower.startsWith("date") || lower.endsWith("date") || lower.includes("date")) {
     return escapeHtml(formatDate(value));
   }
@@ -709,6 +751,17 @@ async function usersView() {
   const emailData = emailPayload?.data || {};
   const emailSettings = emailData.settings || {};
   const emailCounts = emailData.counts || {};
+  const userActions = [
+    { name: "edit-user", label: "Modifier" },
+    { name: "delete-user", label: "Supprimer" },
+    {
+      name: "disconnect-user",
+      label: "Déconnecter",
+      visible: (row) => state.user?.role === "Admin"
+        && Number(row.SessionActive || 0) > 0
+        && String(row.Identifiant || "").toLowerCase() !== String(state.user?.identifiant || "").toLowerCase(),
+    },
+  ];
   return shell(`
     <section class="panel toolbar">
       <div><p class="eyebrow">Sécurité du compte</p><strong>Gestion des utilisateurs et mots de passe</strong></div>
@@ -792,7 +845,12 @@ async function usersView() {
         ${table(emailData.recent || [], ["DateCreation", "TypeNotification", "Destinataire", "Sujet", "Statut", "NombreTentatives", "DerniereErreur"], ["Création", "Type", "Destinataire", "Sujet", "Statut", "Tentatives", "Dernière erreur"])}
       </section>
     ` : ""}
-    ${table(payload.rows || [], ["NomComplet", "Identifiant", "Email", "Role"], ["Nom complet", "Identifiant", "E-mail", "Rôle"], [{ name: "edit-user", label: "Modifier" }, { name: "delete-user", label: "Supprimer" }])}
+    ${table(
+      payload.rows || [],
+      ["NomComplet", "Identifiant", "Email", "Role", "ConnexionStatut", "SessionPlateforme", "SessionAdresseIP", "DerniereActivite"],
+      ["Nom complet", "Identifiant", "E-mail", "Rôle", "Connexion", "Plateforme", "Adresse IP", "Dernière activité"],
+      userActions,
+    )}
   `);
 }
 
@@ -1305,6 +1363,8 @@ async function submitPayroll(event) {
     let notice = "Paie enregistrée.";
     if (Number(email.sent || 0) > 0) {
       notice += ` Notification envoyée par e-mail (${email.sent}).`;
+    } else if (Number(email.queued || 0) > 0 || Number(email.workerStarted || 0) > 0) {
+      notice += " Notification placee dans la file d'envoi.";
     } else if (!settings.configured) {
       notice += " Notification conservée en attente : configurez le service e-mail dans Utilisateurs.";
     } else if (Number(email.failed || 0) > 0) {
@@ -1329,6 +1389,8 @@ async function submitUser(event) {
     let notice = "Utilisateur enregistré.";
     if (Number(email.sent || 0) > 0) {
       notice += ` E-mail envoyé (${email.sent}).`;
+    } else if (Number(email.queued || 0) > 0 || Number(email.workerStarted || 0) > 0) {
+      notice += " E-mail place dans la file d'envoi.";
     } else if (!settings.configured && Number(email.pending || 0) > 0) {
       notice += " E-mail en attente : configurez le service e-mail.";
     } else if (Number(email.failed || 0) > 0) {
@@ -1354,7 +1416,7 @@ async function submitPassword(event) {
         user: null,
         active: "dashboard",
         error: "",
-        notice: "Mot de passe modifié. Reconnectez-vous avec le nouveau mot de passe.",
+        notice: "Mot de passe modifie. Le mail est place dans la file d'envoi. Reconnectez-vous avec le nouveau mot de passe.",
       });
       return;
     }
@@ -1648,6 +1710,13 @@ async function handleRowAction(action, rowText) {
     if (!row.Identifiant) return;
     if (!confirm(`Supprimer le compte ${row.Identifiant} ?`)) return;
     await remove(`/api/users?identifiant=${encodeURIComponent(row.Identifiant)}`, "Utilisateur supprimé.");
+    return;
+  }
+  if (action === "disconnect-user") {
+    if (!row.Identifiant) return;
+    if (!confirm(`Fermer la session de ${row.Identifiant} ?`)) return;
+    await post("/api/users/disconnect", { identifiant: row.Identifiant });
+    setState({ notice: `Session fermee pour ${row.Identifiant}.`, error: "" });
   }
 }
 

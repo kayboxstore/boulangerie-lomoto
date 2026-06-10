@@ -798,7 +798,11 @@ def email_delivery_message(result: dict[str, Any] | None) -> str:
 
 def process_email_notifications_for_ui(limit: int = 20) -> str:
     try:
-        return email_delivery_message(DatabaseHelper.process_pending_email_notifications(limit))
+        result = DatabaseHelper.trigger_email_delivery_async(limit)
+        queued = int(result.get("queued", 0) or 0) if isinstance(result, dict) else 0
+        if queued:
+            return " Notification e-mail placée dans la file d'envoi."
+        return ""
     except Exception as exc:
         return f" Notification e-mail non traitée : {exc}"
 
@@ -5194,7 +5198,9 @@ class ChangePasswordWindow(BaseModuleWindow):
 
         self.message_var.set("")
         log_user_action(self, "Sécurité", "Mot de passe modifié", "Changement du mot de passe du compte connecté.")
-        messagebox.showinfo("Sécurité", "Le mot de passe a été modifié avec succès.")
+        message = "Le mot de passe a été modifié avec succès."
+        message += process_email_notifications_for_ui()
+        messagebox.showinfo("Sécurité", message)
         if self.on_password_changed is not None:
             self.on_password_changed()
         self.destroy()

@@ -734,6 +734,30 @@ tbody tr:hover {
   padding: 7px 10px;
 }
 
+.muted-cell {
+  color: var(--muted);
+}
+
+.session-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.session-status.online {
+  color: #0f5132;
+  background: #d1fae5;
+}
+
+.session-status.offline {
+  color: #475569;
+  background: #e2e8f0;
+}
+
 .pagination-bar {
   display: flex;
   align-items: center;

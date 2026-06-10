@@ -312,8 +312,11 @@ def _is_method_allowed_for_session(method_name: str, args: list[Any], session: d
             return False
         return bool(args) and str(args[0]) == str(session.get("identifiant", ""))
 
+    if method_name == "trigger_email_delivery_async":
+        return True
+
     if method_name == "process_pending_email_notifications":
-        return role == "Caissier"
+        return role in {"Admin", "Caissier"}
 
     if role == "Directeur Général":
         return (
