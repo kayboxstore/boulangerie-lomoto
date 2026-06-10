@@ -911,19 +911,6 @@ tbody tr:hover {
   color: var(--muted);
 }
 
-.legal-note {
-  margin-top: 16px;
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #fff8eb;
-  color: #4c3500;
-}
-
-.legal-note p {
-  margin-bottom: 0;
-}
-
 .legal-footer {
   display: grid;
   gap: 6px;
