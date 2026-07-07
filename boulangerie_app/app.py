@@ -67,6 +67,18 @@ from .server_host import (
     start_windows_service,
     stop_windows_service,
 )
+from .client_config import (
+    get_accent_color,
+    get_contact_email,
+    get_contact_phone,
+    get_initiator_name,
+    get_legal_notice,
+    get_logo_path,
+    get_primary_color,
+    get_public_url,
+    get_responsible_name,
+    get_roles_config,
+)
 from .status_labels import (
     COMMISSION_FILTERS,
     DEPOSITARY_STATUS,
@@ -77,36 +89,58 @@ from .status_labels import (
     normalize_status_form_label,
     normalize_status_label,
 )
+from .license_manager import activate_device, deactivate_device, status_payload, validate_current_license
 from .updater import SessionNotice, UpdateCheckResult, UpdateChecker, UpdateInfo
 from .version import APP_DEMO, APP_NAME, APP_VERSION
 
 UI_FONT_FAMILY = "Poppins"
 UI_FONT_SIZE = 11
 UI_FONT = (UI_FONT_FAMILY, UI_FONT_SIZE)
-APP_BACKGROUND = "#dfeaf4"
-MODULE_BACKGROUND = "#eef3f8"
-SURFACE_BACKGROUND = "#fff8ed"
-SURFACE_ALT_BACKGROUND = "#eef3f8"
-PRIMARY_COLOR = "#b22222"
+APP_BACKGROUND = "#edf1f6"
+MODULE_BACKGROUND = "#f4f7fb"
+SURFACE_BACKGROUND = "#ffffff"
+SURFACE_ALT_BACKGROUND = "#f7f9fc"
+PRIMARY_COLOR = get_primary_color() or "#b22222"
 PRIMARY_DARK_COLOR = "#8b0000"
-ACCENT_COLOR = "#1f4e78"
-ACCENT_DARK_COLOR = "#1b2d5d"
-WARNING_COLOR = "#b36b00"
+ACCENT_COLOR = get_accent_color() or "#1f4e78"
+ACCENT_DARK_COLOR = "#102a43"
+WARNING_COLOR = "#a96a00"
 TEXT_COLOR = "#111827"
 MUTED_TEXT_COLOR = "#5a6570"
 SUCCESS_COLOR = "#2f5d3a"
 DANGER_COLOR = "#8b0000"
-BORDER_COLOR = "#c8d4df"
+BORDER_COLOR = "#d8dee7"
+DASHBOARD_ACCENT_COLOR = "#b71924"
+DASHBOARD_NAVY_COLOR = "#102a43"
+DASHBOARD_CARD_BG = "#fbfcff"
+DASHBOARD_SOFT_BG = "#f4f7fb"
 TABLE_SELECTED_COLOR = "#d9ecff"
-OWNER_NAME = "Augustin Kayembe"
-OWNER_PHONE = "+243 991 599 600"
-OWNER_EMAIL_PRIMARY = "kayboxstore@gmail.com"
+# Surfaces des boutons secondaires (aspect moderne, plat, cohérent web)
+BUTTON_BG = "#eef2f8"
+BUTTON_HOVER_BG = "#dfe7f2"
+BUTTON_BORDER = "#c6cfda"
+DISABLED_BG = "#e6e9ef"
+FIELD_FOCUS_COLOR = "#102a43"
+
+# Statuts et localisations des prévisions de commande.
+# Ces constantes étaient référencées dans PrevisionWindow sans jamais être
+# définies : le module « Prévisions » plantait (NameError) dès son ouverture.
+# Seuls « Dépositaire » et « Maman » sont des statuts de prévision valides
+# (cf. message de validation). La localisation ne concerne que les dépositaires
+# et reste librement saisissable (voir combobox), ces valeurs servant de
+# suggestions à adapter par l'exploitant.
+PREVISION_STATUSES = (DEPOSITARY_STATUS, "Maman")
+PREVISION_LOCATIONS = ("Siège", "Dépôt 1", "Dépôt 2", "Point de vente")
+GIS_RESPONSIBLE_NAME = get_responsible_name()
+SOLUTION_INITIATOR_NAME = get_initiator_name()
+OWNER_PHONE = get_contact_phone()
+OWNER_EMAIL_PRIMARY = get_contact_email()
 OWNER_EMAIL_SECONDARY = "kayboxstore@outlook.fr"
 FORM_LOGO_SIZE = 68
 DASHBOARD_LOGO_SIZE = 80
 SETTINGS_LOGO_SIZE = 70
 STOCK_DIALOG_LOGO_SIZE = 60
-AUTO_LOCK_TIMEOUT_MS = 10 * 60 * 1000
+AUTO_LOCK_TIMEOUT_MS = 15 * 60 * 1000
 AUTO_LOCK_EVENT_SEQUENCES = ("<KeyPress>", "<Button>", "<MouseWheel>", "<B1-Motion>")
 NO_DEBT_PAYMENT_MESSAGE = "Personne n'a payé aujourd'hui parce qu'il n'y a pas de dettes accumulées."
 
@@ -129,6 +163,31 @@ ROLE_MODULE_ACCESS = {
     "Gestionnaire de stock": {"Stock"},
     "Gestionnaire des commandes": {"Commandes", "Commissions"},
 }
+MODULE_ID_TO_WINDOWS_LABEL = {
+    "cash": "Caisse",
+    "stock": "Stock",
+    "production": "Production",
+    "orders": "Commandes",
+    "commissions": "Commissions",
+    "workers": "Travailleurs",
+    "users": "Utilisateurs",
+}
+
+
+def _apply_configured_role_modules() -> None:
+    configured_roles = get_roles_config()
+    if not configured_roles:
+        return
+    for role, modules in configured_roles.items():
+        labels = {MODULE_ID_TO_WINDOWS_LABEL[module] for module in modules if module in MODULE_ID_TO_WINDOWS_LABEL}
+        if labels:
+            ROLE_MODULE_ACCESS[role] = labels
+        if role not in ROLES:
+            ROLES.append(role)
+
+
+_apply_configured_role_modules()
+
 ROLE_READ_ONLY_MODULES = {
     "Directeur Général": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
     "Caissier": {"Production", "Commandes", "Commissions"},
@@ -149,6 +208,21 @@ def assets_dir() -> Path:
 
 
 def get_logo_png_path() -> Path:
+    configured_logo = get_logo_path()
+    if configured_logo:
+        configured_path = Path(configured_logo)
+        candidates = [configured_path]
+        if not configured_path.is_absolute():
+            candidates.extend(
+                [
+                    Path.cwd() / configured_path,
+                    Path(__file__).resolve().parents[1] / configured_path,
+                    assets_dir() / configured_path.name,
+                ]
+            )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
     return assets_dir() / "logo-boulangerie-lomoto.png"
 
 
@@ -269,14 +343,11 @@ def create_branded_header(
 
 def current_copyright_text() -> str:
     year = date.today().year
-    return f"© {year} {APP_NAME} - {OWNER_NAME} / Kay Box Store. Tous droits réservés."
+    return f"© {year} {APP_NAME} - General Investment Services (GIS). Tous droits réservés."
 
 
 def copyright_legal_notice() -> str:
-    return (
-        "Application de gestion commerciale développée pour Boulangerie Lomoto. "
-        "Toute reproduction, distribution ou modification non autorisée est interdite."
-    )
+    return get_legal_notice()
 
 
 class CopyrightFooter(ttk.Frame):
@@ -346,7 +417,8 @@ class AboutWindow(tk.Toplevel):
         ).pack(fill="x", pady=(2, 14))
 
         description = (
-            f"{OWNER_NAME} est le responsable de Kay Box Store et l'initiateur de cette solution. "
+            f"{GIS_RESPONSIBLE_NAME} est le responsable de General Investment Services (GIS). "
+            f"{SOLUTION_INITIATOR_NAME} est l'IT et l'initiateur de cette solution. "
             "Cette application accompagne la gestion quotidienne de la boulangerie : ventes, commandes, "
             "stock, production, caisse, travailleurs, rapports et suivi des activités."
         )
@@ -380,6 +452,112 @@ class AboutWindow(tk.Toplevel):
         self.destroy()
 
 
+class LicenseActivationWindow(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, *, allow_close: bool = True) -> None:
+        owner = parent.winfo_toplevel()
+        super().__init__(owner)
+        self.allow_close = allow_close
+        self.activated = False
+        self.title("Activation de la licence")
+        self.geometry("720x560")
+        self.minsize(640, 500)
+        self.configure(bg=APP_BACKGROUND)
+        apply_window_icon(self)
+        self.transient(owner)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.close_window)
+        self.status_var = tk.StringVar(value="")
+        self.installation_code_var = tk.StringVar(value="")
+        self.activations_var = tk.StringVar(value="")
+        self.activations: list[dict[str, Any]] = []
+        self.build_ui()
+        self.refresh_status()
+        center_window(self)
+
+    def build_ui(self) -> None:
+        container = ttk.Frame(self, padding=(20, 18, 20, 18))
+        container.pack(fill="both", expand=True)
+        logo = create_logo_widget(container, 72)
+        if logo is not None:
+            logo.pack(anchor="center", pady=(0, 8))
+        ttk.Label(container, text="Activation du produit", style="Header.TLabel", justify="center").pack(fill="x", pady=(0, 8))
+        ttk.Label(container, textvariable=self.status_var, wraplength=640, justify="center").pack(fill="x", pady=(0, 10))
+
+        code_frame = ttk.LabelFrame(container, text="Code de ce poste", style="Card.TLabelframe")
+        code_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(code_frame, textvariable=self.installation_code_var, wraplength=620, justify="center").pack(fill="x")
+
+        key_frame = ttk.LabelFrame(container, text="Cle d'activation", style="Card.TLabelframe")
+        key_frame.pack(fill="both", expand=True, pady=(0, 10))
+        self.key_text = ScrolledText(key_frame, height=5, wrap="word")
+        self.key_text.pack(fill="both", expand=True)
+
+        ttk.Label(container, textvariable=self.activations_var, wraplength=640, justify="left").pack(fill="x", pady=(0, 10))
+
+        buttons = ttk.Frame(container)
+        buttons.pack(anchor="center")
+        ttk.Button(buttons, text="Activer", style="Primary.TButton", command=self.activate).grid(row=0, column=0, padx=6)
+        ttk.Button(buttons, text="Actualiser", command=self.refresh_status).grid(row=0, column=1, padx=6)
+        ttk.Button(buttons, text="Libérer un poste", command=self.deactivate_device).grid(row=0, column=2, padx=6)
+        ttk.Button(buttons, text="Fermer", command=self.close_window).grid(row=0, column=3, padx=6)
+
+    def refresh_status(self) -> None:
+        data = status_payload(DatabaseHelper.app_data_dir, domain=get_public_url())
+        message = str(data.get("message") or "")
+        if data.get("ok") and data.get("validUntil"):
+            message = f"Licence active jusqu'au {data.get('validUntil')}."
+        if not data.get("required"):
+            message = "Cette edition ne demande pas de licence obligatoire."
+        self.status_var.set(message)
+        self.installation_code_var.set(str(data.get("installationCode") or ""))
+        self.activations = [item for item in data.get("activations") or [] if isinstance(item, dict)]
+        if self.activations:
+            lines = ["Postes actives :"]
+            for item in self.activations:
+                lines.append(f"- {item.get('deviceName', 'Poste')} | {item.get('deviceId', '')} | {item.get('lastSeenAt', '')}")
+            self.activations_var.set("\n".join(lines))
+        else:
+            self.activations_var.set("Aucun poste active dans ce registre.")
+        self.activated = bool(data.get("ok"))
+
+    def activate(self) -> None:
+        key = self.key_text.get("1.0", "end").strip()
+        if not key:
+            messagebox.showwarning("Activation", "Veuillez coller la cle d'activation.", parent=self)
+            return
+        result = activate_device(key, DatabaseHelper.app_data_dir, domain=get_public_url())
+        self.status_var.set(result.message)
+        if result.ok:
+            self.activated = True
+            messagebox.showinfo("Activation", result.message, parent=self)
+            self.refresh_status()
+        else:
+            messagebox.showerror("Activation", result.message, parent=self)
+
+    def deactivate_device(self) -> None:
+        if not self.activations:
+            messagebox.showinfo("Activation", "Aucun poste n'est inscrit dans le registre.", parent=self)
+            return
+        device_id = simpledialog.askstring(
+            "Libérer un poste",
+            "Collez l'identifiant du poste a liberer :",
+            parent=self,
+        )
+        if not device_id:
+            return
+        if deactivate_device(DatabaseHelper.app_data_dir, device_id.strip()):
+            messagebox.showinfo("Activation", "Poste libere.", parent=self)
+            self.refresh_status()
+        else:
+            messagebox.showwarning("Activation", "Poste introuvable dans le registre.", parent=self)
+
+    def close_window(self) -> None:
+        if not self.allow_close and not self.activated:
+            if not messagebox.askyesno("Activation requise", "Quitter sans activer l'application ?", parent=self):
+                return
+        self.destroy()
+
+
 def run_app() -> None:
     if os.name == "nt" and not is_running_as_administrator():
         if relaunch_current_process_as_administrator():
@@ -397,6 +575,17 @@ def run_app() -> None:
     apply_window_icon(root)
     configure_styles()
     root.resizable(True, True)
+
+    license_status = validate_current_license(DatabaseHelper.app_data_dir, domain=get_public_url())
+    if not license_status.ok:
+        root.withdraw()
+        activation_window = LicenseActivationWindow(root, allow_close=False)
+        root.wait_window(activation_window)
+        license_status = validate_current_license(DatabaseHelper.app_data_dir, domain=get_public_url())
+        if not license_status.ok:
+            root.destroy()
+            return
+        root.deiconify()
 
     def show_login_after_setup() -> None:
         root.title(f"{APP_NAME} - Connexion - v{APP_VERSION}")
@@ -479,26 +668,174 @@ def configure_styles() -> None:
         style.theme_use("clam")
     except tk.TclError:
         pass
+
     default_root = tk._default_root
     if default_root is not None:
         default_root.option_add("*Font", UI_FONT)
         default_root.option_add("*TCombobox*Listbox.font", UI_FONT)
+        default_root.option_add("*TCombobox*Listbox.background", SURFACE_BACKGROUND)
+        default_root.option_add("*TCombobox*Listbox.foreground", TEXT_COLOR)
+        default_root.option_add("*TCombobox*Listbox.selectBackground", ACCENT_COLOR)
+        default_root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
         default_root.option_add("*Text.font", UI_FONT)
-    style.configure(".", font=UI_FONT)
-    style.configure("TLabel", font=UI_FONT)
-    style.configure("TButton", font=UI_FONT)
-    style.configure("TEntry", font=UI_FONT)
-    style.configure("TCombobox", font=UI_FONT)
-    style.configure("TCheckbutton", font=UI_FONT)
-    style.configure("TRadiobutton", font=UI_FONT)
-    style.configure("TSpinbox", font=UI_FONT)
-    style.configure("Treeview", font=UI_FONT, rowheight=28)
-    style.configure("Treeview.Heading", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
-    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 44, "bold"), foreground="#B30000")
-    style.configure("DayLock.TLabel", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"), foreground="#8b0000")
-    style.configure("Card.TLabelframe", padding=8)
-    style.configure("Card.TLabelframe.Label", font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"))
-    style.configure("Primary.TButton", padding=(12, 8))
+        default_root.option_add("*Text.background", SURFACE_BACKGROUND)
+        default_root.option_add("*Text.foreground", TEXT_COLOR)
+        default_root.option_add("*Text.relief", "flat")
+        default_root.option_add("*Text.borderWidth", 1)
+        default_root.option_add("*Text.highlightThickness", 0)
+        # Boutons classiques (tk.Button) : aplatis et harmonisés avec le reste
+        # de l'interface. Un bg=... explicite au niveau du widget reste
+        # prioritaire, donc les boutons déjà colorés ne changent pas.
+        default_root.option_add("*Button.background", BUTTON_BG)
+        default_root.option_add("*Button.foreground", TEXT_COLOR)
+        default_root.option_add("*Button.activeBackground", BUTTON_HOVER_BG)
+        default_root.option_add("*Button.activeForeground", TEXT_COLOR)
+        default_root.option_add("*Button.relief", "flat")
+        default_root.option_add("*Button.borderWidth", 1)
+        default_root.option_add("*Button.highlightThickness", 0)
+        default_root.option_add("*Button.padX", 12)
+        default_root.option_add("*Button.padY", 6)
+
+    # --- Fond général et widgets « conteneurs » -------------------------------
+    style.configure(".", font=UI_FONT, background=SURFACE_BACKGROUND, foreground=TEXT_COLOR)
+    style.configure("TFrame", background=SURFACE_BACKGROUND)
+    style.configure("TLabelframe", background=SURFACE_BACKGROUND, bordercolor=BORDER_COLOR, relief="solid")
+    style.configure(
+        "TLabelframe.Label",
+        background=SURFACE_BACKGROUND,
+        foreground=ACCENT_DARK_COLOR,
+        font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"),
+    )
+    style.configure("TLabel", font=UI_FONT, background=SURFACE_BACKGROUND, foreground=TEXT_COLOR)
+    style.configure("Muted.TLabel", background=SURFACE_BACKGROUND, foreground=MUTED_TEXT_COLOR)
+
+    # --- Boutons --------------------------------------------------------------
+    # Bouton secondaire : surface claire, plat, bordure discrète.
+    style.configure(
+        "TButton",
+        font=UI_FONT,
+        padding=(14, 8),
+        relief="flat",
+        borderwidth=1,
+        background=BUTTON_BG,
+        foreground=TEXT_COLOR,
+        bordercolor=BUTTON_BORDER,
+        lightcolor=BUTTON_BG,
+        darkcolor=BUTTON_BG,
+        focuscolor=ACCENT_COLOR,
+    )
+    style.map(
+        "TButton",
+        background=[("disabled", DISABLED_BG), ("pressed", BUTTON_HOVER_BG), ("active", BUTTON_HOVER_BG)],
+        foreground=[("disabled", MUTED_TEXT_COLOR)],
+        bordercolor=[("active", ACCENT_COLOR), ("focus", ACCENT_COLOR)],
+    )
+    # Bouton principal : rouge de la marque, texte blanc.
+    style.configure(
+        "Primary.TButton",
+        padding=(16, 9),
+        background=PRIMARY_COLOR,
+        foreground="#ffffff",
+        bordercolor=PRIMARY_COLOR,
+        lightcolor=PRIMARY_COLOR,
+        darkcolor=PRIMARY_COLOR,
+    )
+    style.map(
+        "Primary.TButton",
+        background=[("disabled", DISABLED_BG), ("pressed", PRIMARY_DARK_COLOR), ("active", PRIMARY_DARK_COLOR)],
+        foreground=[("disabled", MUTED_TEXT_COLOR)],
+        bordercolor=[("active", PRIMARY_DARK_COLOR)],
+    )
+
+    # --- Champs de saisie -----------------------------------------------------
+    for field_style in ("TEntry", "TCombobox", "TSpinbox"):
+        style.configure(
+            field_style,
+            font=UI_FONT,
+            padding=6,
+            relief="flat",
+            fieldbackground=SURFACE_BACKGROUND,
+            background=SURFACE_BACKGROUND,
+            foreground=TEXT_COLOR,
+            bordercolor=BORDER_COLOR,
+            lightcolor=BORDER_COLOR,
+            darkcolor=BORDER_COLOR,
+            insertcolor=TEXT_COLOR,
+            arrowcolor=ACCENT_DARK_COLOR,
+        )
+        style.map(
+            field_style,
+            bordercolor=[("focus", FIELD_FOCUS_COLOR), ("hover", ACCENT_COLOR)],
+            lightcolor=[("focus", FIELD_FOCUS_COLOR)],
+            darkcolor=[("focus", FIELD_FOCUS_COLOR)],
+            fieldbackground=[("readonly", MODULE_BACKGROUND), ("disabled", DISABLED_BG)],
+            foreground=[("disabled", MUTED_TEXT_COLOR)],
+        )
+    style.configure(
+        "TCombobox",
+        selectbackground=SURFACE_BACKGROUND,
+        selectforeground=TEXT_COLOR,
+    )
+
+    # --- Cases à cocher / radios ---------------------------------------------
+    style.configure("TCheckbutton", font=UI_FONT, background=SURFACE_BACKGROUND, foreground=TEXT_COLOR)
+    style.map("TCheckbutton", background=[("active", SURFACE_BACKGROUND)])
+    style.configure("TRadiobutton", font=UI_FONT, background=SURFACE_BACKGROUND, foreground=TEXT_COLOR)
+    style.map("TRadiobutton", background=[("active", SURFACE_BACKGROUND)])
+
+    # --- Tableaux -------------------------------------------------------------
+    style.configure(
+        "Treeview",
+        font=UI_FONT,
+        rowheight=30,
+        background=SURFACE_BACKGROUND,
+        fieldbackground=SURFACE_BACKGROUND,
+        foreground=TEXT_COLOR,
+        bordercolor=BORDER_COLOR,
+        borderwidth=0,
+    )
+    style.map(
+        "Treeview",
+        background=[("selected", TABLE_SELECTED_COLOR)],
+        foreground=[("selected", TEXT_COLOR)],
+    )
+    style.configure(
+        "Treeview.Heading",
+        font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"),
+        background=MODULE_BACKGROUND,
+        foreground=ACCENT_DARK_COLOR,
+        relief="flat",
+        padding=(8, 6),
+    )
+    style.map("Treeview.Heading", background=[("active", BUTTON_HOVER_BG)])
+
+    # --- Barres de défilement -------------------------------------------------
+    for scrollbar_style in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+        style.configure(
+            scrollbar_style,
+            background=BUTTON_BG,
+            troughcolor=MODULE_BACKGROUND,
+            bordercolor=MODULE_BACKGROUND,
+            arrowcolor=ACCENT_DARK_COLOR,
+            relief="flat",
+        )
+        style.map(scrollbar_style, background=[("active", BUTTON_HOVER_BG)])
+
+    # --- Styles nommés existants (conservés) ----------------------------------
+    style.configure("Header.TLabel", font=(UI_FONT_FAMILY, 44, "bold"), background=SURFACE_BACKGROUND, foreground="#B30000")
+    style.configure(
+        "DayLock.TLabel",
+        font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"),
+        background=SURFACE_BACKGROUND,
+        foreground="#8b0000",
+    )
+    style.configure("Card.TLabelframe", padding=12, background=SURFACE_BACKGROUND, bordercolor=BORDER_COLOR, relief="solid")
+    style.configure(
+        "Card.TLabelframe.Label",
+        background=SURFACE_BACKGROUND,
+        font=(UI_FONT_FAMILY, UI_FONT_SIZE, "bold"),
+        foreground=ACCENT_DARK_COLOR,
+    )
 
 
 def today_iso() -> str:
@@ -2633,38 +2970,43 @@ class DashboardMetricCard(tk.Frame):
     def __init__(self, parent: tk.Misc, accent: str) -> None:
         super().__init__(
             parent,
-            bg=accent,
+            bg=DASHBOARD_CARD_BG,
             bd=0,
-            highlightthickness=0,
+            highlightbackground=BORDER_COLOR,
+            highlightthickness=1,
         )
+        self.accent = accent
         self.title_var = tk.StringVar(value="")
         self.value_var = tk.StringVar(value="")
         self.subtitle_var = tk.StringVar(value="")
 
-        self.configure(padx=16, pady=14)
+        self.configure(padx=0, pady=0)
+        tk.Frame(self, bg=accent, width=4, bd=0, highlightthickness=0).pack(side="left", fill="y")
+        content = tk.Frame(self, bg=DASHBOARD_CARD_BG, padx=16, pady=14, bd=0, highlightthickness=0)
+        content.pack(side="left", fill="both", expand=True)
         tk.Label(
-            self,
+            content,
             textvariable=self.title_var,
-            bg=accent,
-            fg="#ffffff",
+            bg=DASHBOARD_CARD_BG,
+            fg=MUTED_TEXT_COLOR,
             font=(UI_FONT_FAMILY, 11, "bold"),
             anchor="w",
             justify="left",
         ).pack(fill="x")
         tk.Label(
-            self,
+            content,
             textvariable=self.value_var,
-            bg=accent,
-            fg="#ffffff",
+            bg=DASHBOARD_CARD_BG,
+            fg=DASHBOARD_NAVY_COLOR,
             font=(UI_FONT_FAMILY, 24, "bold"),
             anchor="w",
             justify="left",
         ).pack(fill="x", pady=(6, 2))
         tk.Label(
-            self,
+            content,
             textvariable=self.subtitle_var,
-            bg=accent,
-            fg="#f5f5f5",
+            bg=DASHBOARD_CARD_BG,
+            fg=MUTED_TEXT_COLOR,
             font=(UI_FONT_FAMILY, 10),
             anchor="w",
             justify="left",
@@ -2675,6 +3017,178 @@ class DashboardMetricCard(tk.Frame):
         self.title_var.set(title)
         self.value_var.set(value)
         self.subtitle_var.set(subtitle)
+
+
+class DashboardChartCard(tk.Frame):
+    def __init__(self, parent: tk.Misc, accent: str) -> None:
+        super().__init__(
+            parent,
+            bg=DASHBOARD_CARD_BG,
+            bd=0,
+            highlightbackground=BORDER_COLOR,
+            highlightthickness=1,
+        )
+        self.accent = accent
+        self.title = ""
+        self.items: list[tuple[str, float, str]] = []
+        self.configure(padx=12, pady=12)
+        self.canvas = tk.Canvas(self, height=228, bg=DASHBOARD_CARD_BG, bd=0, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda _event: self.draw())
+
+    def update_chart(self, title: str, items: list[tuple[str, float, str]]) -> None:
+        self.title = title
+        self.items = items
+        self.draw()
+
+    def draw(self) -> None:
+        canvas = self.canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 260)
+        height = max(canvas.winfo_height(), 200)
+        canvas.create_rectangle(0, 0, width, height, fill=DASHBOARD_CARD_BG, outline="")
+        canvas.create_text(
+            14,
+            24,
+            text=self.title or "Analyse",
+            anchor="w",
+            fill=DASHBOARD_NAVY_COLOR,
+            font=(UI_FONT_FAMILY, 12, "bold"),
+        )
+        canvas.create_line(14, 46, width - 14, 46, fill="#e7ecf3")
+        if not self.items:
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="Aucune donnée disponible",
+                fill=MUTED_TEXT_COLOR,
+                font=(UI_FONT_FAMILY, 10, "bold"),
+            )
+            return
+
+        max_value = max((abs(float(value or 0)) for _label, value, _text in self.items), default=1)
+        max_value = max(max_value, 1)
+        top = 64
+        row_height = max(32, int((height - top - 12) / max(len(self.items), 1)))
+        label_width = min(150, max(96, int(width * 0.34)))
+        value_width = min(130, max(80, int(width * 0.24)))
+        bar_left = label_width + 18
+        bar_right = max(bar_left + 80, width - value_width - 16)
+        for index, (label, value, value_text) in enumerate(self.items):
+            y = top + index * row_height
+            center_y = y + 14
+            pct = max(0.0, min(1.0, abs(float(value or 0)) / max_value))
+            fill_width = max(3, int((bar_right - bar_left) * pct))
+            canvas.create_text(
+                14,
+                center_y,
+                text=label,
+                anchor="w",
+                fill=DASHBOARD_NAVY_COLOR,
+                font=(UI_FONT_FAMILY, 9, "bold"),
+            )
+            canvas.create_rectangle(
+                bar_left,
+                center_y - 5,
+                bar_right,
+                center_y + 5,
+                fill="#e3e9f1",
+                outline="",
+            )
+            canvas.create_rectangle(
+                bar_left,
+                center_y - 5,
+                bar_left + fill_width,
+                center_y + 5,
+                fill=self.accent,
+                outline="",
+            )
+            canvas.create_text(
+                width - 14,
+                center_y,
+                text=value_text,
+                anchor="e",
+                fill=TEXT_COLOR,
+                font=(UI_FONT_FAMILY, 9, "bold"),
+            )
+
+
+class DashboardSummaryPanel(tk.Frame):
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(
+            parent,
+            bg="#ffffff",
+            bd=0,
+            highlightbackground=BORDER_COLOR,
+            highlightthickness=1,
+        )
+        self.item_vars: list[tuple[tk.StringVar, tk.StringVar]] = []
+        self.configure(padx=18, pady=16)
+        header = tk.Frame(self, bg="#ffffff", bd=0, highlightthickness=0)
+        header.pack(fill="x", pady=(0, 12))
+        tk.Label(
+            header,
+            text="Résumé du mois",
+            bg="#ffffff",
+            fg=DASHBOARD_NAVY_COLOR,
+            font=(UI_FONT_FAMILY, 15, "bold"),
+            anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text=date.today().strftime("%m/%Y"),
+            bg=DASHBOARD_SOFT_BG,
+            fg=DASHBOARD_NAVY_COLOR,
+            font=(UI_FONT_FAMILY, 10, "bold"),
+            padx=12,
+            pady=5,
+        ).pack(side="right")
+
+        grid = tk.Frame(self, bg="#ffffff", bd=0, highlightthickness=0)
+        grid.pack(fill="x")
+        for index in range(6):
+            item = tk.Frame(
+                grid,
+                bg=DASHBOARD_SOFT_BG,
+                padx=12,
+                pady=10,
+                bd=0,
+                highlightbackground="#e2e8f0",
+                highlightthickness=1,
+            )
+            item.grid(row=index // 3, column=index % 3, sticky="nsew", padx=5, pady=5)
+            label_var = tk.StringVar(value="")
+            value_var = tk.StringVar(value="")
+            tk.Label(
+                item,
+                textvariable=label_var,
+                bg=DASHBOARD_SOFT_BG,
+                fg=MUTED_TEXT_COLOR,
+                font=(UI_FONT_FAMILY, 9, "bold"),
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                item,
+                textvariable=value_var,
+                bg=DASHBOARD_SOFT_BG,
+                fg=DASHBOARD_NAVY_COLOR,
+                font=(UI_FONT_FAMILY, 12, "bold"),
+                anchor="w",
+                wraplength=300,
+                justify="left",
+            ).pack(fill="x", pady=(4, 0))
+            self.item_vars.append((label_var, value_var))
+            grid.columnconfigure(index % 3, weight=1)
+
+    def update_items(self, items: list[tuple[str, str]]) -> None:
+        for index, (label_var, value_var) in enumerate(self.item_vars):
+            if index >= len(items):
+                label_var.set("")
+                value_var.set("")
+                continue
+            label, value = items[index]
+            label_var.set(label)
+            value_var.set(value)
 
 
 class ActivityHistoryWindow(tk.Toplevel):
@@ -2726,7 +3240,12 @@ class ActivityHistoryWindow(tk.Toplevel):
         actions = ttk.Frame(filters)
         actions.grid(row=0, column=4, sticky="e", padx=(12, 0))
         ttk.Button(actions, text="Actualiser", command=self.refresh_logs).grid(row=0, column=0, padx=4)
-        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=1, padx=4)
+        if self.parent.user.role == "Admin":
+            ttk.Button(actions, text="Effacer l'historique", command=self.clear_logs).grid(row=0, column=1, padx=4)
+            close_column = 2
+        else:
+            close_column = 1
+        ttk.Button(actions, text="Fermer", command=self.close_window).grid(row=0, column=close_column, padx=4)
         filters.columnconfigure(1, weight=1)
         filters.columnconfigure(3, weight=1)
 
@@ -2770,6 +3289,28 @@ class ActivityHistoryWindow(tk.Toplevel):
         )
         self.table.tree.column("Details", width=340, stretch=True)
         self.message_var.set(f"{len(rows)} action(s) affichée(s).")
+
+    def clear_logs(self) -> None:
+        if self.parent.user.role != "Admin":
+            messagebox.showwarning("Acces refuse", "Seul l'Admin peut effacer l'historique.")
+            return
+        if not messagebox.askyesno(
+            "Effacer l'historique",
+            "Voulez-vous vraiment effacer l'historique des actions ?\n\n"
+            "Une trace de cet effacement sera conservee.",
+            parent=self,
+        ):
+            return
+        if not messagebox.askyesno(
+            "Confirmation",
+            "Confirmation finale : effacer l'historique maintenant ?",
+            parent=self,
+        ):
+            return
+        deleted = DatabaseHelper.clear_activity_logs()
+        log_user_action(self, "Historique", "Historique efface", f"{deleted} action(s) supprimee(s).")
+        self.refresh_logs()
+        self.message_var.set(f"Historique efface : {deleted} action(s) supprimee(s).")
 
     def refresh_live_view(self) -> None:
         self.refresh_logs()
@@ -2820,7 +3361,9 @@ class DashboardWindow(tk.Toplevel):
         self.module_opening_overlay: tk.Toplevel | None = None
         self.critical_alerts_shown = False
         self.monthly_report_obligation: dict[str, Any] | None = None
+        self.summary_panel: DashboardSummaryPanel | None = None
         self.metric_cards: list[DashboardMetricCard] = []
+        self.chart_cards: list[DashboardChartCard] = []
         self.stock_alerts_var = tk.StringVar(value="Chargement des alertes de stock...")
         self.debt_alerts_var = tk.StringVar(value="Chargement des alertes de dettes...")
         self.recent_activity_var = tk.StringVar(value="Chargement de l'historique...")
@@ -2832,13 +3375,13 @@ class DashboardWindow(tk.Toplevel):
         self.resizable(True, True)
         apply_window_icon(self)
         self.protocol("WM_DELETE_WINDOW", self.on_close_app)
-        self.scrollable_content = ScrollableContent(self, padding=(10, 4, 10, 10), background=APP_BACKGROUND)
+        self.scrollable_content = ScrollableContent(self, padding=(14, 10, 14, 14), background=APP_BACKGROUND)
         self.scrollable_content.pack(fill="both", expand=True)
         self.body = self.scrollable_content.content
         self.build_ui()
         maximize_window(self, 980, 640)
         self.request_refresh_summary(50)
-        self.bind("<FocusIn>", lambda _event: self.request_refresh_summary(150))
+        self.bind("<FocusIn>", self.on_dashboard_focus_in)
         self.after(1000, self.start_startup_update_check)
         self.after(700, self.show_role_critical_alerts)
         self.after(1200, self.check_monthly_report_obligation)
@@ -2847,29 +3390,171 @@ class DashboardWindow(tk.Toplevel):
         self.install_auto_lock()
         self.schedule_session_guard()
 
+    def build_home_hero(self, container: tk.Misc) -> None:
+        hero = tk.Frame(
+            container,
+            bg=DASHBOARD_NAVY_COLOR,
+            padx=24,
+            pady=20,
+            highlightbackground="#cbd5e1",
+            highlightthickness=1,
+        )
+        hero.pack(fill="x", pady=(0, 12))
+        hero.columnconfigure(1, weight=1)
+
+        logo = create_logo_widget(hero, DASHBOARD_LOGO_SIZE, background=DASHBOARD_NAVY_COLOR, use_ttk=False)
+        if logo is not None:
+            logo.grid(row=0, column=0, rowspan=3, sticky="nw", padx=(0, 18))
+            setattr(self, "_header_logo", logo)
+
+        tk.Label(
+            hero,
+            text="TABLEAU DE BORD",
+            bg=DASHBOARD_NAVY_COLOR,
+            fg="#f5c46b",
+            font=(UI_FONT_FAMILY, 10, "bold"),
+            anchor="w",
+        ).grid(row=0, column=1, sticky="ew")
+        tk.Label(
+            hero,
+            text=APP_NAME.upper(),
+            bg=DASHBOARD_NAVY_COLOR,
+            fg="#ffffff",
+            font=(UI_FONT_FAMILY, 28, "bold"),
+            anchor="w",
+            justify="left",
+        ).grid(row=1, column=1, sticky="ew", pady=(2, 4))
+        tk.Label(
+            hero,
+            text=f"{self.user.display_name} - {self.user.role}",
+            bg=DASHBOARD_NAVY_COLOR,
+            fg="#e8f2ff",
+            font=(UI_FONT_FAMILY, 11, "bold"),
+            anchor="w",
+        ).grid(row=2, column=1, sticky="ew")
+        tk.Label(
+            hero,
+            text=f"Version {APP_VERSION}",
+            bg=DASHBOARD_ACCENT_COLOR,
+            fg="#ffffff",
+            font=(UI_FONT_FAMILY, 10, "bold"),
+            padx=12,
+            pady=6,
+        ).grid(row=0, column=2, sticky="ne")
+
+    def build_dashboard_status_strip(self, container: tk.Misc) -> None:
+        status_grid = tk.Frame(container, bg=APP_BACKGROUND, bd=0, highlightthickness=0)
+        status_grid.pack(fill="x", pady=(0, 12))
+        items = (
+            ("Connexion", DatabaseHelper.get_connection_status_text(), DASHBOARD_ACCENT_COLOR),
+            ("Utilisateur", self.user.display_name, DASHBOARD_ACCENT_COLOR),
+            ("Rôle", self.user.role, DASHBOARD_ACCENT_COLOR),
+        )
+        for index, (title, value, accent) in enumerate(items):
+            card = tk.Frame(
+                status_grid,
+                bg=DASHBOARD_CARD_BG,
+                padx=14,
+                pady=10,
+                highlightbackground=BORDER_COLOR,
+                highlightthickness=1,
+            )
+            card.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 8, 0))
+            tk.Frame(card, bg=accent, width=3, bd=0, highlightthickness=0).pack(side="left", fill="y", padx=(0, 10))
+            text_area = tk.Frame(card, bg=DASHBOARD_CARD_BG, bd=0, highlightthickness=0)
+            text_area.pack(side="left", fill="both", expand=True)
+            tk.Label(
+                text_area,
+                text=title,
+                bg=DASHBOARD_CARD_BG,
+                fg=MUTED_TEXT_COLOR,
+                font=(UI_FONT_FAMILY, 9, "bold"),
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                text_area,
+                text=value,
+                bg=DASHBOARD_CARD_BG,
+                fg=DASHBOARD_NAVY_COLOR,
+                font=(UI_FONT_FAMILY, 10, "bold"),
+                anchor="w",
+                justify="left",
+                wraplength=330,
+            ).pack(fill="x", pady=(4, 0))
+            status_grid.columnconfigure(index, weight=1)
+
+    def build_module_launchers(
+        self,
+        container: tk.Misc,
+        visible_buttons: list[tuple[str, Callable[[], None]]],
+    ) -> None:
+        module_frame = self.create_dashboard_section(container, "Modules", "Accès rapides")
+        grid = tk.Frame(module_frame, bg="#ffffff", bd=0, highlightthickness=0)
+        grid.pack(fill="x")
+        self.module_buttons = {}
+        for index, (label, callback) in enumerate(visible_buttons):
+            button = tk.Button(
+                grid,
+                text=f"{label}\nOuvrir",
+                command=deferred_ui_command(self, callback),
+                bg=DASHBOARD_SOFT_BG,
+                activebackground="#ffffff",
+                fg=DASHBOARD_NAVY_COLOR,
+                activeforeground=DASHBOARD_NAVY_COLOR,
+                relief="flat",
+                bd=0,
+                highlightbackground=BORDER_COLOR,
+                highlightcolor=PRIMARY_COLOR,
+                highlightthickness=1,
+                padx=16,
+                pady=14,
+                justify="left",
+                anchor="w",
+                font=(UI_FONT_FAMILY, 11, "bold"),
+                cursor="hand2",
+            )
+            button.grid(row=index // 3, column=index % 3, padx=6, pady=6, sticky="nsew")
+            self.module_buttons[label] = button
+        for column in range(3):
+            grid.columnconfigure(column, weight=1)
+
+    def create_dashboard_section(self, container: tk.Misc, title: str, eyebrow: str = "") -> tk.Frame:
+        section = tk.Frame(
+            container,
+            bg="#ffffff",
+            bd=0,
+            highlightbackground=BORDER_COLOR,
+            highlightthickness=1,
+        )
+        section.pack(fill="x", pady=(0, 14))
+        section.configure(padx=16, pady=14)
+        header = tk.Frame(section, bg="#ffffff", bd=0, highlightthickness=0)
+        header.pack(fill="x", pady=(0, 10))
+        if eyebrow:
+            tk.Label(
+                header,
+                text=eyebrow.upper(),
+                bg="#ffffff",
+                fg=DASHBOARD_ACCENT_COLOR,
+                font=(UI_FONT_FAMILY, 8, "bold"),
+                anchor="w",
+            ).pack(fill="x")
+        tk.Label(
+            header,
+            text=title,
+            bg="#ffffff",
+            fg=DASHBOARD_NAVY_COLOR,
+            font=(UI_FONT_FAMILY, 15, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        body = tk.Frame(section, bg="#ffffff", bd=0, highlightthickness=0)
+        body.pack(fill="x")
+        return body
+
     def build_ui(self) -> None:
         container = self.body
-        header = create_branded_header(
-            container,
-            f"Bienvenue, {self.user.display_name} ({self.user.role})",
-            logo_size=DASHBOARD_LOGO_SIZE,
-            wraplength=760,
-        )
-        setattr(self, "_header_logo", getattr(header, "_header_logo", None))
-
-        ttk.Label(
-            container,
-            text=f"Version installée : {APP_VERSION}",
-            foreground=MUTED_TEXT_COLOR,
-        ).pack(anchor="center", pady=(0, 8))
-
-        ttk.Label(
-            container,
-            text=DatabaseHelper.get_connection_status_text(),
-            foreground=SUCCESS_COLOR,
-            wraplength=680,
-            justify="center",
-        ).pack(anchor="center", pady=(0, 8))
+        self.build_home_hero(container)
+        self.build_dashboard_status_strip(container)
 
         if self.post_update_notice is not None and self.post_update_notice.remaining_ms() > 0:
             self.notice_label = ttk.Label(
@@ -2882,9 +3567,6 @@ class DashboardWindow(tk.Toplevel):
             self.notice_label.pack(anchor="center", pady=(0, 14))
             self.after(self.post_update_notice.remaining_ms(), self.hide_notice)
 
-        grid = ttk.Frame(container)
-        grid.pack(fill="x")
-
         buttons = [
             ("Caisse", self.open_cash),
             ("Stock", self.open_stock),
@@ -2896,41 +3578,44 @@ class DashboardWindow(tk.Toplevel):
         if self.user.role in FULL_VISIBILITY_ROLES:
             buttons.append(("Utilisateurs", self.open_users))
 
-        self.module_buttons: dict[str, ttk.Button] = {}
         visible_buttons = [(label, callback) for label, callback in buttons if self.can_access(label, show_warning=False)]
-        for index, (label, callback) in enumerate(visible_buttons):
-            button = ttk.Button(grid, text=label, command=deferred_ui_command(self, callback))
-            button.grid(row=index // 2, column=index % 2, padx=8, pady=8, sticky="ew")
-            self.module_buttons[label] = button
 
-        grid.columnconfigure(0, weight=1)
-        grid.columnconfigure(1, weight=1)
+        self.summary_var = tk.StringVar(value="")
+        self.summary_panel = DashboardSummaryPanel(container)
+        self.summary_panel.pack(fill="x", pady=(0, 14))
 
-        self.summary_var = tk.StringVar(value="Chargement des statistiques...")
-        summary_frame = ttk.LabelFrame(container, text="Résumé", style="Card.TLabelframe")
-        summary_frame.pack(fill="x", pady=18)
-        ttk.Label(summary_frame, textvariable=self.summary_var, justify="center").pack(fill="x")
-
-        visual_frame = ttk.LabelFrame(container, text="Indicateurs clés", style="Card.TLabelframe")
-        visual_frame.pack(fill="x", pady=(0, 18))
-        cards_grid = ttk.Frame(visual_frame)
+        visual_frame = self.create_dashboard_section(container, "Indicateurs clés", "Pilotage mensuel")
+        cards_grid = tk.Frame(visual_frame, bg="#ffffff", bd=0, highlightthickness=0)
         cards_grid.pack(fill="x")
         self.metric_cards = []
         metric_colors = (
-            "#b22222",
-            "#1f4e78",
-            "#0a7d53",
-            "#6b3fa0",
-            "#b36b00",
-            "#6d4c41",
-            "#00796b",
-            "#455a64",
+            DASHBOARD_ACCENT_COLOR,
+            DASHBOARD_ACCENT_COLOR,
+            DASHBOARD_ACCENT_COLOR,
+            DASHBOARD_ACCENT_COLOR,
+            DASHBOARD_NAVY_COLOR,
+            DASHBOARD_NAVY_COLOR,
+            DASHBOARD_NAVY_COLOR,
+            DASHBOARD_NAVY_COLOR,
         )
         for index, color in enumerate(metric_colors):
             card = DashboardMetricCard(cards_grid, color)
             card.grid(row=index // 4, column=index % 4, sticky="nsew", padx=6, pady=4)
             cards_grid.columnconfigure(index % 4, weight=1)
             self.metric_cards.append(card)
+
+        analytics_frame = self.create_dashboard_section(container, "Graphiques de pilotage", "Tendances rapides")
+        charts_grid = tk.Frame(analytics_frame, bg="#ffffff", bd=0, highlightthickness=0)
+        charts_grid.pack(fill="x")
+        self.chart_cards = []
+        chart_colors = (DASHBOARD_ACCENT_COLOR, DASHBOARD_NAVY_COLOR, "#6f7b8a", "#9a5b00")
+        for index, color in enumerate(chart_colors):
+            chart = DashboardChartCard(charts_grid, color)
+            chart.grid(row=index // 2, column=index % 2, sticky="nsew", padx=6, pady=6)
+            charts_grid.columnconfigure(index % 2, weight=1)
+            self.chart_cards.append(chart)
+
+        self.build_module_launchers(container, visible_buttons)
 
         stock_alert_roles = {"Admin", "Directeur Général", "Gestionnaire de stock"}
         debt_alert_roles = {"Admin", "Directeur Général", "Caissier", "Gestionnaire des commandes"}
@@ -3084,10 +3769,17 @@ class DashboardWindow(tk.Toplevel):
                 command=deferred_ui_command(self, self.reset_database),
             )
             self.reset_database_button.grid(row=0, column=3, padx=6, pady=4)
+            self.activation_button = ttk.Button(
+                maintenance_buttons,
+                text="Activation",
+                command=deferred_ui_command(self, self.open_activation),
+            )
+            self.activation_button.grid(row=1, column=0, padx=6, pady=4)
             if self.user.role != "Admin":
                 self.backup_button.state(["disabled"])
                 self.restore_button.state(["disabled"])
                 self.reset_database_button.state(["disabled"])
+                self.activation_button.state(["disabled"])
 
         actions = ttk.Frame(container)
         actions.pack(anchor="center", pady=(8, 0))
@@ -3147,7 +3839,7 @@ class DashboardWindow(tk.Toplevel):
             return
         messagebox.showinfo(
             "Verrouillage automatique",
-            "L'application a été verrouillée après 10 minutes d'inactivité. Veuillez vous reconnecter pour continuer.",
+            "L'application a été verrouillée après 15 minutes d'inactivité. Veuillez vous reconnecter pour continuer.",
             parent=self,
         )
         self.cancel_dashboard_timers()
@@ -3185,6 +3877,10 @@ class DashboardWindow(tk.Toplevel):
 
     def is_live_sync_enabled(self) -> bool:
         return DatabaseHelper.is_remote_mode() or is_embedded_server_running()
+
+    def on_dashboard_focus_in(self, event: tk.Event) -> None:
+        if event.widget is self:
+            self.request_refresh_summary(500)
 
     def schedule_live_refresh(self) -> None:
         if self.live_refresh_after_id is not None:
@@ -3242,12 +3938,15 @@ class DashboardWindow(tk.Toplevel):
 
     def refresh_summary(self) -> None:
         try:
-            summary = self.build_dashboard_summary()
+            summary_items = self.build_dashboard_insights_data()
         except Exception as exc:
-            summary = "Statistiques indisponibles pour le moment."
-        self.summary_var.set(summary)
+            summary_items = [("Statut", "Statistiques indisponibles pour le moment.")]
+        self.summary_var.set(" | ".join(f"{label}: {value}" for label, value in summary_items))
+        if self.summary_panel is not None:
+            self.summary_panel.update_items(summary_items)
         for refresher in (
             self.refresh_metric_cards,
+            self.refresh_dashboard_charts,
             self.refresh_alerts,
             self.refresh_recent_activity,
             self.refresh_closure_status,
@@ -3256,6 +3955,63 @@ class DashboardWindow(tk.Toplevel):
                 refresher()
             except Exception:
                 continue
+
+    def build_dashboard_insights_data(self) -> list[tuple[str, str]]:
+        today = date.today()
+        month_start = today.replace(day=1)
+        month_label = today.strftime("%m/%Y")
+        role = self.user.role
+
+        if role == "Gestionnaire de stock":
+            stock = DatabaseHelper.get_stock_summary()
+            return [
+                ("Période", month_label),
+                ("Farine", f"{format_number(float(stock.get('FarineRestante', 0) or 0))} sacs"),
+                ("Levure", f"{format_number(float(stock.get('LevureRestante', 0) or 0))} paquets"),
+                ("Sel / huile", f"{format_number(float(stock.get('SelRestant', 0) or 0))} kg / {format_number(float(stock.get('HuileRestante', 0) or 0))} L"),
+                ("Approvisionnements", str(DatabaseHelper.count_stock_supplies_for_period(month_start, today))),
+                ("Sorties", str(DatabaseHelper.count_stock_exits_for_period(month_start, today))),
+            ]
+
+        if role == "Chargé de la production":
+            production = DatabaseHelper.get_production_summary_for_period(month_start, today)
+            return [
+                ("Période", month_label),
+                ("Commandés", f"{int(production.get('TotalBacsCommandes', 0) or 0)} bacs"),
+                ("Produits", f"{int(production.get('TotalBacsProduits', 0) or 0)} bacs"),
+                ("Écart", f"{int(production.get('EcartCommandes', 0) or 0)} bacs"),
+                ("Restants", f"{int(production.get('TotalBacsRestants', 0) or 0)} bacs"),
+                ("Couverture", f"{format_number(float(production.get('TauxCouverture', 0) or 0))} %"),
+            ]
+
+        if role in {"Gestionnaire des commandes", "Caissier"}:
+            orders = DatabaseHelper.get_orders_summary_for_period(month_start, today)
+            outstanding = DatabaseHelper.get_global_orders_summary()
+            items = [
+                ("Période", month_label),
+                ("Commandes", f"{int(orders.get('NombreCommandes', 0) or 0)} / {int(orders.get('TotalBacs', 0) or 0)} bacs"),
+                ("Montant reçu", format_fc(float(orders.get("MontantRecu", 0) or 0))),
+                ("Dettes ouvertes", format_fc(float(outstanding.get("TotalDettes", 0) or 0))),
+                ("Avances clients", format_fc(float(outstanding.get("AvancesDisponibles", 0) or 0))),
+                ("Commissions", format_fc(DatabaseHelper.get_total_commissions())),
+            ]
+            if role == "Caissier":
+                cash_total = DatabaseHelper.get_cash_total_for_period(month_start, today)
+                items[5] = ("Caisse du mois", format_fc(cash_total))
+            return items
+
+        orders = DatabaseHelper.get_orders_summary_for_period(month_start, today)
+        outstanding = DatabaseHelper.get_global_orders_summary()
+        production = DatabaseHelper.get_production_summary_for_period(month_start, today)
+        payroll = DatabaseHelper.get_workers_payroll_summary(month_start, today)
+        return [
+            ("Période", month_label),
+            ("Commandes", f"{int(orders.get('NombreCommandes', 0) or 0)} / {int(orders.get('TotalBacs', 0) or 0)} bacs"),
+            ("Montant reçu", format_fc(float(orders.get("MontantRecu", 0) or 0))),
+            ("Production", f"{int(production.get('TotalBacsProduits', 0) or 0)} bacs"),
+            ("Caisse", format_fc(DatabaseHelper.get_cash_total_for_period(month_start, today))),
+            ("Restes à payer", f"Dettes {format_fc(float(outstanding.get('TotalDettes', 0) or 0))} | Paies {format_fc(float(payroll.get('TotalNonPaye', 0) or 0))}"),
+        ]
 
     def build_dashboard_summary(self) -> str:
         role = self.user.role
@@ -3295,7 +4051,8 @@ class DashboardWindow(tk.Toplevel):
             f"Écart avec commandes : {int(production_summary.get('EcartCommandes', 0) or 0)}\n"
             f"Caisse du mois : {format_fc(DatabaseHelper.get_cash_total_for_period(month_start, today))} | "
             f"Commissions non payées : {format_fc(DatabaseHelper.get_total_commissions())} | "
-            f"Paies du mois : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}\n"
+            f"Paies payées : {format_fc(float(payroll_summary.get('TotalPaye', 0) or 0))} | "
+            f"Paies non payées : {format_fc(float(payroll_summary.get('TotalNonPaye', 0) or 0))}\n"
             f"Dettes non payées : {format_fc(float(outstanding_orders.get('TotalDettes', 0) or 0))} | "
             f"Commandes avec dette : {DatabaseHelper.count_orders_with_debt()}\n"
             f"{stock_line}"
@@ -3355,7 +4112,7 @@ class DashboardWindow(tk.Toplevel):
                 f"Montant attendu : {format_fc(float(orders_summary.get('MontantAttendu', 0) or 0))}"
             ),
             (
-                f"Montant reçu : {format_fc(float(orders_summary.get('MontantRecu', 0) or 0))} | "
+                f"Reçu commandes : {format_fc(float(orders_summary.get('MontantRecu', 0) or 0))} | "
                 f"Dettes non payées : {format_fc(float(outstanding_orders.get('TotalDettes', 0) or 0))}"
             ),
             f"Avances clients disponibles : {format_fc(float(outstanding_orders.get('AvancesDisponibles', 0) or 0))}",
@@ -3386,6 +4143,95 @@ class DashboardWindow(tk.Toplevel):
             title, value, subtitle = cards[index]
             card.update_card(title, value, subtitle)
             card.grid()
+
+    def refresh_dashboard_charts(self) -> None:
+        charts = self.build_dashboard_chart_data()
+        for index, chart in enumerate(self.chart_cards):
+            if index >= len(charts):
+                chart.update_chart("", [])
+                chart.grid_remove()
+                continue
+            title, items = charts[index]
+            chart.update_chart(title, items)
+            chart.grid()
+
+    def build_dashboard_chart_data(self) -> list[tuple[str, list[tuple[str, float, str]]]]:
+        today = date.today()
+        month_start = today.replace(day=1)
+        role = self.user.role
+        full_visibility = role in FULL_VISIBILITY_ROLES
+        charts: list[tuple[str, list[tuple[str, float, str]]]] = []
+
+        if full_visibility or role == "Gestionnaire de stock":
+            stock = DatabaseHelper.get_stock_summary()
+            charts.append(
+                (
+                    "Stock matières",
+                    [
+                        ("Farine", float(stock.get("FarineRestante", 0) or 0), f"{format_number(float(stock.get('FarineRestante', 0) or 0))} sacs"),
+                        ("Levure", float(stock.get("LevureRestante", 0) or 0), f"{format_number(float(stock.get('LevureRestante', 0) or 0))} paquets"),
+                        ("Sel", float(stock.get("SelRestant", 0) or 0), f"{format_number(float(stock.get('SelRestant', 0) or 0))} kg"),
+                        ("Huile", float(stock.get("HuileRestante", 0) or 0), f"{format_number(float(stock.get('HuileRestante', 0) or 0))} L"),
+                    ],
+                )
+            )
+
+        if full_visibility or role in {"Gestionnaire des commandes", "Caissier"}:
+            orders = DatabaseHelper.get_orders_summary_for_period(month_start, today)
+            outstanding = DatabaseHelper.get_global_orders_summary()
+            charts.append(
+                (
+                    "Commandes et paiements",
+                    [
+                        ("Attendu", float(orders.get("MontantAttendu", 0) or 0), format_fc(float(orders.get("MontantAttendu", 0) or 0))),
+                        ("Reçu", float(orders.get("MontantRecu", 0) or 0), format_fc(float(orders.get("MontantRecu", 0) or 0))),
+                        ("Dettes", float(outstanding.get("TotalDettes", 0) or 0), format_fc(float(outstanding.get("TotalDettes", 0) or 0))),
+                        ("Avances", float(outstanding.get("AvancesDisponibles", 0) or 0), format_fc(float(outstanding.get("AvancesDisponibles", 0) or 0))),
+                    ],
+                )
+            )
+
+        if full_visibility or role == "Chargé de la production":
+            production = DatabaseHelper.get_production_summary_for_period(month_start, today)
+            charts.append(
+                (
+                    "Production mensuelle",
+                    [
+                        ("Commandés", float(production.get("TotalBacsCommandes", 0) or 0), f"{int(production.get('TotalBacsCommandes', 0) or 0)} bacs"),
+                        ("Produits", float(production.get("TotalBacsProduits", 0) or 0), f"{int(production.get('TotalBacsProduits', 0) or 0)} bacs"),
+                        ("Restants", float(production.get("TotalBacsRestants", 0) or 0), f"{int(production.get('TotalBacsRestants', 0) or 0)} bacs"),
+                        ("Foutus", float(production.get("TotalBacsFoutus", 0) or 0), f"{int(production.get('TotalBacsFoutus', 0) or 0)} bacs"),
+                    ],
+                )
+            )
+
+        if full_visibility or role == "Caissier":
+            workers = DatabaseHelper.get_workers_payroll_summary(month_start, today)
+            cash_total = DatabaseHelper.get_cash_total_for_period(month_start, today)
+            charts.append(
+                (
+                    "Caisse et paies",
+                    [
+                        ("Caisse", float(cash_total or 0), format_fc(float(cash_total or 0))),
+                        ("Paies payées", float(workers.get("TotalPaye", 0) or 0), format_fc(float(workers.get("TotalPaye", 0) or 0))),
+                        ("Paies non payées", float(workers.get("TotalNonPaye", 0) or 0), format_fc(float(workers.get("TotalNonPaye", 0) or 0))),
+                    ],
+                )
+            )
+
+        if full_visibility or role == "Gestionnaire des commandes":
+            commission_total = DatabaseHelper.get_total_commissions()
+            charts.append(
+                (
+                    "Commissions",
+                    [
+                        ("Non payées", float(commission_total or 0), format_fc(float(commission_total or 0))),
+                        ("Commandes dette", float(DatabaseHelper.count_orders_with_debt()), f"{DatabaseHelper.count_orders_with_debt()} clients"),
+                    ],
+                )
+            )
+
+        return charts[:4]
 
     def build_metric_cards_data(self) -> list[tuple[str, str, str]]:
         today = date.today()
@@ -3429,7 +4275,7 @@ class DashboardWindow(tk.Toplevel):
             ]
         if self.user.role == "Caissier":
             return [
-                ("Montant reçu ce mois", format_fc(float(orders_summary.get("MontantRecu", 0) or 0)), month_label),
+                ("Reçu commandes ce mois", format_fc(float(orders_summary.get("MontantRecu", 0) or 0)), month_label),
                 ("Dettes payées ce mois", format_fc(paid_debts_month), month_label),
                 ("Caisse du mois", format_fc(cash_total), "Entrées moins dépenses"),
                 ("Dettes ouvertes", format_fc(float(orders_summary.get("TotalDettes", 0) or 0)), f"{len(debt_alerts)} client(s) prioritaire(s)"),
@@ -3437,7 +4283,7 @@ class DashboardWindow(tk.Toplevel):
                 (
                     "Travailleurs",
                     str(int(payroll_summary.get("TravailleursActifs", 0) or 0)),
-                    f"Paies du mois : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}",
+                    f"Payé : {format_fc(float(payroll_summary.get('TotalPaye', 0) or 0))} | Non payé : {format_fc(float(payroll_summary.get('TotalNonPaye', 0) or 0))}",
                 ),
             ]
         stock_summary = DatabaseHelper.get_stock_summary()
@@ -3452,7 +4298,7 @@ class DashboardWindow(tk.Toplevel):
             (
                 "Travailleurs",
                 str(int(payroll_summary.get("TravailleursActifs", 0) or 0)),
-                f"Paies du mois : {format_fc(float(payroll_summary.get('TotalNet', 0) or 0))}",
+                f"Payé : {format_fc(float(payroll_summary.get('TotalPaye', 0) or 0))} | Non payé : {format_fc(float(payroll_summary.get('TotalNonPaye', 0) or 0))}",
             ),
         ]
 
@@ -4124,6 +4970,12 @@ class DashboardWindow(tk.Toplevel):
 
     def open_about(self) -> None:
         AboutWindow(self)
+
+    def open_activation(self) -> None:
+        if self.user.role != "Admin":
+            messagebox.showwarning("AccÃ¨s refusÃ©", "Seul l'Admin peut gÃ©rer l'activation.")
+            return
+        LicenseActivationWindow(self, allow_close=True)
 
     def on_close_app(self) -> None:
         if not messagebox.askyesno("Confirmation", "Voulez-vous vraiment quitter l'application ?"):
@@ -5701,7 +6553,8 @@ class WorkersPayrollWindow(BaseModuleWindow):
             f"{int(summary.get('NombreTravailleurs', 0) or 0)} | "
             f"Actifs : {int(summary.get('TravailleursActifs', 0) or 0)} | "
             f"Masse salariale mensuelle : {format_fc(float(summary.get('MasseSalarialeMensuelle', 0) or 0))} | "
-            f"Total net payé : {format_fc(float(summary.get('TotalNet', 0) or 0))}"
+            f"Net payé : {format_fc(float(summary.get('TotalPaye', 0) or 0))} | "
+            f"Non payé : {format_fc(float(summary.get('TotalNonPaye', 0) or 0))}"
         )
 
     def selected_worker_id_for_payroll(self) -> int:
@@ -6579,7 +7432,6 @@ class PrevisionWindow(BaseModuleWindow):
             form,
             textvariable=self.location_var,
             values=PREVISION_LOCATIONS,
-            state="readonly",
             width=24,
         )
         self.location_combo.grid(row=1, column=1, sticky="ew", pady=6)
@@ -7749,6 +8601,7 @@ class OrdersWindow(BaseModuleWindow):
                 "NombreBacs",
                 "MontantAPercevoir",
                 "MontantRecu",
+                "MontantRecuCommande",
                 "AvanceUtilisee",
                 "AvanceGeneree",
                 "SoldeAvance",
@@ -7761,7 +8614,8 @@ class OrdersWindow(BaseModuleWindow):
                 "DateCommande": "Date",
                 "NombreBacs": "Bacs",
                 "MontantAPercevoir": "À percevoir",
-                "MontantRecu": "Reçu",
+                "MontantRecu": "Payé client",
+                "MontantRecuCommande": "Reçu commande",
                 "AvanceUtilisee": "Avance utilisée",
                 "AvanceGeneree": "Nouvelle avance",
                 "SoldeAvance": "Solde avance",
@@ -7776,6 +8630,7 @@ class OrdersWindow(BaseModuleWindow):
                 "NombreBacs": lambda value: f"{int(value)}",
                 "MontantAPercevoir": lambda value: format_fc(float(value)),
                 "MontantRecu": lambda value: format_fc(float(value)),
+                "MontantRecuCommande": lambda value: format_fc(float(value)),
                 "AvanceUtilisee": lambda value: format_fc(float(value)),
                 "AvanceGeneree": lambda value: format_fc(float(value)),
                 "SoldeAvance": lambda value: format_fc(float(value)),
@@ -8056,7 +8911,7 @@ class OrdersWindow(BaseModuleWindow):
                 "DateCommande": "Date",
                 "NombreBacs": "Bacs",
                 "MontantAPercevoir": "À percevoir",
-                "MontantRecu": "Reçu",
+                "MontantRecu": "Payé client",
                 "DetteInitiale": "Dette initiale",
                 "DettePayee": "Dette payée",
                 "Dette": "Dette restante",
@@ -8084,7 +8939,8 @@ class OrdersWindow(BaseModuleWindow):
                 f"Nombre de commandes : {len(rows)} | Commandes avec dette : {int(summary.get('NombreAvecDette', 0))}\n"
                 f"Total bacs : {int(summary.get('TotalBacs', 0))}\n"
                 f"Montant attendu : {format_fc(float(summary.get('MontantAttendu', 0)))} | "
-                f"Montant reçu : {format_fc(float(summary.get('MontantRecu', 0)))} | "
+                f"Payé clients : {format_fc(float(summary.get('MontantRecuBrut', summary.get('MontantRecu', 0))))} | "
+                f"Reçu commandes : {format_fc(float(summary.get('MontantRecu', 0)))} | "
                 f"Dettes : {format_fc(float(summary.get('TotalDettes', 0)))}\n"
                 f"Avances disponibles : {format_fc(float(summary.get('AvancesDisponibles', 0)))}"
             )
@@ -8095,7 +8951,11 @@ class OrdersWindow(BaseModuleWindow):
                 target_date = date.today()
             total_bacs = sum(int(row["NombreBacs"]) for row in rows)
             total_due = sum(float(row["MontantAPercevoir"]) for row in rows)
-            total_received = sum(float(row["MontantRecu"]) for row in rows)
+            total_paid = sum(float(row.get("MontantRecu", 0) or 0) for row in rows)
+            total_received = sum(
+                float(row.get("MontantRecuCommande", row.get("MontantRecu", 0)) or 0)
+                for row in rows
+            )
             advances_used = sum(float(row.get("AvanceUtilisee", 0) or 0) for row in rows)
             advances_generated = sum(float(row.get("AvanceGeneree", 0) or 0) for row in rows)
             total_debt = sum(float(row["Dette"]) for row in rows)
@@ -8105,7 +8965,8 @@ class OrdersWindow(BaseModuleWindow):
                 f"Nombre de commandes : {len(rows)} | Commandes avec dette : {with_debt}\n"
                 f"Total bacs : {total_bacs}\n"
                 f"Montant attendu : {format_fc(total_due)} | "
-                f"Montant reçu : {format_fc(total_received)} | "
+                f"Payé clients : {format_fc(total_paid)} | "
+                f"Reçu commandes : {format_fc(total_received)} | "
                 f"Dettes : {format_fc(total_debt)}\n"
                 f"Avances utilisées : {format_fc(advances_used)} | "
                 f"Nouvelles avances : {format_fc(advances_generated)}"
@@ -8300,7 +9161,7 @@ class CashWindow(BaseModuleWindow):
 
         self._make_label_value(form, "Nombre total de bacs", self.total_trays_var, 1)
         self._make_label_value(form, "Montant attendu", self.expected_var, 2, "#7a0000")
-        self._make_label_value(form, "Montant reçu", self.received_var, 3, SUCCESS_COLOR)
+        self._make_label_value(form, "Reçu commandes", self.received_var, 3, SUCCESS_COLOR)
         self._make_label_value(form, "Dettes du jour", self.debts_var, 4, DANGER_COLOR)
         self._make_label_value(form, "Total dettes accumulées", self.accumulated_debts_var, 5, DANGER_COLOR)
 
@@ -8486,7 +9347,7 @@ class CashWindow(BaseModuleWindow):
                 f"Fiches caisse : {row_count}\n"
                 f"Total bacs : {int(summary.get('TotalBacs', 0))} | "
                 f"Attendu : {format_fc(float(summary.get('MontantAttendu', 0)))} | "
-                f"Reçu : {format_fc(float(summary.get('MontantRecu', 0)))}\n"
+                f"Reçu commandes : {format_fc(float(summary.get('MontantRecu', 0)))}\n"
                 f"Dettes payées : {format_fc(paid_debts_total)} | Entrées : {format_fc(entries_total)}\n"
                 f"Dettes du jour : {format_fc(float(summary.get('TotalDettes', 0)))} | "
                 f"Restant accumulé : {format_fc(accumulated_remaining)} | "
@@ -8495,7 +9356,7 @@ class CashWindow(BaseModuleWindow):
         else:
             text = (
                 f"Jour : {target_date.strftime('%d/%m/%Y')} | Bacs : {int(self.trays_today)}\n"
-                f"Fiches caisse : {row_count} | Reçu : {format_fc(self.received_today)} | "
+                f"Fiches caisse : {row_count} | Reçu commandes : {format_fc(self.received_today)} | "
                 f"Dettes payées : {format_fc(paid_debts)}\n"
                 f"Entrées : {format_fc(entries_today)} | "
                 f"Solde du jour : {format_fc(balance)}\n"
@@ -8535,7 +9396,7 @@ class CashWindow(BaseModuleWindow):
                 "DateCaisse": "Date",
                 "NombreTotalBacs": "Bacs",
                 "MontantAttendu": "Attendu",
-                "MontantRecu": "Reçu",
+                "MontantRecu": "Reçu commandes",
                 "TotalDettes": "Dettes du jour",
                 "TotalDettesAccumulees": "Dettes accumulées",
                 "DettesPayeesAujourdHui": "Dettes payées",
@@ -8921,7 +9782,10 @@ class CommissionsWindow(BaseModuleWindow):
         self.update_summary(rows)
 
     def update_summary(self, rows: list[dict[str, Any]]) -> None:
+        total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in rows)
+        total_paid = sum(float(row.get("MontantPaye", 0) or 0) for row in rows)
         total_commissions = sum(float(row["Commissions"]) for row in rows)
+        total_debts = sum(float(row.get("Dettes", 0) or 0) for row in rows)
         total_net = sum(float(row["NetAPayer"]) for row in rows)
         if self.show_all_dates:
             prefix = "Affichage : toutes les dates"
@@ -8934,7 +9798,8 @@ class CommissionsWindow(BaseModuleWindow):
         self.summary_var.set(
             f"{prefix}\n"
             f"Filtre : {self.filter_var.get()}\n"
-            f"Nombre de commissions : {len(rows)}\n"
+            f"Nombre de commissions : {len(rows)} | Bacs : {total_trays}\n"
+            f"Montant payé : {format_fc(total_paid)} | Dettes : {format_fc(total_debts)}\n"
             f"Total commissions : {format_fc(total_commissions)}\n"
             f"Total net à payer : {format_fc(total_net)}"
         )

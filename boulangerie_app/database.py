@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 import functools
 import hashlib
 import hmac
@@ -32,7 +33,8 @@ from .status_labels import (
     ORDER_STATUS_RATES,
     normalize_status_form_label,
 )
-from .version import APP_VERSION
+from .client_config import get_app_data_dir_name, get_contact_email, get_contact_phone, get_email_domain, get_public_url
+from .version import APP_NAME, APP_PUBLISHER, APP_VERSION
 
 
 DB_DATE_FORMAT = "%Y-%m-%d"
@@ -44,21 +46,30 @@ PRIVILEGED_PASSWORD_LENGTH = 14
 LOGIN_FAILURE_LIMIT = 5
 LOGIN_LOCK_DURATIONS_MINUTES = (2, 5, 30)
 ACTIVE_SESSION_TTL_HOURS = 12
-ACTIVE_SESSION_STALE_MINUTES = 3
+ACTIVE_SESSION_STALE_MINUTES = 15
 DEFAULT_ADMIN_FULL_NAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_FULL_NAME", "Augustin Kayembe")
 DEFAULT_ADMIN_USERNAME = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_USERNAME", "a.kayembe")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("BOULANGERIE_DEFAULT_ADMIN_PASSWORD", "010203")
-DEFAULT_EMAIL_DOMAIN = os.environ.get("BOULANGERIE_EMAIL_DOMAIN", "boulangerie-lomoto.com")
-APP_PUBLIC_URL = os.environ.get("BOULANGERIE_PUBLIC_URL", "https://app.boulangerie-lomoto.com")
-APP_CONTACT_EMAIL = os.environ.get("BOULANGERIE_CONTACT_EMAIL", "contact@boulangerie-lomoto.com")
-APP_CONTACT_PHONE = os.environ.get("BOULANGERIE_CONTACT_PHONE", "+243 991 599 600")
+DEFAULT_EMAIL_DOMAIN = get_email_domain()
+APP_PUBLIC_URL = get_public_url()
+APP_CONTACT_EMAIL = get_contact_email()
+APP_CONTACT_PHONE = get_contact_phone()
 FORCED_DATABASE_RESET_VERSION = "1.3.0"
+# Version du schéma stockée dans ``PRAGMA user_version``. À incrémenter chaque
+# fois qu'une évolution du schéma justifie une sauvegarde de sécurité avant
+# migration. Les bases antérieures (user_version = 0) sont sauvegardées une fois
+# au premier démarrage sous cette version.
+SCHEMA_VERSION = 1
 AUTO_BACKUP_PREFIX = "sauvegarde-automatique"
 AUTO_BACKUP_RETENTION_DAYS = 30
 AUTO_BACKUP_MIN_KEEP = 7
 OUTSTANDING_DEBT_SQL = (
     "CASE WHEN IFNULL(Dette, 0) - IFNULL(DettePayee, 0) > 0 "
     "THEN IFNULL(Dette, 0) - IFNULL(DettePayee, 0) ELSE 0 END"
+)
+ORDER_ACCOUNTED_RECEIVED_SQL = (
+    "CASE WHEN IFNULL(MontantRecu, 0) - IFNULL(AvanceGeneree, 0) > 0 "
+    "THEN IFNULL(MontantRecu, 0) - IFNULL(AvanceGeneree, 0) ELSE 0 END"
 )
 DEBT_STATUS_SQL = (
     "CASE "
@@ -104,7 +115,7 @@ class DatabaseHelper:
                         str(Path.home() / "AppData" / "Local"),
                     )
                 )
-                / "BoulangerieLomoto"
+                / get_app_data_dir_name()
             ),
         )
     )
@@ -258,17 +269,59 @@ class DatabaseHelper:
 
         cls.initialize_local_database()
 
+    @staticmethod
+    def _read_schema_version(connection: sqlite3.Connection) -> int:
+        try:
+            return int(connection.execute("PRAGMA user_version").fetchone()[0] or 0)
+        except (sqlite3.Error, TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _safety_backup_before_migration(cls, from_version: int) -> Path | None:
+        """Copie la base existante avant d'appliquer les migrations.
+
+        Ne doit jamais empêcher le démarrage : toute erreur est ignorée après
+        journalisation minimale (retour ``None``).
+        """
+        try:
+            destination = cls.build_backup_path(f"avant-migration-v{from_version}")
+            source = sqlite3.connect(cls.db_path, timeout=10)
+            try:
+                target = sqlite3.connect(destination, timeout=10)
+                try:
+                    source.backup(target)
+                finally:
+                    target.close()
+            finally:
+                source.close()
+            return destination
+        except (OSError, sqlite3.Error):
+            return None
+
     @classmethod
     def initialize_local_database(cls) -> None:
         cls.db_path.parent.mkdir(parents=True, exist_ok=True)
         cls.backups_dir.mkdir(parents=True, exist_ok=True)
         cls.reports_dir.mkdir(parents=True, exist_ok=True)
+        preexisting_database = cls.db_path.exists()
         if (
             not cls.db_path.exists()
             and cls.legacy_db_path.exists()
             and cls.legacy_db_path.resolve() != cls.db_path.resolve()
         ):
             shutil.copy2(cls.legacy_db_path, cls.db_path)
+
+        # Sauvegarde de sécurité : une seule fois, avant de migrer une base
+        # existante dont le schéma est plus ancien que le code courant.
+        if preexisting_database and cls.db_path.exists():
+            probe = sqlite3.connect(cls.db_path, timeout=10)
+            try:
+                stored_version = cls._read_schema_version(probe)
+            finally:
+                probe.close()
+            if stored_version < SCHEMA_VERSION:
+                cls._safety_backup_before_migration(stored_version)
+
         with cls.connect() as connection:
             cls._create_tables(connection)
             cls._migrate_user_recoverable_password_column(connection)
@@ -292,6 +345,10 @@ class DatabaseHelper:
             cls._sync_all_commissions(connection)
             cls._migrate_legacy_admin(connection)
             cls._insert_default_stock_config(connection)
+            # Estampille la version du schéma dans la même transaction que les
+            # migrations : en cas d'échec, connect() annule tout et la version
+            # n'est pas avancée (la sauvegarde de sécurité reste disponible).
+            connection.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         pragma_connection: sqlite3.Connection | None = None
         try:
             pragma_connection = sqlite3.connect(cls.db_path, timeout=10)
@@ -1479,6 +1536,11 @@ class DatabaseHelper:
         return f"{cls._email_local_part(identifiant)}@{domain}"
 
     @classmethod
+    def build_default_worker_email(cls, full_name: str) -> str:
+        domain = DEFAULT_EMAIL_DOMAIN.strip().lower().lstrip("@") or "boulangerie-lomoto.com"
+        return f"{cls._email_local_part(full_name)}@{domain}"
+
+    @classmethod
     def _user_email_for_save(
         cls,
         connection: sqlite3.Connection,
@@ -1503,6 +1565,36 @@ class DatabaseHelper:
             LIMIT 1
             """,
             (candidate, current_identifiant or identifiant),
+        ).fetchone():
+            candidate = f"{local_part}-{suffix}@{domain}"
+            suffix += 1
+        return candidate
+
+    @classmethod
+    def _worker_email_for_save(
+        cls,
+        connection: sqlite3.Connection,
+        email: str | None,
+        full_name: str,
+        current_worker_id: int = 0,
+    ) -> str:
+        normalized_email = cls._normalize_email(email or "")
+        generated = not normalized_email
+        candidate = normalized_email or cls.build_default_worker_email(full_name)
+        if not generated:
+            return candidate
+
+        local_part, _, domain = candidate.partition("@")
+        suffix = 2
+        while connection.execute(
+            """
+            SELECT 1
+            FROM Travailleurs
+            WHERE LOWER(Email) = LOWER(?)
+              AND Id <> ?
+            LIMIT 1
+            """,
+            (candidate, int(current_worker_id or 0)),
         ).fetchone():
             candidate = f"{local_part}-{suffix}@{domain}"
             suffix += 1
@@ -1556,10 +1648,10 @@ class DatabaseHelper:
     def _email_text_footer() -> str:
         return (
             "\n\n--\n"
-            "Boulangerie Lomoto\n"
+            f"{APP_NAME}\n"
             f"Application : {APP_PUBLIC_URL}\n"
             f"Contact : {APP_CONTACT_EMAIL} | {APP_CONTACT_PHONE}\n"
-            "Message automatique genere par l'application Boulangerie Lomoto."
+            f"Message automatique genere par l'application {APP_NAME}."
         )
 
     @staticmethod
@@ -1576,7 +1668,7 @@ class DatabaseHelper:
           <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #d9e1ec;border-radius:10px;overflow:hidden;">
             <tr>
               <td style="background:#101827;color:#ffffff;padding:22px 28px;">
-                <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#f2c94c;">Boulangerie Lomoto</div>
+                <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#f2c94c;">{escape(APP_NAME)}</div>
                 <h1 style="margin:8px 0 0;font-size:24px;line-height:1.25;">{safe_title}</h1>
               </td>
             </tr>
@@ -1590,7 +1682,7 @@ class DatabaseHelper:
               <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:18px 28px;color:#64748b;font-size:12px;line-height:1.55;">
                 <p style="margin:0 0 6px;">Application : <a href="{escape(APP_PUBLIC_URL)}" style="color:#c5162d;text-decoration:none;">{escape(APP_PUBLIC_URL)}</a></p>
                 <p style="margin:0 0 6px;">Contact : {escape(APP_CONTACT_EMAIL)} | {escape(APP_CONTACT_PHONE)}</p>
-                <p style="margin:0;">&copy; {year} Boulangerie Lomoto - Kay Box Store. Message automatique, merci de ne pas partager son contenu inutilement.</p>
+                <p style="margin:0;">&copy; {year} {escape(APP_NAME)} - {escape(APP_PUBLISHER)}. Message automatique, merci de ne pas partager son contenu inutilement.</p>
               </td>
             </tr>
           </table>
@@ -1610,10 +1702,10 @@ class DatabaseHelper:
         password: str,
         role: str,
     ) -> None:
-        subject = "Boulangerie Lomoto - Vos accès utilisateur"
+        subject = f"{APP_NAME} - Vos accès utilisateur"
         text_body = (
             f"Bonjour {full_name},\n\n"
-            "Votre compte Boulangerie Lomoto a été créé.\n\n"
+            f"Votre compte {APP_NAME} a été créé.\n\n"
             f"Identifiant : {identifiant}\n"
             f"Mot de passe temporaire : {password}\n"
             f"Rôle : {role}\n"
@@ -1641,7 +1733,7 @@ class DatabaseHelper:
         )
         html_body = cls._email_html_layout(
             "Vos accès utilisateur",
-            f"Bonjour {full_name}, votre compte Boulangerie Lomoto est prêt.",
+            f"Bonjour {full_name}, votre compte {APP_NAME} est prêt.",
             details,
         )
         cls._queue_email_notification(
@@ -1663,10 +1755,10 @@ class DatabaseHelper:
         password: str,
         role: str,
     ) -> None:
-        subject = "Boulangerie Lomoto - Nouveau mot de passe"
+        subject = f"{APP_NAME} - Nouveau mot de passe"
         text_body = (
             f"Bonjour {full_name},\n\n"
-            "Le mot de passe de votre compte Boulangerie Lomoto a ete modifie.\n\n"
+            f"Le mot de passe de votre compte {APP_NAME} a ete modifie.\n\n"
             f"Identifiant : {identifiant}\n"
             f"Nouveau mot de passe : {password}\n"
             f"Role : {role}\n"
@@ -1694,7 +1786,7 @@ class DatabaseHelper:
         )
         html_body = cls._email_html_layout(
             "Nouveau mot de passe",
-            f"Bonjour {full_name}, votre mot de passe Boulangerie Lomoto a ete modifie.",
+            f"Bonjour {full_name}, votre mot de passe {APP_NAME} a ete modifie.",
             details,
         )
         cls._queue_email_notification(
@@ -2406,8 +2498,7 @@ class DatabaseHelper:
             ).fetchone()
 
             if existing is not None and not hmac.compare_digest(str(existing["SessionToken"]), normalized_token):
-                same_context = cls._same_session_context(existing, platform_text, device_text, address_text)
-                if not force and not same_context:
+                if not force:
                     return {
                         "ok": False,
                         "conflict": True,
@@ -2744,11 +2835,9 @@ class DatabaseHelper:
         normalized_salary = float(monthly_salary or 0)
         if normalized_salary < 0:
             raise ValueError("Le salaire mensuel ne peut pas être négatif.")
-        normalized_email = cls._normalize_email(email)
-        if not normalized_email:
-            raise ValueError("Veuillez saisir l'adresse e-mail du travailleur.")
         normalized_date = cls.ensure_not_future_date(hire_date, "un travailleur")
         with cls.connect() as connection:
+            normalized_email = cls._worker_email_for_save(connection, email, normalized_name)
             cursor = connection.execute(
                 """
                 INSERT INTO Travailleurs (
@@ -2798,37 +2887,37 @@ class DatabaseHelper:
         normalized_salary = float(monthly_salary or 0)
         if normalized_salary < 0:
             raise ValueError("Le salaire mensuel ne peut pas être négatif.")
-        normalized_email = cls._normalize_email(email)
-        if not normalized_email:
-            raise ValueError("Veuillez saisir l'adresse e-mail du travailleur.")
         normalized_date = cls.ensure_not_future_date(hire_date, "un travailleur")
-        return cls._execute(
-            """
-            UPDATE Travailleurs
-            SET NomComplet = ?,
-                Fonction = ?,
-                Telephone = ?,
-                Email = ?,
-                Adresse = ?,
-                DateEmbauche = ?,
-                SalaireMensuel = ?,
-                Statut = ?,
-                Observations = ?
-            WHERE Id = ?
-            """,
-            (
-                normalized_name,
-                function.strip(),
-                phone.strip(),
-                normalized_email,
-                address.strip(),
-                normalized_date.strftime(DB_DATE_FORMAT),
-                normalized_salary,
-                status.strip() or "Actif",
-                observations.strip(),
-                int(worker_id),
-            ),
-        )
+        with cls.connect() as connection:
+            normalized_email = cls._worker_email_for_save(connection, email, normalized_name, int(worker_id))
+            cursor = connection.execute(
+                """
+                UPDATE Travailleurs
+                SET NomComplet = ?,
+                    Fonction = ?,
+                    Telephone = ?,
+                    Email = ?,
+                    Adresse = ?,
+                    DateEmbauche = ?,
+                    SalaireMensuel = ?,
+                    Statut = ?,
+                    Observations = ?
+                WHERE Id = ?
+                """,
+                (
+                    normalized_name,
+                    function.strip(),
+                    phone.strip(),
+                    normalized_email,
+                    address.strip(),
+                    normalized_date.strftime(DB_DATE_FORMAT),
+                    normalized_salary,
+                    status.strip() or "Actif",
+                    observations.strip(),
+                    int(worker_id),
+                ),
+            )
+            return int(cursor.rowcount)
 
     @classmethod
     def delete_worker(cls, worker_id: int) -> int:
@@ -2876,7 +2965,7 @@ class DatabaseHelper:
         def money(value: float) -> str:
             return f"{float(value or 0):,.0f}".replace(",", " ") + " FC"
 
-        subject = f"Boulangerie Lomoto - Paie {normalized_status} - {period}"
+        subject = f"{APP_NAME} - Paie {normalized_status} - {period}"
         text_body = (
             f"Bonjour {worker_name},\n\n"
             f"Votre paie pour la période {period} est au statut : {normalized_status}.\n\n"
@@ -2979,6 +3068,30 @@ class DatabaseHelper:
         return net_amount
 
     @classmethod
+    def find_existing_payroll(
+        cls,
+        worker_id: int,
+        period: str,
+        exclude_id: int = 0,
+    ) -> int:
+        normalized_period = str(period or "").strip()
+        if int(worker_id or 0) <= 0 or not normalized_period:
+            return 0
+        sql = """
+            SELECT Id
+            FROM PaiesTravailleurs
+            WHERE TravailleurId = ?
+              AND LOWER(TRIM(Periode)) = LOWER(TRIM(?))
+        """
+        params: list[Any] = [int(worker_id), normalized_period]
+        if int(exclude_id or 0) > 0:
+            sql += " AND Id <> ?"
+            params.append(int(exclude_id))
+        sql += " ORDER BY Id DESC LIMIT 1"
+        value = cls._fetch_value(sql, tuple(params))
+        return int(value or 0)
+
+    @classmethod
     def add_payroll(
         cls,
         worker_id: int,
@@ -3013,6 +3126,11 @@ class DatabaseHelper:
                 raise ValueError(f"{label} ne peut pas être négatif.")
         net_amount = cls._calculate_payroll_net(gross, bonus_value, advance_value, withholding_value)
         normalized_period = period.strip() or target_date.strftime("%m/%Y")
+        if cls.find_existing_payroll(int(worker_id), normalized_period):
+            raise ValueError(
+                "Une paie existe deja pour ce travailleur et cette periode. "
+                "Chargez la paie existante puis modifiez-la au lieu d'en creer une deuxieme."
+            )
         with cls.connect() as connection:
             cursor = connection.execute(
                 """
@@ -3101,6 +3219,11 @@ class DatabaseHelper:
         normalized_period = period.strip() or target_date.strftime("%m/%Y")
         normalized_mode = payment_mode.strip() or "Espèces"
         normalized_status = status.strip() or "Payée"
+        if cls.find_existing_payroll(int(worker_id), normalized_period, int(payroll_id)):
+            raise ValueError(
+                "Une autre paie existe deja pour ce travailleur et cette periode. "
+                "Chaque periode ne peut avoir qu'une seule fiche de paie par travailleur."
+            )
         with cls.connect() as connection:
             cursor = connection.execute(
                 """
@@ -3178,7 +3301,11 @@ class DatabaseHelper:
                 IFNULL(SUM(Prime), 0) AS TotalPrimes,
                 IFNULL(SUM(Avance), 0) AS TotalAvances,
                 IFNULL(SUM(Retenue), 0) AS TotalRetenues,
-                IFNULL(SUM(MontantNet), 0) AS TotalNet
+                IFNULL(SUM(MontantNet), 0) AS TotalNet,
+                IFNULL(SUM(CASE WHEN Statut IN ('Payée', 'Payee') THEN MontantNet ELSE 0 END), 0) AS TotalPaye,
+                IFNULL(SUM(CASE WHEN Statut NOT IN ('Payée', 'Payee') THEN MontantNet ELSE 0 END), 0) AS TotalNonPaye,
+                SUM(CASE WHEN Statut IN ('Payée', 'Payee') THEN 1 ELSE 0 END) AS NombrePaiesPayees,
+                SUM(CASE WHEN Statut NOT IN ('Payée', 'Payee') THEN 1 ELSE 0 END) AS NombrePaiesNonPayees
             FROM PaiesTravailleurs
             WHERE 1 = 1
         """
@@ -4303,7 +4430,9 @@ class DatabaseHelper:
             SELECT
                 IFNULL(SUM(NombreBacs), 0) AS NombreTotalBacs,
                 IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
-                IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
+                IFNULL(SUM({ORDER_ACCOUNTED_RECEIVED_SQL}), 0) AS MontantRecu,
+                IFNULL(SUM({ORDER_ACCOUNTED_RECEIVED_SQL}), 0) AS MontantRecuCommande,
+                IFNULL(SUM(MontantRecu), 0) AS MontantRecuBrut,
                 IFNULL(SUM(AvanceUtilisee), 0) AS AvancesUtilisees,
                 IFNULL(SUM(AvanceGeneree), 0) AS AvancesGenerees,
                 IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS TotalDettes
@@ -4338,7 +4467,9 @@ class DatabaseHelper:
                 COUNT(*) AS NombreCommandes,
                 IFNULL(SUM(NombreBacs), 0) AS TotalBacs,
                 IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
-                IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
+                IFNULL(SUM({ORDER_ACCOUNTED_RECEIVED_SQL}), 0) AS MontantRecu,
+                IFNULL(SUM({ORDER_ACCOUNTED_RECEIVED_SQL}), 0) AS MontantRecuCommande,
+                IFNULL(SUM(MontantRecu), 0) AS MontantRecuBrut,
                 IFNULL(SUM(AvanceUtilisee), 0) AS AvancesUtilisees,
                 IFNULL(SUM(AvanceGeneree), 0) AS AvancesGenerees,
                 IFNULL(SUM(AvanceGeneree - AvanceUtilisee), 0) AS AvancesDisponibles,
@@ -4645,7 +4776,7 @@ class DatabaseHelper:
                     DateCommande,
                     SUM(NombreBacs) AS NombreTotalBacs,
                     SUM(MontantAPercevoir) AS MontantAttendu,
-                    SUM(MontantRecu) AS MontantRecu,
+                    SUM({ORDER_ACCOUNTED_RECEIVED_SQL}) AS MontantRecu,
                     SUM({OUTSTANDING_DEBT_SQL}) AS TotalDettes
                 FROM Commandes
                 GROUP BY DateCommande
@@ -4709,7 +4840,7 @@ class DatabaseHelper:
                     DateCommande,
                     SUM(NombreBacs) AS NombreTotalBacs,
                     SUM(MontantAPercevoir) AS MontantAttendu,
-                    SUM(MontantRecu) AS MontantRecu,
+                    SUM({ORDER_ACCOUNTED_RECEIVED_SQL}) AS MontantRecu,
                     SUM({OUTSTANDING_DEBT_SQL}) AS TotalDettes
                 FROM Commandes
                 GROUP BY DateCommande
@@ -4747,7 +4878,7 @@ class DatabaseHelper:
                 DateCommande,
                 IFNULL(SUM(NombreBacs), 0) AS NombreTotalBacs,
                 IFNULL(SUM(MontantAPercevoir), 0) AS MontantAttendu,
-                IFNULL(SUM(MontantRecu), 0) AS MontantRecu,
+                IFNULL(SUM({ORDER_ACCOUNTED_RECEIVED_SQL}), 0) AS MontantRecu,
                 IFNULL(SUM({OUTSTANDING_DEBT_SQL}), 0) AS TotalDettes
             FROM Commandes
             WHERE DateCommande BETWEEN ? AND ?
@@ -4822,7 +4953,7 @@ class DatabaseHelper:
     @classmethod
     def get_total_cash(cls) -> float:
         value = cls._fetch_value(
-            """
+            f"""
             SELECT IFNULL(SUM(
                 IFNULL(cmd.MontantRecu, 0)
                 + IFNULL(c.DettesPayeesAujourdHui, 0)
@@ -4830,7 +4961,7 @@ class DatabaseHelper:
             ), 0)
             FROM CaisseJournaliere c
             LEFT JOIN (
-                SELECT DateCommande, SUM(MontantRecu) AS MontantRecu
+                SELECT DateCommande, SUM({ORDER_ACCOUNTED_RECEIVED_SQL}) AS MontantRecu
                 FROM Commandes
                 GROUP BY DateCommande
             ) cmd
@@ -4845,7 +4976,7 @@ class DatabaseHelper:
         end = cls._coerce_date(end_date).strftime(DB_DATE_FORMAT)
         received = float(
             cls._fetch_value(
-                "SELECT IFNULL(SUM(MontantRecu), 0) FROM Commandes WHERE DateCommande BETWEEN ? AND ?",
+                f"SELECT IFNULL(SUM({ORDER_ACCOUNTED_RECEIVED_SQL}), 0) FROM Commandes WHERE DateCommande BETWEEN ? AND ?",
                 (start, end),
             )
             or 0
@@ -4874,6 +5005,7 @@ class DatabaseHelper:
                 NombreBacs,
                 MontantAPercevoir,
                 MontantRecu,
+                {ORDER_ACCOUNTED_RECEIVED_SQL} AS MontantRecuCommande,
                 IFNULL(AvanceUtilisee, 0) AS AvanceUtilisee,
                 IFNULL(AvanceGeneree, 0) AS AvanceGeneree,
                 IFNULL(SoldeAvance, 0) AS SoldeAvance,
@@ -4898,6 +5030,7 @@ class DatabaseHelper:
                 NombreBacs,
                 MontantAPercevoir,
                 MontantRecu,
+                {ORDER_ACCOUNTED_RECEIVED_SQL} AS MontantRecuCommande,
                 IFNULL(AvanceUtilisee, 0) AS AvanceUtilisee,
                 IFNULL(AvanceGeneree, 0) AS AvanceGeneree,
                 IFNULL(SoldeAvance, 0) AS SoldeAvance,
@@ -5155,6 +5288,7 @@ class DatabaseHelper:
                 NombreBacs,
                 MontantAPercevoir,
                 MontantRecu,
+                {ORDER_ACCOUNTED_RECEIVED_SQL} AS MontantRecuCommande,
                 IFNULL(AvanceUtilisee, 0) AS AvanceUtilisee,
                 IFNULL(AvanceGeneree, 0) AS AvanceGeneree,
                 IFNULL(SoldeAvance, 0) AS SoldeAvance,
@@ -5202,6 +5336,60 @@ class DatabaseHelper:
             """,
             (target_date.strftime(DB_DATE_FORMAT),),
         )
+
+    @classmethod
+    def list_commissions_for_period(
+        cls,
+        start_date: date | str,
+        end_date: date | str,
+        status: str = "",
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT Id, DateCommission, Nom, Statut, NombreBacs, MontantPaye, Commissions, Dettes, NetAPayer
+            FROM Commissions
+            WHERE DateCommission BETWEEN ? AND ?
+        """
+        params: list[Any] = [
+            cls._coerce_date(start_date).strftime(DB_DATE_FORMAT),
+            cls._coerce_date(end_date).strftime(DB_DATE_FORMAT),
+        ]
+        normalized_status = normalize_status_form_label(status)
+        if normalized_status and normalized_status != "Tous":
+            sql += " AND Statut = ?"
+            params.append(normalized_status)
+        sql += " ORDER BY DateCommission DESC, Id DESC"
+        return cls._fetch_all(sql, tuple(params))
+
+    @classmethod
+    def get_commissions_summary(
+        cls,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
+        status: str = "",
+    ) -> dict[str, Any]:
+        sql = """
+            SELECT
+                COUNT(*) AS NombreCommissions,
+                IFNULL(SUM(NombreBacs), 0) AS TotalBacs,
+                IFNULL(SUM(MontantPaye), 0) AS TotalMontantPaye,
+                IFNULL(SUM(Commissions), 0) AS TotalCommissions,
+                IFNULL(SUM(Dettes), 0) AS TotalDettes,
+                IFNULL(SUM(NetAPayer), 0) AS TotalNetAPayer
+            FROM Commissions
+            WHERE 1 = 1
+        """
+        params: list[Any] = []
+        if start_date is not None:
+            sql += " AND DateCommission >= ?"
+            params.append(cls._coerce_date(start_date).strftime(DB_DATE_FORMAT))
+        if end_date is not None:
+            sql += " AND DateCommission <= ?"
+            params.append(cls._coerce_date(end_date).strftime(DB_DATE_FORMAT))
+        normalized_status = normalize_status_form_label(status)
+        if normalized_status and normalized_status != "Tous":
+            sql += " AND Statut = ?"
+            params.append(normalized_status)
+        return cls._fetch_one(sql, tuple(params)) or {}
 
     @classmethod
     def list_clients_from_orders_by_date(cls, target_date: date) -> list[str]:
@@ -5734,6 +5922,41 @@ class DatabaseHelper:
             params.append(normalized_role)
         sql += f" ORDER BY DateAction DESC, Id DESC LIMIT {row_limit}"
         return cls._fetch_all(sql, tuple(params))
+
+    @classmethod
+    def archive_activity_logs(cls) -> Path | None:
+        rows = cls._fetch_all(
+            """
+            SELECT
+                DateAction,
+                NomComplet,
+                Identifiant,
+                Role,
+                Module,
+                Action,
+                Details
+            FROM HistoriqueActions
+            ORDER BY DateAction DESC, Id DESC
+            """
+        )
+        if not rows:
+            return None
+        archive_dir = cls.reports_dir / "archives"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / f"historique-actions-{cls._timestamp_for_filename()}.csv"
+        fieldnames = ["DateAction", "NomComplet", "Identifiant", "Role", "Module", "Action", "Details"]
+        with archive_path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in fieldnames})
+        return archive_path
+
+    @classmethod
+    def clear_activity_logs(cls, archive: bool = True) -> int:
+        if archive:
+            cls.archive_activity_logs()
+        return cls._execute("DELETE FROM HistoriqueActions")
 
     @classmethod
     def get_recent_activity_summary(cls, limit: int = 8) -> list[dict[str, Any]]:

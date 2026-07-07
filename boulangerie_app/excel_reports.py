@@ -71,6 +71,16 @@ def _format_date(target_date: date) -> str:
     return target_date.strftime("%d/%m/%Y")
 
 
+def _order_accounted_received(row: dict[str, Any]) -> float:
+    if "MontantRecuCommande" in row:
+        return max(float(row.get("MontantRecuCommande", 0) or 0), 0.0)
+    return max(float(row.get("MontantRecu", 0) or 0) - float(row.get("AvanceGeneree", 0) or 0), 0.0)
+
+
+def _order_gross_received(row: dict[str, Any]) -> float:
+    return max(float(row.get("MontantRecu", 0) or 0), 0.0)
+
+
 def _format_month_label(target_date: date) -> str:
     return target_date.strftime("%m/%Y")
 
@@ -200,7 +210,7 @@ def _order_status_summary_rows(rows: list[dict[str, Any]]) -> list[tuple[str, in
         bucket["count"] = int(bucket["count"]) + 1
         bucket["trays"] = int(bucket["trays"]) + int(row.get("NombreBacs", 0) or 0)
         bucket["expected"] = float(bucket["expected"]) + float(row.get("MontantAPercevoir", 0) or 0)
-        bucket["received"] = float(bucket["received"]) + float(row.get("MontantRecu", 0) or 0)
+        bucket["received"] = float(bucket["received"]) + _order_accounted_received(row)
         bucket["advance_used"] = float(bucket["advance_used"]) + float(row.get("AvanceUtilisee", 0) or 0)
         bucket["advance_generated"] = float(bucket["advance_generated"]) + float(row.get("AvanceGeneree", 0) or 0)
         bucket["debt"] = float(bucket["debt"]) + float(row.get("Dette", 0) or 0)
@@ -377,7 +387,7 @@ def _apply_brand_header(
 
 def _apply_cash_emphasis(sheet: Worksheet, row_index: int, label: str, end_column: int = 2) -> None:
     if label in {
-        "Montant reçu",
+        "Reçu commandes",
         "Dettes payées aujourd'hui",
         "Dettes payées du mois",
         "Dettes payées sur la période",
@@ -460,6 +470,9 @@ def _build_report_context(
         "paid_debts_items": parse_named_amount_lines(paid_debts_details),
         "total_expected": float(orders_summary.get("MontantAttendu", 0) or 0),
         "total_received": float(orders_summary.get("MontantRecu", 0) or 0),
+        "total_received_gross": float(
+            orders_summary.get("MontantRecuBrut", orders_summary.get("MontantRecu", 0)) or 0
+        ),
         "total_debts": float(orders_summary.get("TotalDettes", 0) or 0),
         "total_trays": int(orders_summary.get("NombreTotalBacs", 0) or 0),
         "total_expenses": float(cash.get("MontantTotalDepenses", 0) or 0),
@@ -523,7 +536,8 @@ def _build_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
                 ("Commandes du jour", len(context["orders"]), "nombre"),
                 ("Total bacs", context["total_trays"], "nombre"),
                 ("Montant attendu", context["total_expected"], "monnaie"),
-                ("Montant reçu", context["total_received"], "monnaie"),
+                ("Payé par clients", context["total_received_gross"], "monnaie"),
+                ("Reçu commandes", context["total_received"], "monnaie"),
                 ("Dettes", context["total_debts"], "monnaie"),
             ]
         )
@@ -732,7 +746,7 @@ def _build_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
     sheet["A2"] = f"Date : {_format_date(context['target_date'])}"
     _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
 
-    headers = ["Client", "Statut", "Bacs", "À percevoir", "Reçu", "Avance utilisée", "Nouvelle avance", "Solde avance", "Dette"]
+    headers = ["Client", "Statut", "Bacs", "À percevoir", "Payé client", "Reçu commande", "Avance utilisée", "Nouvelle avance", "Solde avance", "Dette"]
     for col_index, header in enumerate(headers, start=1):
         cell = sheet.cell(3, col_index, header)
         _apply_cell_style(cell, fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
@@ -747,7 +761,8 @@ def _build_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
                 normalize_status_form_label(item.get("Statut")),
                 int(item.get("NombreBacs", 0) or 0),
                 float(item.get("MontantAPercevoir", 0) or 0),
-                float(item.get("MontantRecu", 0) or 0),
+                _order_gross_received(item),
+                _order_accounted_received(item),
                 float(item.get("AvanceUtilisee", 0) or 0),
                 float(item.get("AvanceGeneree", 0) or 0),
                 float(item.get("SoldeAvance", 0) or 0),
@@ -756,8 +771,8 @@ def _build_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
             for col_index, value in enumerate(values, start=1):
                 cell = sheet.cell(current_row, col_index, value)
                 _apply_cell_style(cell, alignment=Alignment(horizontal="left"))
-            for col in range(4, 10):
-                sheet.cell(current_row, col).number_format = MONEY_FORMAT
+        for col in range(4, 11):
+            sheet.cell(current_row, col).number_format = MONEY_FORMAT
 
         totals_row = current_row + 1
         sheet.cell(totals_row, 1, "Totaux")
@@ -766,17 +781,18 @@ def _build_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
         sheet.cell(totals_row, 5, f"=SUM(E4:E{current_row})")
         sheet.cell(totals_row, 6, f"=SUM(F4:F{current_row})")
         sheet.cell(totals_row, 7, f"=SUM(G4:G{current_row})")
-        sheet.cell(totals_row, 9, f"=SUM(I4:I{current_row})")
-        for col_index in range(1, 10):
+        sheet.cell(totals_row, 8, f"=SUM(H4:H{current_row})")
+        sheet.cell(totals_row, 10, f"=SUM(J4:J{current_row})")
+        for col_index in range(1, 11):
             _apply_cell_style(
                 sheet.cell(totals_row, col_index),
                 fill=SECTION_FILL,
                 alignment=Alignment(horizontal="left"),
                 font=SECTION_FONT if col_index == 1 else BODY_FONT,
             )
-        for col in range(4, 10):
+        for col in range(4, 11):
             sheet.cell(totals_row, col).number_format = MONEY_FORMAT
-        _add_table(sheet, 3, current_row, 9, "CommandesJour")
+        _add_table(sheet, 3, current_row, 10, "CommandesJour")
     else:
         sheet["A4"] = "Aucune commande enregistrée pour cette date."
         _apply_cell_style(sheet["A4"], alignment=Alignment(horizontal="left"), font=NOTE_FONT)
@@ -801,7 +817,8 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
 
     rows = [
         ("Montant attendu", context["total_expected"]),
-        ("Montant reçu", context["total_received"]),
+        ("Payé par clients", context["total_received_gross"]),
+        ("Reçu commandes", context["total_received"]),
         ("Dettes", context["total_debts"]),
         ("Total dettes accumulées", context["accumulated_debts_before"]),
         ("Dettes payées aujourd'hui", context["paid_debts_today"]),
@@ -896,7 +913,7 @@ def _build_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> None:
             f"le solde réel après paies est de {_format_fc(context['balance_after_payrolls'])}."
         )
     recap_text = (
-        f"Les entrées du jour correspondent au montant reçu ({context['total_received']:,.0f} FC) "
+        f"Les entrées du jour correspondent au reçu commandes ({context['total_received']:,.0f} FC) "
         f"additionné aux dettes payées aujourd'hui ({context['paid_debts_today']:,.0f} FC), "
         f"soit un total des entrées de {context['total_entries']:,.0f} FC. "
         f"Les sorties du jour correspondent aux dépenses enregistrées, soit {context['total_expenses']:,.0f} FC. "
@@ -1122,7 +1139,8 @@ def _build_monthly_report_context(
 
     total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in orders)
     total_expected = sum(float(row.get("MontantAPercevoir", 0) or 0) for row in orders)
-    total_received = sum(float(row.get("MontantRecu", 0) or 0) for row in orders)
+    total_received = sum(_order_accounted_received(row) for row in orders)
+    total_received_gross = sum(_order_gross_received(row) for row in orders)
     total_debts = sum(float(row.get("Dette", 0) or 0) for row in orders)
     total_expenses = sum(float(row.get("MontantTotalDepenses", 0) or 0) for row in cash_days)
     paid_debts_month = sum(float(row.get("DettesPayeesAujourdHui", 0) or 0) for row in cash_days)
@@ -1161,6 +1179,7 @@ def _build_monthly_report_context(
         "paid_debts_items_by_day": paid_debts_items_by_day,
         "total_expected": total_expected,
         "total_received": total_received,
+        "total_received_gross": total_received_gross,
         "total_debts": total_debts,
         "total_trays": total_trays,
         "total_expenses": total_expenses,
@@ -1233,7 +1252,8 @@ def _build_period_report_context(
 
     total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in orders)
     total_expected = sum(float(row.get("MontantAPercevoir", 0) or 0) for row in orders)
-    total_received = sum(float(row.get("MontantRecu", 0) or 0) for row in orders)
+    total_received = sum(_order_accounted_received(row) for row in orders)
+    total_received_gross = sum(_order_gross_received(row) for row in orders)
     total_debts = sum(float(row.get("Dette", 0) or 0) for row in orders)
     total_expenses = sum(float(row.get("MontantTotalDepenses", 0) or 0) for row in cash_days)
     paid_debts_period = sum(float(row.get("DettesPayeesAujourdHui", 0) or 0) for row in cash_days)
@@ -1270,6 +1290,7 @@ def _build_period_report_context(
         "paid_debts_items_by_day": paid_debts_items_by_day,
         "total_expected": total_expected,
         "total_received": total_received,
+        "total_received_gross": total_received_gross,
         "total_debts": total_debts,
         "total_trays": total_trays,
         "total_expenses": total_expenses,
@@ -1339,7 +1360,8 @@ def _build_monthly_summary_sheet(workbook: Workbook, context: dict[str, Any]) ->
                 ("Commandes du mois", len(context["orders"]), "nombre"),
                 ("Total bacs", context["total_trays"], "nombre"),
                 ("Montant attendu", context["total_expected"], "monnaie"),
-                ("Montant reçu", context["total_received"], "monnaie"),
+                ("Payé par clients", context["total_received_gross"], "monnaie"),
+                ("Reçu commandes", context["total_received"], "monnaie"),
                 ("Dettes", context["total_debts"], "monnaie"),
             ]
         )
@@ -1559,7 +1581,7 @@ def _build_monthly_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> 
     sheet["A2"] = f"Période : {context['period_label']}"
     _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
 
-    headers = ["Statut", "Commandes", "Bacs", "À percevoir", "Reçu", "Avance utilisée", "Nouvelle avance", "Dette"]
+    headers = ["Statut", "Commandes", "Bacs", "À percevoir", "Reçu commande", "Avance utilisée", "Nouvelle avance", "Dette"]
     for col_index, header in enumerate(headers, start=1):
         _apply_cell_style(sheet.cell(3, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
 
@@ -1628,7 +1650,8 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
 
     rows = [
         ("Montant attendu", context["total_expected"]),
-        ("Montant reçu", context["total_received"]),
+        ("Payé par clients", context["total_received_gross"]),
+        ("Reçu commandes", context["total_received"]),
         ("Dettes", context["total_debts"]),
         ("Dettes payées du mois", context["paid_debts_month"]),
         ("Dettes accumulées restantes", context["remaining_accumulated_debts"]),
@@ -1657,7 +1680,7 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
     sheet.cell(current_row, 1, "Synthèse journalière")
     _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
     current_row += 1
-    day_headers = ["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde", "Dettes restantes"]
+    day_headers = ["Date", "Reçu commandes", "Dettes payées", "Entrées", "Dépenses", "Solde", "Dettes restantes"]
     for col_index, header in enumerate(day_headers, start=1):
         _apply_cell_style(sheet.cell(current_row, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
     start_daily = current_row
@@ -1712,7 +1735,7 @@ def _build_monthly_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> No
             f"le solde réel après paies est de {_format_fc(context['balance_after_payrolls'])}."
         )
     recap_text = (
-        f"Pour le mois {context['month_label']}, les entrées correspondent au montant reçu ({_format_fc(context['total_received'])}) "
+        f"Pour le mois {context['month_label']}, les entrées correspondent au reçu commandes ({_format_fc(context['total_received'])}) "
         f"additionné aux dettes payées ({_format_fc(context['paid_debts_month'])}), soit un total des entrées de {_format_fc(context['total_entries'])}. "
         f"Les sorties correspondent aux dépenses du mois, soit {_format_fc(context['total_expenses'])}. "
         f"Le solde mensuel ressort donc à {_format_fc(context['balance'])}. "
@@ -1824,7 +1847,8 @@ def _build_period_summary_sheet(workbook: Workbook, context: dict[str, Any]) -> 
                 ("Commandes sur la période", len(context["orders"]), "nombre"),
                 ("Total bacs", context["total_trays"], "nombre"),
                 ("Montant attendu", context["total_expected"], "monnaie"),
-                ("Montant reçu", context["total_received"], "monnaie"),
+                ("Payé par clients", context["total_received_gross"], "monnaie"),
+                ("Reçu commandes", context["total_received"], "monnaie"),
                 ("Dettes", context["total_debts"], "monnaie"),
             ]
         )
@@ -1977,7 +2001,7 @@ def _build_period_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> N
     sheet["A2"] = f"Période : {context['period_label']}"
     _apply_cell_style(sheet["A2"], alignment=Alignment(horizontal="left"))
 
-    headers = ["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Avance utilisée", "Nouvelle avance", "Solde avance", "Dette"]
+    headers = ["Date", "Client", "Statut", "Bacs", "À percevoir", "Payé client", "Reçu commande", "Avance utilisée", "Nouvelle avance", "Solde avance", "Dette"]
     for col_index, header in enumerate(headers, start=1):
         _apply_cell_style(sheet.cell(3, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
 
@@ -1992,7 +2016,8 @@ def _build_period_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> N
                 normalize_status_form_label(item.get("Statut")),
                 int(item.get("NombreBacs", 0) or 0),
                 float(item.get("MontantAPercevoir", 0) or 0),
-                float(item.get("MontantRecu", 0) or 0),
+                _order_gross_received(item),
+                _order_accounted_received(item),
                 float(item.get("AvanceUtilisee", 0) or 0),
                 float(item.get("AvanceGeneree", 0) or 0),
                 float(item.get("SoldeAvance", 0) or 0),
@@ -2000,7 +2025,7 @@ def _build_period_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> N
             ]
             for col_index, value in enumerate(values, start=1):
                 _apply_cell_style(sheet.cell(current_row, col_index, value), alignment=Alignment(horizontal="left"))
-            for col in range(5, 11):
+            for col in range(5, 12):
                 sheet.cell(current_row, col).number_format = MONEY_FORMAT
 
         totals_row = current_row + 1
@@ -2010,12 +2035,13 @@ def _build_period_orders_sheet(workbook: Workbook, context: dict[str, Any]) -> N
         sheet.cell(totals_row, 6, f"=SUM(F4:F{current_row})")
         sheet.cell(totals_row, 7, f"=SUM(G4:G{current_row})")
         sheet.cell(totals_row, 8, f"=SUM(H4:H{current_row})")
-        sheet.cell(totals_row, 10, f"=SUM(J4:J{current_row})")
-        for col_index in range(1, 11):
+        sheet.cell(totals_row, 9, f"=SUM(I4:I{current_row})")
+        sheet.cell(totals_row, 11, f"=SUM(K4:K{current_row})")
+        for col_index in range(1, 12):
             _apply_cell_style(sheet.cell(totals_row, col_index), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT if col_index == 1 else BODY_FONT)
-        for col in range(5, 11):
+        for col in range(5, 12):
             sheet.cell(totals_row, col).number_format = MONEY_FORMAT
-        _add_table(sheet, 3, current_row, 10, "CommandesPeriode")
+        _add_table(sheet, 3, current_row, 11, "CommandesPeriode")
     else:
         _apply_cell_style(sheet["A4"], alignment=Alignment(horizontal="left"), font=NOTE_FONT)
         sheet["A4"] = "Aucune commande enregistrée pour cette période."
@@ -2039,7 +2065,8 @@ def _build_period_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> Non
 
     rows = [
         ("Montant attendu", context["total_expected"]),
-        ("Montant reçu", context["total_received"]),
+        ("Payé par clients", context["total_received_gross"]),
+        ("Reçu commandes", context["total_received"]),
         ("Dettes", context["total_debts"]),
         ("Dettes payées sur la période", context["paid_debts_period"]),
         ("Dettes accumulées restantes", context["remaining_accumulated_debts"]),
@@ -2068,7 +2095,7 @@ def _build_period_cash_sheet(workbook: Workbook, context: dict[str, Any]) -> Non
     sheet.cell(current_row, 1, "Synthèse journalière")
     _apply_cell_style(sheet.cell(current_row, 1), fill=SECTION_FILL, alignment=Alignment(horizontal="left"), font=SECTION_FONT)
     current_row += 1
-    day_headers = ["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde", "Dettes restantes"]
+    day_headers = ["Date", "Reçu commandes", "Dettes payées", "Entrées", "Dépenses", "Solde", "Dettes restantes"]
     for col_index, header in enumerate(day_headers, start=1):
         _apply_cell_style(sheet.cell(current_row, col_index, header), fill=HEADER_FILL, alignment=Alignment(horizontal="left"), font=HEADER_FONT)
     start_daily = current_row

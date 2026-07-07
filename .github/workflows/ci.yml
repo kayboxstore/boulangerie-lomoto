@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    # L'application cible Windows (pywin32, service Windows). On teste donc la
+    # couche métier/base de données sur le même OS que la production.
+    runs-on: windows-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Lancer les tests
+        env:
+          # Isole la base de test hors du profil utilisateur du runner.
+          BOULANGERIE_APPDATA_DIR: ${{ runner.temp }}\lomoto-test
+        run: python -m pytest

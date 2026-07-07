@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .client_config import get_tray_prices
 
 DEPOSITARY_STATUS = "Dépositaire"
 LEGACY_DEPOSITARY_6000_STATUS = "Dépositaire 6.000Fc"
@@ -19,11 +20,16 @@ COMMISSION_FILTERS = [
     "Vente cash",
 ]
 
+_CONFIGURED_TRAY_PRICES = get_tray_prices()
+
 ORDER_STATUS_RATES = {
-    "Maman": 6000,
-    "Vente cash": 4350,
-    DEPOSITARY_STATUS: 4100,
-    LEGACY_DEPOSITARY_6000_STATUS: 6000,
+    "Maman": _CONFIGURED_TRAY_PRICES.get("Maman", 6000),
+    "Vente cash": _CONFIGURED_TRAY_PRICES.get("Vente cash", 4350),
+    DEPOSITARY_STATUS: _CONFIGURED_TRAY_PRICES.get(DEPOSITARY_STATUS, _CONFIGURED_TRAY_PRICES.get("Depositaire", 4100)),
+    LEGACY_DEPOSITARY_6000_STATUS: _CONFIGURED_TRAY_PRICES.get(
+        LEGACY_DEPOSITARY_6000_STATUS,
+        _CONFIGURED_TRAY_PRICES.get("Depositaire 6.000Fc", 6000),
+    ),
 }
 
 _STATUS_ALIASES = {

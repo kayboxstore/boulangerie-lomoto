@@ -2,10 +2,10 @@
   #define MyAppName "Boulangerie Lomoto"
 #endif
 #ifndef MyAppVersion
-#define MyAppVersion "1.4.6"
+#define MyAppVersion "1.5.3"
 #endif
 #ifndef MyAppPublisher
-  #define MyAppPublisher "Kay Box Store"
+  #define MyAppPublisher "GIS"
 #endif
 #ifndef MyAppExeName
   #define MyAppExeName "Boulangerie Lomoto.exe"
@@ -18,6 +18,21 @@
 #endif
 #ifndef MyOutputBaseFilename
   #define MyOutputBaseFilename "BoulangerieLomotoSetup"
+#endif
+#ifndef MySourceDir
+  #define MySourceDir "..\dist\Boulangerie Lomoto"
+#endif
+#ifndef MyAppDataDirName
+  #define MyAppDataDirName "BoulangerieLomoto"
+#endif
+#ifndef MyWindowsServiceName
+  #define MyWindowsServiceName "BoulangerieLomotoCentralServer"
+#endif
+#ifndef MyServiceExeName
+  #define MyServiceExeName "Boulangerie Lomoto Service.exe"
+#endif
+#ifndef MyFirewallRuleName
+  #define MyFirewallRuleName "Boulangerie Lomoto Web Pro 8787"
 #endif
 
 [Setup]
@@ -47,23 +62,31 @@ Name: "servermode"; Description: "PC serveur principal - héberge la base et l'a
 Name: "clientmode"; Description: "Poste client - se connecte au serveur principal existant"; GroupDescription: "Type d'installation :"; Flags: exclusive unchecked
 
 [Files]
-Source: "..\dist\Boulangerie Lomoto\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\deploy\email-settings.example.json"; DestDir: "{commonappdata}\BoulangerieLomoto"; DestName: "email-settings.example.json"; Flags: ignoreversion; Tasks: servermode
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\deploy\email-settings.example.json"; DestDir: "{commonappdata}\{#MyAppDataDirName}"; DestName: "email-settings.example.json"; Flags: ignoreversion; Tasks: servermode
+Source: "..\scripts\sauvegarde-automatique-quotidienne.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion; Tasks: servermode
+Source: "..\scripts\sauvegarde-externe-hebdomadaire.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion; Tasks: servermode
+Source: "..\scripts\surveiller-service-lomoto.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion; Tasks: servermode
+Source: "..\scripts\installer-taches-production-lomoto.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion; Tasks: servermode
+Source: "..\scripts\tester-restauration-sauvegarde-lomoto.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion; Tasks: servermode
+Source: "..\scripts\verifier-taches-production-lomoto.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion; Tasks: servermode
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Boulangerie Lomoto Web Pro 8787"""; Flags: runhidden; Tasks: servermode
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#MyFirewallRuleName}"""; Flags: runhidden; Tasks: servermode
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\installer-taches-production-lomoto.ps1"" -NoElevate"; Flags: runhidden; Tasks: servermode
 Filename: "{app}\{#MyAppExeName}"; Description: "Lancer {#MyAppName}"; Flags: nowait postinstall skipifsilent shellexec; Verb: "runas"
 
 [Code]
 const
   UninstallRegKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppIdValue}_is1';
-  WindowsServiceName = 'BoulangerieLomotoCentralServer';
-  MainExeImageName = 'Boulangerie Lomoto.exe';
-  ServiceExeImageName = 'Boulangerie Lomoto Service.exe';
+  WindowsServiceName = '{#MyWindowsServiceName}';
+  MainExeImageName = '{#MyAppExeName}';
+  ServiceExeImageName = '{#MyServiceExeName}';
+  FirewallRuleName = '{#MyFirewallRuleName}';
   ServerMarkerName = 'server-installation.flag';
 
 var
@@ -130,7 +153,7 @@ begin
     DeleteFile(MarkerPath);
     RunHiddenCommand('sc.exe stop "' + WindowsServiceName + '"');
     RunHiddenCommand('sc.exe delete "' + WindowsServiceName + '"');
-    RunHiddenCommand('netsh.exe advfirewall firewall delete rule name="Boulangerie Lomoto Web Pro 8787"');
+    RunHiddenCommand('netsh.exe advfirewall firewall delete rule name="' + FirewallRuleName + '"');
   end;
 end;
 

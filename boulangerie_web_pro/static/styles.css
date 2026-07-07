@@ -1,18 +1,54 @@
 :root {
-  --bg: #f4f6f8;
+  --bg: #eef2f8;
   --surface: #ffffff;
-  --surface-soft: #f9fafb;
-  --ink: #14171f;
+  --surface-soft: #f4f7fb;
+  --ink: #131826;
   --muted: #667085;
-  --line: #d9dee7;
-  --line-strong: #c6ccd7;
+  --line: #e3e8f0;
+  --line-strong: #ccd4e0;
   --red: #b71924;
   --red-dark: #8f111a;
-  --blue: #163a63;
+  --red-soft: #fdecee;
+  --blue: #102a43;
+  --blue-dark: #0b1f33;
   --green: #087c52;
-  --gold: #c58a18;
-  --shadow: 0 12px 32px rgba(20, 23, 31, 0.08);
-  font-family: "Segoe UI", Roboto, Arial, sans-serif;
+  --green-soft: #e7f8ef;
+  --gold: #9a5b00;
+
+  /* Rayons — échelle cohérente et plus douce (aspect moderne) */
+  --radius-sm: 10px;
+  --radius: 14px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+
+  /* Ombres en couches — plus douces et réalistes */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --shadow: 0 8px 24px rgba(16, 24, 40, 0.07), 0 2px 6px rgba(16, 24, 40, 0.04);
+  --shadow-lg: 0 24px 56px rgba(16, 24, 40, 0.14), 0 8px 18px rgba(16, 24, 40, 0.06);
+
+  /* Anneaux de focus accessibles */
+  --ring: 0 0 0 4px rgba(16, 42, 67, 0.16);
+  --ring-danger: 0 0 0 4px rgba(183, 25, 36, 0.20);
+
+  /* Transition partagée */
+  --transition: 160ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  --input-bg: #ffffff;
+  --button-hover-bg: #f5f8fc;
+  --table-head-bg: #eef2f7;
+  --table-head-text: #334155;
+  --table-row-alt-bg: #f9fafb;
+  --table-row-hover-bg: #fff8eb;
+  --hero-bg: linear-gradient(135deg, #ffffff, #f8fbff);
+  --status-bg: #ffffff;
+  --report-bg: #ffffff;
+  --label: #2a3140;
+  --footer-strong: #384152;
+  --readonly-bg: #fff5f5;
+  --disabled-bg: #c9ced8;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
@@ -20,16 +56,37 @@
 }
 
 html {
+  min-height: 100%;
+  width: 100%;
+  max-width: 100%;
   background: var(--bg);
+  /* html est le SEUL propriétaire du défilement vertical. On clippe
+     l'horizontal ici uniquement (pas sur body) pour éviter que body ne
+     devienne un conteneur de défilement concurrent qui « piège » la molette
+     et le tactile dans les webviews / PWA installées. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 body {
   margin: 0;
+  width: 100%;
+  max-width: 100%;
   min-height: 100vh;
+  min-height: 100dvh;
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
   color: var(--ink);
   background:
-    linear-gradient(180deg, rgba(22, 58, 99, 0.04), transparent 260px),
+    linear-gradient(180deg, rgba(16, 42, 67, 0.05), transparent 320px),
     var(--bg);
+  /* Pas d'overflow ici : body reste en flux normal (overflow visible) pour
+     ne pas concurrencer le défilement de html. */
+  overscroll-behavior-y: contain;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button,
@@ -91,6 +148,14 @@ button {
   border-radius: 8px;
 }
 
+.login-card.wide-card {
+  max-width: min(980px, calc(100vw - 32px));
+}
+
+.login-page:has(.wide-card) {
+  grid-template-columns: minmax(0, 980px);
+}
+
 .brand-mark {
   display: flex;
   align-items: center;
@@ -104,6 +169,8 @@ button {
   width: 72px;
   height: 72px;
   object-fit: contain;
+  border-radius: 50%;
+  background: #fff;
 }
 
 .presentation-card {
@@ -189,22 +256,32 @@ p {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-.autofill-decoy {
-  position: fixed;
+label {
+  display: grid;
+  gap: 7px;
+  color: var(--label);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.field-block {
+  display: grid;
+  gap: 7px;
+}
+
+.autofill-trap {
+  position: absolute;
   left: -10000px;
-  top: -10000px;
+  top: auto;
   width: 1px;
   height: 1px;
+  overflow: hidden;
   opacity: 0;
   pointer-events: none;
 }
 
-label {
-  display: grid;
-  gap: 7px;
-  color: #2a3140;
-  font-size: 0.9rem;
-  font-weight: 700;
+.field-block label {
+  display: block;
 }
 
 .check-line {
@@ -242,65 +319,129 @@ input,
 select,
 textarea {
   width: 100%;
-  min-height: 42px;
+  min-height: 44px;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  padding: 10px 12px;
-  background: #fff;
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  background: var(--input-bg);
   color: var(--ink);
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #9aa4b2;
+  opacity: 1;
+}
+
+input:hover:not(:disabled):not([readonly]),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--blue);
 }
 
 input:focus,
 select:focus,
 textarea:focus {
-  outline: 3px solid rgba(22, 58, 99, 0.14);
+  outline: none;
   border-color: var(--blue);
+  box-shadow: var(--ring);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  background: var(--surface-soft);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* Champs invalides : retour visuel clair et rassurant */
+input:user-invalid,
+select:user-invalid,
+textarea:user-invalid {
+  border-color: var(--red);
+}
+
+input:user-invalid:focus,
+select:user-invalid:focus,
+textarea:user-invalid:focus {
+  box-shadow: var(--ring-danger);
 }
 
 input[readonly] {
   color: var(--red-dark);
-  background: #fff5f5;
+  background: var(--readonly-bg);
   font-weight: 800;
 }
 
 textarea {
-  min-height: 92px;
+  min-height: 96px;
   resize: vertical;
 }
 
 button,
 .primary {
-  min-height: 42px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  padding: 11px 18px;
   background: var(--surface);
   color: var(--ink);
-  font-weight: 750;
+  font-weight: 650;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition), border-color var(--transition),
+    background var(--transition), box-shadow var(--transition);
 }
 
-button:hover {
+button:hover:not(:disabled) {
   border-color: var(--blue);
-  background: #f5f8fc;
+  background: var(--button-hover-bg);
+}
+
+button:active:not(:disabled),
+.primary:active {
+  transform: translateY(1px);
+}
+
+button:focus-visible,
+.primary:focus-visible,
+.nav-button:focus-visible,
+a:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
 }
 
 button:disabled,
 button:disabled:hover {
-  cursor: wait;
-  opacity: 0.78;
+  cursor: not-allowed;
+  opacity: 0.6;
+  box-shadow: none;
   border-color: var(--line-strong);
-  background: #c9ced8;
+  background: var(--disabled-bg);
+}
+
+/* État de chargement : pointeur d'attente sans casser la mise en page */
+button[aria-busy="true"],
+button[data-loading="true"] {
+  cursor: wait;
+  opacity: 0.85;
 }
 
 .primary {
   border-color: var(--red);
   color: white;
-  background: var(--red);
+  background: linear-gradient(180deg, #c81e2a, var(--red));
+  box-shadow: 0 6px 16px rgba(183, 25, 36, 0.24);
 }
 
-.primary:hover {
+.primary:hover:not(:disabled) {
   border-color: var(--red-dark);
-  background: var(--red-dark);
+  background: linear-gradient(180deg, var(--red), var(--red-dark));
 }
 
 .login-progress {
@@ -336,7 +477,7 @@ input:-webkit-autofill,
 input:-webkit-autofill:hover,
 input:-webkit-autofill:focus {
   -webkit-text-fill-color: var(--ink);
-  box-shadow: 0 0 0 1000px #fff inset;
+  box-shadow: 0 0 0 1000px var(--input-bg) inset;
   transition: background-color 9999s ease-out;
 }
 
@@ -347,17 +488,17 @@ input:-webkit-autofill:focus {
 .shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: 292px minmax(0, 1fr);
 }
 
 .sidebar {
   position: sticky;
   top: 0;
   height: 100vh;
-  padding: 18px;
+  padding: 18px 16px;
   overflow-y: auto;
   color: white;
-  background: #151923;
+  background: linear-gradient(180deg, #101827, #172033);
   border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -372,17 +513,18 @@ input:-webkit-autofill:focus {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding-bottom: 18px;
+  padding: 10px 8px 18px;
   margin-bottom: 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .side-brand img {
-  width: 58px;
-  height: 58px;
+  width: 62px;
+  height: 62px;
   object-fit: contain;
-  border-radius: 6px;
+  border-radius: 12px;
   background: #fff;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
 }
 
 .side-brand strong,
@@ -404,15 +546,17 @@ input:-webkit-autofill:focus {
 
 .mobile-menu-toggle {
   display: none;
-  width: 42px;
-  height: 42px;
-  flex: 0 0 42px;
+  width: 44px;
+  height: 44px;
+  min-height: 0;
+  flex: 0 0 44px;
   place-items: center;
   padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 6px;
+  border-radius: 10px;
   color: #fff;
   background: transparent;
+  box-shadow: none;
   font-size: 1.45rem;
   line-height: 1;
 }
@@ -428,12 +572,18 @@ input:-webkit-autofill:focus {
 
 .nav-button {
   width: 100%;
-  min-height: 40px;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 8px;
+  padding: 10px 12px;
   background: transparent;
   color: #d8dee9;
   text-align: left;
+  box-shadow: none;
 }
 
 .nav-button:hover {
@@ -442,8 +592,9 @@ input:-webkit-autofill:focus {
 }
 
 .nav-button.active {
-  background: var(--red);
+  background: linear-gradient(135deg, var(--red), var(--red-dark));
   color: #fff;
+  box-shadow: 0 10px 22px rgba(183, 25, 36, 0.24);
 }
 
 .logout {
@@ -453,7 +604,7 @@ input:-webkit-autofill:focus {
 
 .workspace {
   min-width: 0;
-  padding: 24px;
+  padding: 28px;
   position: relative;
   isolation: isolate;
 }
@@ -466,7 +617,7 @@ input:-webkit-autofill:focus {
   z-index: -1;
   width: min(34vw, 440px);
   aspect-ratio: 1;
-  background: url("/brand-assets/logo-boulangerie-lomoto-watermark.png") center / contain no-repeat;
+  background: url("/brand-assets/logo-boulangerie-lomoto-watermark.png?v=20260701") center / contain no-repeat;
   opacity: 0.055;
   pointer-events: none;
 }
@@ -487,8 +638,21 @@ input:-webkit-autofill:focus {
 
 .topbar {
   margin-bottom: 18px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--line);
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 12px 28px rgba(17, 24, 39, 0.05);
+}
+
+.topbar > div:first-child {
+  min-width: 0;
+  flex: 1;
+}
+
+.topbar h1 {
+  font-size: clamp(1.9rem, 3vw, 2.75rem);
+  white-space: nowrap;
 }
 
 .status-cluster {
@@ -506,7 +670,7 @@ input:-webkit-autofill:focus {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--surface);
+  background: var(--status-bg);
 }
 
 .status-pill {
@@ -537,16 +701,119 @@ input:-webkit-autofill:focus {
 }
 
 .hero,
+.home-hero,
 .panel,
 .metric,
 .report-page {
   border-radius: 8px;
 }
 
+.home-hero {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 184px;
+  padding: 24px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  color: #fff;
+  border: 1px solid rgba(16, 42, 67, 0.18);
+  background:
+    linear-gradient(135deg, rgba(16, 42, 67, 0.99), rgba(17, 24, 39, 0.96)),
+    url("/brand-assets/logo-boulangerie-lomoto-watermark.png?v=20260701") right 22px center / 210px no-repeat;
+  box-shadow: var(--shadow);
+}
+
+.home-hero .eyebrow {
+  color: #ffd7a3;
+}
+
+.home-hero h2 {
+  max-width: 760px;
+  color: #fff;
+  font-size: clamp(1.7rem, 3vw, 2.45rem);
+}
+
+.home-hero-main {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+}
+
+.home-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.home-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  color: #eef6ff;
+  background: rgba(255, 255, 255, 0.1);
+  font-weight: 750;
+}
+
+.home-hero-panel {
+  display: grid;
+  align-content: space-between;
+  justify-items: end;
+  gap: 14px;
+  min-width: min(420px, 42vw);
+}
+
+.home-hero-stats {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.hero-stat {
+  min-width: 0;
+  padding: 13px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.09);
+  backdrop-filter: blur(8px);
+}
+
+.hero-stat span,
+.hero-stat small {
+  display: block;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.hero-stat strong {
+  display: block;
+  margin: 6px 0 2px;
+  color: #ffffff;
+  font-size: clamp(1rem, 1.7vw, 1.38rem);
+  line-height: 1.05;
+}
+
+.home-hero button {
+  border-color: rgba(255, 255, 255, 0.28);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.home-hero button:hover {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+}
+
 .hero {
   padding: 20px;
   margin-bottom: 14px;
-  background: linear-gradient(135deg, #ffffff, #f8fbff);
+  background: var(--hero-bg);
 }
 
 .hero h2 {
@@ -575,7 +842,37 @@ input:-webkit-autofill:focus {
 }
 
 .metric {
-  padding: 16px;
+  --metric-color: var(--blue);
+  position: relative;
+  min-height: 112px;
+  overflow: hidden;
+  padding: 18px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  background: var(--surface);
+}
+
+.metric-text {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.metric-badge {
+  flex: 0 0 auto;
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  font-size: 1.55rem;
+  line-height: 1;
+  background: #eef2f8;
+  background: color-mix(in srgb, var(--metric-color) 14%, #ffffff);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--metric-color) 22%, transparent);
 }
 
 .metric span,
@@ -584,12 +881,191 @@ input:-webkit-autofill:focus {
   font-weight: 700;
 }
 
+.metric span {
+  color: var(--muted);
+}
+
+.metric small {
+  color: var(--metric-color);
+}
+
 .metric strong {
   display: block;
-  margin: 6px 0;
+  margin: 2px 0;
   color: var(--ink);
-  font-size: 1.65rem;
+  font-size: 1.72rem;
   line-height: 1.1;
+}
+
+.home-shortcuts {
+  margin-bottom: 14px;
+}
+
+.home-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.home-action-card {
+  display: grid;
+  align-content: space-between;
+  min-height: 92px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--surface-soft);
+  text-align: left;
+}
+
+.home-action-card:hover {
+  border-color: var(--red);
+  background: #fff;
+  box-shadow: 0 12px 26px rgba(17, 24, 39, 0.08);
+}
+
+.home-action-card span {
+  color: var(--blue);
+  font-weight: 850;
+}
+
+.home-action-card strong {
+  color: var(--red);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+}
+
+.dashboard-analytics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.analytics-card {
+  position: relative;
+  min-height: 260px;
+  overflow: hidden;
+  padding: 18px;
+  border: 1px solid rgba(22, 58, 99, 0.16);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.98)),
+    linear-gradient(90deg, rgba(183, 25, 36, 0.04), transparent 42%);
+  box-shadow: var(--shadow);
+}
+
+.analytics-card::after {
+  content: none;
+}
+
+.analytics-heading {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 16px;
+}
+
+.analytics-heading h3 {
+  color: var(--blue-dark);
+  font-size: 1.08rem;
+}
+
+.bar-chart,
+.donut-layout {
+  position: relative;
+  z-index: 1;
+}
+
+.bar-chart {
+  display: grid;
+  gap: 13px;
+}
+
+.bar-row {
+  display: grid;
+  gap: 7px;
+}
+
+.bar-meta,
+.donut-legend div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bar-meta span,
+.donut-legend span {
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 750;
+}
+
+.bar-meta strong,
+.donut-legend strong {
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+
+.bar-track {
+  height: 11px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e6ebf2;
+}
+
+.bar-track i {
+  display: block;
+  width: var(--bar-pct);
+  min-width: 4px;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--bar-color);
+  background: linear-gradient(90deg, var(--bar-color), color-mix(in srgb, var(--bar-color), white 18%));
+}
+
+.donut-layout {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+
+.donut-chart {
+  display: grid;
+  place-items: center;
+  width: 140px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: conic-gradient(var(--donut));
+  box-shadow: inset 0 0 0 18px #fff, 0 18px 28px rgba(17, 24, 39, 0.08);
+}
+
+.donut-chart span {
+  max-width: 82px;
+  overflow: hidden;
+  color: var(--blue-dark);
+  font-weight: 850;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.donut-legend {
+  display: grid;
+  gap: 10px;
+}
+
+.donut-legend div {
+  justify-content: flex-start;
+}
+
+.donut-legend i {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  border-radius: 50%;
 }
 
 .split {
@@ -637,10 +1113,11 @@ input:-webkit-autofill:focus {
 .alert,
 .calc-note,
 .nb {
-  padding: 12px 14px;
-  border-radius: 6px;
+  padding: 13px 16px;
+  border-radius: var(--radius-sm);
   margin-bottom: 14px;
-  font-weight: 700;
+  font-weight: 600;
+  border-left-width: 4px;
 }
 
 .alert.danger,
@@ -648,6 +1125,7 @@ input:-webkit-autofill:focus {
   color: #8b0000;
   background: #ffe5e8;
   border: 1px solid #ffc7ce;
+  border-left: 4px solid var(--red);
 }
 
 .alert.warning,
@@ -655,12 +1133,14 @@ input:-webkit-autofill:focus {
   color: #6a4600;
   background: #fff6dc;
   border: 1px solid #f3d892;
+  border-left: 4px solid var(--gold);
 }
 
 .alert.success {
   color: #07583a;
   background: #e7f8ef;
   border: 1px solid #b7e7cd;
+  border-left: 4px solid var(--green);
 }
 
 .clean-list {
@@ -709,19 +1189,19 @@ th {
   position: sticky;
   top: 0;
   z-index: 1;
-  color: #334155;
-  background: #eef2f7;
+  color: var(--table-head-text);
+  background: var(--table-head-bg);
   font-size: 0.78rem;
   font-weight: 850;
   text-transform: uppercase;
 }
 
 tbody tr:nth-child(even) {
-  background: var(--surface-soft);
+  background: var(--table-row-alt-bg);
 }
 
 tbody tr:hover {
-  background: #fff8eb;
+  background: var(--table-row-hover-bg);
 }
 
 .row-actions {
@@ -780,7 +1260,7 @@ tbody tr:hover {
   position: relative;
   overflow: hidden;
   padding: 26px;
-  background: white;
+  background: var(--report-bg);
 }
 
 .report-page .watermark {
@@ -798,7 +1278,7 @@ tbody tr:hover {
 
 .report-header {
   display: grid;
-  grid-template-columns: 82px 1fr 92px;
+  grid-template-columns: 82px minmax(0, 1fr);
   gap: 16px;
   align-items: center;
   text-align: center;
@@ -828,13 +1308,34 @@ tbody tr:hover {
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fbfcfe;
+  background: var(--surface-soft);
 }
 
 .about-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+.about-toolbar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  text-align: center;
+}
+
+.about-toolbar > div:first-child {
+  grid-column: 2;
+}
+
+.about-toolbar .toolbar-actions {
+  grid-column: 3;
+  justify-self: end;
+}
+
+.about-panel {
+  max-width: 920px;
+  margin-inline: auto;
+  text-align: center;
 }
 
 .owner-card {
@@ -846,7 +1347,19 @@ tbody tr:hover {
   padding: 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: linear-gradient(135deg, #ffffff, #f8fbff);
+  background: var(--hero-bg);
+}
+
+.about-panel .owner-card {
+  max-width: 760px;
+  margin-inline: auto;
+  justify-items: center;
+  text-align: center;
+}
+
+.about-panel .owner-card > div {
+  display: grid;
+  justify-items: center;
 }
 
 .owner-card img {
@@ -900,7 +1413,7 @@ tbody tr:hover {
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fbfcfe;
+  background: var(--surface-soft);
 }
 
 .role-access-grid {
@@ -947,7 +1460,7 @@ tbody tr:hover {
 }
 
 .legal-footer strong {
-  color: #384152;
+  color: var(--footer-strong);
 }
 
 .green {
@@ -987,7 +1500,7 @@ tbody tr:hover {
   border: 1px solid var(--line);
   color: var(--ink);
   text-decoration: none;
-  background: white;
+  background: var(--surface);
 }
 
 .report-file:hover {
@@ -1009,8 +1522,103 @@ tbody tr:hover {
   color: var(--muted);
 }
 
+/* ------------------------------------------------------------------ *
+ * Polish moderne — placé avant les media queries pour que le
+ * responsive conserve la priorité. N'ajoute que du raffinement visuel
+ * (rayons plus doux, élévation au survol, états vides / chargement).
+ * ------------------------------------------------------------------ */
+
+.login-card,
+.presentation-card,
+.hero,
+.home-hero,
+.panel,
+.metric,
+.report-page,
+.analytics-card {
+  border-radius: var(--radius-lg);
+}
+
+/* Élévation douce au survol pour les éléments interactifs de type carte */
+.metric,
+.card-grid > *,
+.home-actions-grid > * {
+  transition: transform var(--transition), box-shadow var(--transition);
+}
+
+.metric:hover,
+.card-grid > a:hover,
+.home-actions-grid > a:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+}
+
+/* Boutons de navigation : transition et coins cohérents */
+.nav-button,
+.logout,
+.status-pill,
+.user-card,
+.version-card {
+  transition: background var(--transition), color var(--transition),
+    border-color var(--transition), box-shadow var(--transition);
+}
+
+/* État vide réutilisable : message clair quand une liste est vide */
+.empty-state {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  text-align: center;
+  padding: 40px 24px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.empty-state strong {
+  color: var(--ink);
+  font-size: 1.02rem;
+}
+
+/* Indicateur de chargement circulaire réutilisable */
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 3px solid rgba(16, 42, 67, 0.15);
+  border-top-color: var(--blue);
+  border-radius: var(--radius-pill);
+  animation: spin 0.7s linear infinite;
+}
+
+.loading-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
 @media (max-width: 1180px) {
-  .card-grid {
+  .card-grid,
+  .dashboard-analytics,
+  .home-actions-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1088,9 +1696,35 @@ tbody tr:hover {
   .topbar,
   .toolbar,
   .hero,
+  .home-hero,
   .status-cluster {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .topbar h1 {
+    white-space: normal;
+  }
+
+  .home-hero {
+    min-height: 0;
+    background:
+      linear-gradient(135deg, rgba(16, 42, 67, 0.98), rgba(22, 58, 99, 0.94)),
+      url("/brand-assets/logo-boulangerie-lomoto-watermark.png?v=20260701") right 18px bottom 12px / 160px no-repeat;
+  }
+
+  .home-hero-panel {
+    width: 100%;
+    min-width: 0;
+    justify-items: stretch;
+  }
+
+  .home-hero-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .home-hero-panel button {
+    width: 100%;
   }
 
   .status-cluster,
@@ -1106,7 +1740,26 @@ tbody tr:hover {
     width: 100%;
   }
 
+  .about-toolbar {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .about-toolbar > div:first-child,
+  .about-toolbar .toolbar-actions {
+    grid-column: 1;
+    justify-self: center;
+  }
+
   .card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-analytics {
+    grid-template-columns: 1fr;
+  }
+
+  .home-actions-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -1120,6 +1773,23 @@ tbody tr:hover {
     padding: 22px 18px;
   }
 
+  /* Empêche le zoom automatique d'iOS Safari au focus des champs
+     (déclenché dès que la taille de police descend sous 16px). */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  /* Cibles tactiles confortables sur petit écran */
+  button,
+  .primary,
+  .nav-button,
+  input,
+  select {
+    min-height: 48px;
+  }
+
   .sidebar nav {
     grid-template-columns: 1fr;
   }
@@ -1129,10 +1799,21 @@ tbody tr:hover {
   }
 
   .hero,
+  .home-hero,
+  .analytics-card,
   .panel,
   .metric,
   .report-page {
     padding: 14px;
+  }
+
+  .donut-layout {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .donut-legend {
+    width: 100%;
   }
 }
 

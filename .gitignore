@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
 ~$*.docx
 
 build/
@@ -15,9 +16,29 @@ boulangerie.db
 .github-publish/
 tmp/
 test-output/
+outputs/
+tools/
 presentations/build/node_modules/
 presentations/guide-utilisateur/demo-data/
 
 web-mobile-app/node_modules/
 web-mobile-app/dist/
 web-mobile-app/.firebase/
+
+android-apk/node_modules/
+android-apk/android/.gradle/
+android-apk/android/app/build/
+android-apk/android/build/
+android-apk/keystore/
+android-apk/**/*.jks
+android-apk/android/keystore.properties
+
+product/white-label/licenses/*.license
+product/white-label/licenses/*.env
+product/white-label/secrets/
+product/white-label/workspaces/
+product/license_server/data/
+product/license_server/secrets/
+
+# Artefacts de recette / sorties générées
+output/

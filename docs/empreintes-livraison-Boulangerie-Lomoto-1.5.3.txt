@@ -1,0 +1,6 @@
+Boulangerie Lomoto 1.5.3 - empreintes SHA-256
+Date : 2 juillet 2026
+
+A7DA1FDD5BAFB670D2AA76CC652581686C05A7450B584A251A8BB7D84F7D7C8B  A:\Mon application python\installer\output\1.5.3\BoulangerieLomotoSetup.exe
+D8DC6D88B657D86D1ADCA2F704514405037AAA745135D15B0C11B28175329421  A:\Mon application python\installer\output\android\1.5.3\BoulangerieLomoto-1.5.3-release.apk
+0D964D2E3711B852F4B8B61A15CD5700FA46426CAEB81E9EB7C31E8566DC0E02  A:\Mon application python\installer\output\android\1.5.3\BoulangerieLomoto-1.5.3-release.aab

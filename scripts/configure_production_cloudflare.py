@@ -212,6 +212,30 @@ def _install_service(token: str, tunnel_id: str) -> None:
     if not isinstance(tunnel_token, str) or not tunnel_token.strip():
         raise RuntimeError("Impossible d'obtenir le jeton du tunnel.")
 
+    # HTTP/2 + IPv4 is more reliable on networks/VPNs that block QUIC or IPv6 egress.
+    subprocess.run(
+        [
+            "setx.exe",
+            "/M",
+            "TUNNEL_TRANSPORT_PROTOCOL",
+            "http2",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    subprocess.run(
+        [
+            "setx.exe",
+            "/M",
+            "TUNNEL_EDGE_IP_VERSION",
+            "4",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
     cloudflared = _find_cloudflared()
     subprocess.run(
         ["sc.exe", "stop", "cloudflared"],

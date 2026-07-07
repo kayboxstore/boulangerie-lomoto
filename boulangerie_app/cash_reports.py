@@ -21,7 +21,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from .database import DatabaseHelper
 from .report_branding import PDF_FONT_BOLD, PDF_FONT_REGULAR, REPORT_BLUE, REPORT_RED, register_pdf_fonts
 from .reports import ReportGenerationError
-from .version import APP_NAME
+from .version import APP_NAME, APP_PUBLISHER
 
 
 CASH_REPORT_ROLES = {"Admin", "Directeur Général", "Caissier"}
@@ -248,11 +248,11 @@ def create_cash_balance_pdf_report(
         topMargin=14 * mm,
         bottomMargin=16 * mm,
         title=f"{APP_NAME} - {title}",
-        author="Kay Box Store",
+        author=APP_PUBLISHER,
     )
 
     elements: list[Any] = [
-        Paragraph("BOULANGERIE LOMOTO", styles["title"]),
+        Paragraph(APP_NAME.upper(), styles["title"]),
         Paragraph(title, styles["subtitle"]),
         Paragraph(f"Période : {_format_date(start_date)} au {_format_date(end_date)}", styles["subtitle"]),
         Paragraph(f"Généré par : {generated_by} ({generated_role})", styles["body"]),
@@ -261,7 +261,7 @@ def create_cash_balance_pdf_report(
         _pdf_table(
             [
                 ["Indicateur", "Valeur"],
-                ["Montant reçu", _format_fc(totals["received"])],
+                ["Reçu commandes", _format_fc(totals["received"])],
                 ["Dettes payées", _format_fc(totals["paid_debts"])],
                 ["Total des entrées", _format_fc(totals["entries"])],
                 ["Dépenses", _format_fc(totals["expenses"])],
@@ -288,9 +288,9 @@ def create_cash_balance_pdf_report(
         Paragraph("Détail journalier", styles["section"]),
     ]
     detail_rows = (
-        [["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Paies", "Solde réel", "Dettes restantes"]]
+        [["Date", "Reçu commandes", "Dettes payées", "Entrées", "Dépenses", "Paies", "Solde réel", "Dettes restantes"]]
         if show_payrolls
-        else [["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde", "Dettes restantes"]]
+        else [["Date", "Reçu commandes", "Dettes payées", "Entrées", "Dépenses", "Solde", "Dettes restantes"]]
     )
     for row in rows:
         row_date = _parse_row_date(row.get("DateCaisse"))
@@ -388,7 +388,7 @@ def create_cash_balance_excel_report(
         cell.alignment = Alignment(horizontal="center")
 
     summary_rows = [
-        ("Montant reçu", totals["received"]),
+        ("Reçu commandes", totals["received"]),
         ("Dettes payées", totals["paid_debts"]),
         ("Total des entrées", totals["entries"]),
         ("Dépenses", totals["expenses"]),
@@ -413,7 +413,7 @@ def create_cash_balance_excel_report(
             sheet.cell(index, col).font = Font(name="Poppins")
 
     data_start = 17
-    headers = ["Date", "Bacs", "Attendu", "Reçu", "Dettes payées", "Entrées", "Dépenses"]
+    headers = ["Date", "Bacs", "Attendu", "Reçu commandes", "Dettes payées", "Entrées", "Dépenses"]
     if show_payrolls:
         headers.extend(["Paies travailleurs", "Solde après paies"])
     headers.extend(["Solde", "Solde cumulé", "Dettes restantes"])

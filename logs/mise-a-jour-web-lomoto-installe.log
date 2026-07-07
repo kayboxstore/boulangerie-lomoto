@@ -1,0 +1,11 @@
+﻿[2026-07-06 12:03:12] Mise a jour des fichiers web installes.
+Arret du service BoulangerieLomotoCentralServer...
+Copie: app.js
+Copie: styles.css
+Copie: index.html
+Copie: service-worker.js
+Copie: manifest.webmanifest
+Copie: politique-confidentialite.html
+Redemarrage du service BoulangerieLomotoCentralServer...
+Service BoulangerieLomotoCentralServer redemarre.
+Mise a jour terminee.

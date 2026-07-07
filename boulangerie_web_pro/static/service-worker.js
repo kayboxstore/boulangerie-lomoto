@@ -1,11 +1,12 @@
-const CACHE_NAME = "lomoto-web-pro-1.4.6";
+const CACHE_NAME = "lomoto-web-pro-1.5.3-ui-refresh3-20260707";
 const APP_SHELL = [
   "/",
   "/index.html",
   "/styles.css",
   "/app.js",
   "/manifest.webmanifest",
-  "/brand-assets/logo-boulangerie-lomoto.png"
+  "/politique-confidentialite",
+  "/brand-assets/logo-boulangerie-lomoto.png?v=20260701"
 ];
 
 self.addEventListener("install", (event) => {

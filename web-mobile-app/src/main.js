@@ -438,7 +438,8 @@ async function ordersPage() {
     <section class="metric-grid compact">
       <article class="metric-card"><span>Bacs</span><strong>${summary.NombreTotalBacs || 0}</strong><small>date affichée</small></article>
       <article class="metric-card"><span>Montant attendu</span><strong>${formatFc(summary.MontantAttendu || 0)}</strong><small>commandes</small></article>
-      <article class="metric-card"><span>Montant reçu</span><strong>${formatFc(summary.MontantRecu || 0)}</strong><small>paiements</small></article>
+      <article class="metric-card"><span>Payé par clients</span><strong>${formatFc(summary.MontantRecuBrut || summary.MontantRecu || 0)}</strong><small>paiements</small></article>
+      <article class="metric-card"><span>Reçu commande</span><strong>${formatFc(summary.MontantRecu || 0)}</strong><small>solde</small></article>
       <article class="metric-card"><span>Dettes</span><strong>${formatFc(summary.TotalDettes || 0)}</strong><small>reste à payer</small></article>
     </section>
     ${roleHint("orders")}
@@ -466,8 +467,8 @@ async function ordersPage() {
     ${tableWithActions(
       "Liste des commandes",
       rows,
-      ["DateCommande", "Client", "Statut", "NombreBacs", "MontantAPercevoir", "MontantRecu", "Dette"],
-      ["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Dette"],
+      ["DateCommande", "Client", "Statut", "NombreBacs", "MontantAPercevoir", "MontantRecu", "MontantRecuCommande", "AvanceGeneree", "Dette"],
+      ["Date", "Client", "Statut", "Bacs", "À percevoir", "Payé client", "Reçu commande", "Avance", "Dette"],
       isReadOnly("orders") ? [] : [{ label: "Charger", action: "load-order" }, { label: "Supprimer", action: "delete-order", danger: true }],
     )}
   `);
@@ -488,9 +489,9 @@ async function cashPage() {
   return pageShell(`
     ${dateTools("cash", "Caisse")}
     <section class="metric-grid compact">
-      <article class="metric-card"><span>Montant reçu</span><strong>${formatFc(ordersSummary.MontantRecu || 0)}</strong><small>commandes</small></article>
+      <article class="metric-card"><span>Reçu commandes</span><strong>${formatFc(ordersSummary.MontantRecu || 0)}</strong><small>solde</small></article>
       <article class="metric-card"><span>Dettes accumulées</span><strong>${formatFc(accumulated.DettesAccumuleesAvantPaiement || 0)}</strong><small>jours précédents</small></article>
-      <article class="metric-card"><span>Entrées</span><strong>${formatFc(totalEntries)}</strong><small>reçu + dettes payées</small></article>
+      <article class="metric-card"><span>Entrées</span><strong>${formatFc(totalEntries)}</strong><small>commandes + dettes payées</small></article>
       <article class="metric-card"><span>Solde</span><strong>${formatFc(dayBalance)}</strong><small>balance du jour</small></article>
     </section>
     <section class="panel">
@@ -503,7 +504,7 @@ async function cashPage() {
         <label>Solde du jour <input name="dayBalance" value="${escapeHtml(formatFc(dayBalance))}" readonly /></label>
         <label class="wide">Liste des dépenses <textarea name="expenseDetails" placeholder="Transport : 7 000 FC">${escapeHtml(summary.DepensesEffectuees || "")}</textarea></label>
         <label class="wide">Ceux qui ont payé <textarea name="paidDetails" placeholder="Nom : montant">${escapeHtml(summary.DettesPayeesDetails || "")}</textarea></label>
-        <div class="calculation-note wide" data-cash-received="${Number(ordersSummary.MontantRecu || 0)}">Total entrées = montant reçu + dettes payées. Solde = total entrées - dépenses.</div>
+        <div class="calculation-note wide" data-cash-received="${Number(ordersSummary.MontantRecu || 0)}">Total entrées = reçu commandes + dettes payées. Solde = total entrées - dépenses.</div>
         <button class="primary wide" type="submit">Enregistrer la caisse</button>
       </form>
     </section>
@@ -511,7 +512,7 @@ async function cashPage() {
       "Historique de caisse",
       rows,
       ["DateCaisse", "NombreTotalBacs", "MontantAttendu", "MontantRecu", "TotalDettes", "TotalDettesAccumulees", "DettesPayeesAujourdHui", "DettesAccumuleesRestantes", "TotalEntrees", "MontantTotalDepenses", "Solde", "DepensesEffectuees", "DettesPayeesDetails"],
-      ["Date", "Bacs", "Attendu", "Reçu", "Dettes", "Dettes accum.", "Payées", "Restantes", "Entrées", "Dépenses", "Solde", "Liste dépenses", "Ceux qui ont payé"],
+      ["Date", "Bacs", "Attendu", "Reçu commandes", "Dettes", "Dettes accum.", "Payées", "Restantes", "Entrées", "Dépenses", "Solde", "Liste dépenses", "Ceux qui ont payé"],
       [{ label: "Charger", action: "load-cash" }, { label: "Supprimer", action: "delete-cash", danger: true }],
     )}
   `);
@@ -737,9 +738,9 @@ async function reportsPage() {
         <img src="/assets/icon-baguette.png" alt="Baguette" />
       </div>
       <div class="report-grid">
-        ${modules.includes("orders") ? `<p><strong>Commandes :</strong> ${orders.NombreTotalBacs || 0} bacs, attendu ${formatFc(orders.MontantAttendu || 0)}, reçu ${formatFc(orders.MontantRecu || 0)}, dettes ${formatFc(orders.TotalDettes || 0)}</p>` : ""}
+        ${modules.includes("orders") ? `<p><strong>Commandes :</strong> ${orders.NombreTotalBacs || 0} bacs, attendu ${formatFc(orders.MontantAttendu || 0)}, payé clients ${formatFc(orders.MontantRecuBrut || orders.MontantRecu || 0)}, reçu commande ${formatFc(orders.MontantRecu || 0)}, avances ${formatFc(orders.AvancesGenerees || 0)}, dettes ${formatFc(orders.TotalDettes || 0)}</p>` : ""}
         ${modules.includes("production") ? `<p><strong>Production :</strong> ${production.NombreBacsProduits || 0} bacs, ${formatNumber(production.NombreSacsUtilises || 0)} sacs utilisés, couverture ${formatNumber(production.TauxCouverture || 0)} %</p>` : ""}
-        ${modules.includes("cash") ? `<p><strong>Montant reçu :</strong> ${formatFc(orders.MontantRecu || 0)}<br><strong>Dettes payées aujourd'hui :</strong> ${formatFc(cash.DettesPayeesAujourdHui || 0)}<br><strong>Total entrées :</strong> ${formatFc(reportEntries)}<br><strong class="green">Dépenses :</strong> ${formatFc(cash.MontantTotalDepenses || 0)}<br><strong class="red">Solde du jour :</strong> ${formatFc(reportEntries - Number(cash.MontantTotalDepenses || 0))}</p>` : ""}
+        ${modules.includes("cash") ? `<p><strong>Reçu commandes :</strong> ${formatFc(orders.MontantRecu || 0)}<br><strong>Dettes payées aujourd'hui :</strong> ${formatFc(cash.DettesPayeesAujourdHui || 0)}<br><strong>Total entrées :</strong> ${formatFc(reportEntries)}<br><strong class="green">Dépenses :</strong> ${formatFc(cash.MontantTotalDepenses || 0)}<br><strong class="red">Solde du jour :</strong> ${formatFc(reportEntries - Number(cash.MontantTotalDepenses || 0))}</p>` : ""}
         ${modules.includes("commissions") ? `<p><strong>Commissions :</strong> ${formatFc(commissionTotal)}</p>` : ""}
         ${modules.includes("stock") ? `<p><strong>Stock farine :</strong> ${formatNumber(stock.FarineRestante || 0)} sacs restants<br><strong>Levure :</strong> ${formatNumber(stock.LevureRestante || 0)} paquets</p>` : ""}
         ${modules.includes("workers") ? `<p><strong>Travailleurs :</strong> ${workerSummary.TravailleursActifs || 0} actif(s)<br><strong>Masse salariale :</strong> ${formatFc(workerSummary.MasseSalarialeMensuelle || 0)}<br><strong>Net payé sur la période :</strong> ${formatFc(workerSummary.TotalNet || 0)}</p>` : ""}
@@ -1020,18 +1021,16 @@ function bindOrderAutoCalculations() {
     const rate = ORDER_STATUS_RATES[status] || 0;
     const due = trays * rate;
     const debt = due - received;
-    const isOverpaid = received > due;
+    const advance = Math.max(received - due, 0);
     form.elements.due.value = Math.round(due);
     form.elements.debt.value = Math.round(Math.max(debt, 0));
-    form.elements.received?.setAttribute("max", String(Math.round(due)));
-    form.elements.received?.setCustomValidity(
-      isOverpaid ? "Le montant reçu ne peut pas dépasser le montant à percevoir." : ""
-    );
+    form.elements.received?.removeAttribute("max");
+    form.elements.received?.setCustomValidity("");
     const note = document.querySelector("#orderCalculationNote");
     if (note) {
-      note.classList.toggle("warning", isOverpaid);
-      note.textContent = isOverpaid
-        ? `Impossible : le montant reçu (${formatFc(received)}) dépasse le montant à percevoir (${formatFc(due)}).`
+      note.classList.toggle("warning", false);
+      note.textContent = advance > 0
+        ? `${status} : ${formatFc(rate)} par bac. Reçu commande : ${formatFc(due)}. Avance à reporter : ${formatFc(advance)}.`
         : `${status} : ${formatFc(rate)} par bac. Dette calculée : ${formatFc(Math.max(debt, 0))}.`;
     }
   };
@@ -1091,7 +1090,7 @@ function bindCashAutoCalculations() {
     const balance = totalEntries - expenses;
     form.elements.totalEntries.value = formatFc(totalEntries);
     form.elements.dayBalance.value = formatFc(balance);
-    note.textContent = `Montant reçu : ${formatFc(received)} | Dettes payées : ${formatFc(paidDebts)} | Dépenses : ${formatFc(expenses)} | Solde : ${formatFc(balance)}`;
+    note.textContent = `Reçu commandes : ${formatFc(received)} | Dettes payées : ${formatFc(paidDebts)} | Dépenses : ${formatFc(expenses)} | Solde : ${formatFc(balance)}`;
   };
   if (!form.dataset.autoCalculationBound) {
     ["paidDebts", "expenses"].forEach((name) => {
@@ -1242,9 +1241,6 @@ async function submitOrder(event) {
     const form = new FormData(event.currentTarget);
     const amountDue = Number(form.get("due") || 0);
     const amountReceived = Number(form.get("received") || 0);
-    if (amountReceived > amountDue) {
-      throw new Error("Le montant reçu ne peut pas dépasser le montant à percevoir.");
-    }
     const args = [
       asRemoteDate(form.get("date")),
       String(form.get("client") || ""),

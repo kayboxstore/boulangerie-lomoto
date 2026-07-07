@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import html
 import hmac
 import ipaddress
 import json
 import mimetypes
 import os
 import secrets
+import shutil
 import sys
 import threading
 import time
@@ -32,7 +34,21 @@ BRAND_ASSETS_DIR = ROOT / "boulangerie_app" / "assets"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from boulangerie_app.database import DatabaseHelper  # noqa: E402
+from boulangerie_app.client_config import (  # noqa: E402
+    client_summary,
+    get_allowed_domains,
+    get_logo_path,
+    get_public_url,
+    get_roles_config,
+    get_watermark_path,
+)
+from boulangerie_app.database import APP_PUBLIC_URL, DatabaseHelper  # noqa: E402
+from boulangerie_app.license_manager import (  # noqa: E402
+    activate_device,
+    deactivate_device,
+    status_payload,
+    validate_current_license,
+)
 from boulangerie_app.connected_mode import ConnectionSettings  # noqa: E402
 from boulangerie_app.excel_reports import (  # noqa: E402
     create_daily_excel_report,
@@ -45,10 +61,11 @@ from boulangerie_app.reports import (  # noqa: E402
     create_period_pdf_report,
 )
 from boulangerie_app.server_host import load_central_server_settings  # noqa: E402
+from boulangerie_app.status_labels import normalize_status_form_label  # noqa: E402
 from boulangerie_app.version import APP_NAME, APP_VERSION  # noqa: E402
 
 
-SESSION_IDLE_TTL_SECONDS = 30 * 60
+SESSION_IDLE_TTL_SECONDS = 15 * 60
 SESSION_ABSOLUTE_TTL_SECONDS = 8 * 60 * 60
 MAX_JSON_BODY_BYTES = 256 * 1024
 LOGIN_WINDOW_SECONDS = 15 * 60
@@ -63,13 +80,24 @@ ERROR_LOG_LOCK = threading.Lock()
 REPORT_FILE_TOKENS: dict[str, dict[str, Any]] = {}
 REPORT_FILE_TOKENS_LOCK = threading.Lock()
 REPORT_FILE_TOKEN_TTL_SECONDS = 15 * 60
+MAINTENANCE_TOKEN_FILENAME = "maintenance-token.txt"
 PUBLIC_HOSTS = {
     "boulangerie-lomoto.com",
     "www.boulangerie-lomoto.com",
     "app.boulangerie-lomoto.com",
+    *get_allowed_domains(),
 }
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
-CSRF_EXEMPT_POST_PATHS = {"/api/login", "/api/setup"}
+INTERNAL_MAINTENANCE_POST_PATHS = {
+    "/api/internal/maintenance/automatic-backup",
+    "/api/internal/maintenance/email-drain",
+}
+CSRF_EXEMPT_POST_PATHS = {
+    "/api/login",
+    "/api/setup",
+    "/api/license/activate",
+    *INTERNAL_MAINTENANCE_POST_PATHS,
+}
 RPC_CSRF_EXEMPT_METHODS = {"get_setup_status", "create_initial_admin", "web_login", "find_user_for_login"}
 
 
@@ -85,6 +113,8 @@ ROLE_MODULES = {
         "users",
         "reports",
         "history",
+        "activation",
+        "system",
         "about",
     ],
     "Directeur Général": [
@@ -105,6 +135,25 @@ ROLE_MODULES = {
     "Gestionnaire de stock": ["dashboard", "stock", "reports", "about"],
     "Gestionnaire des commandes": ["dashboard", "orders", "commissions", "reports", "about"],
 }
+
+
+def _apply_configured_role_modules() -> None:
+    configured_roles = get_roles_config()
+    if not configured_roles:
+        return
+    for role, modules in configured_roles.items():
+        web_modules = [module for module in modules if module]
+        if role == "Admin":
+            for required_module in ("activation", "system", "about"):
+                if required_module not in web_modules:
+                    web_modules.append(required_module)
+        if "about" not in web_modules:
+            web_modules.append("about")
+        if web_modules:
+            ROLE_MODULES[role] = web_modules
+
+
+_apply_configured_role_modules()
 
 WRITE_MODULES_BY_ROLE = {
     "Admin": {"orders", "cash", "stock", "production", "workers", "users", "history", "closures", "backups"},
@@ -175,12 +224,64 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _maintenance_token_path() -> Path:
+    return DatabaseHelper.app_data_dir / MAINTENANCE_TOKEN_FILENAME
+
+
+def _get_or_create_maintenance_token() -> str:
+    token_path = _maintenance_token_path()
+    try:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        if token_path.exists():
+            token = token_path.read_text(encoding="utf-8-sig").strip()
+            if len(token) >= 32:
+                return token
+        token = secrets.token_urlsafe(48)
+        temporary = token_path.with_suffix(".tmp")
+        temporary.write_text(token, encoding="utf-8")
+        os.replace(temporary, token_path)
+        if os.name == "nt":
+            os.system(
+                f'icacls "{token_path}" /inheritance:r /grant:r "SYSTEM:(F)" "Administrators:(F)" >nul 2>&1'
+            )
+        return token
+    except OSError as exc:
+        raise RuntimeError("Jeton de maintenance local indisponible.") from exc
+
+
 def _path_is_under(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
         return True
     except (OSError, ValueError):
         return False
+
+
+def _configured_asset_path(configured_path: str) -> Path | None:
+    configured_path = str(configured_path or "").strip()
+    if not configured_path:
+        return None
+    path = Path(configured_path)
+    candidates = [path]
+    if not path.is_absolute():
+        candidates.extend([ROOT / path, BRAND_ASSETS_DIR / path.name, Path.cwd() / path])
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _brand_asset_path(asset_name: str) -> Path:
+    normalized = asset_name.strip().lower()
+    if normalized == "logo-boulangerie-lomoto.png":
+        configured = _configured_asset_path(get_logo_path())
+        if configured is not None:
+            return configured
+    if normalized == "logo-boulangerie-lomoto-watermark.png":
+        configured = _configured_asset_path(get_watermark_path())
+        if configured is not None:
+            return configured
+    return BRAND_ASSETS_DIR / asset_name
 
 
 def _query_value(query: dict[str, list[str]], key: str, default: str = "") -> str:
@@ -191,10 +292,16 @@ def _query_value(query: dict[str, list[str]], key: str, default: str = "") -> st
 
 
 def _orders_summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    accounted_received = sum(
+        max(_money(row.get("MontantRecuCommande", _money(row.get("MontantRecu")) - _money(row.get("AvanceGeneree")))), 0)
+        for row in rows
+    )
     return {
         "NombreTotalBacs": sum(_int(row.get("NombreBacs")) for row in rows),
         "MontantAttendu": sum(_money(row.get("MontantAPercevoir")) for row in rows),
-        "MontantRecu": sum(_money(row.get("MontantRecu")) for row in rows),
+        "MontantRecu": accounted_received,
+        "MontantRecuCommande": accounted_received,
+        "MontantRecuBrut": sum(_money(row.get("MontantRecu")) for row in rows),
         "AvancesUtilisees": sum(_money(row.get("AvanceUtilisee")) for row in rows),
         "AvancesGenerees": sum(_money(row.get("AvanceGeneree")) for row in rows),
         "TotalDettes": sum(_money(row.get("Dette")) for row in rows),
@@ -506,6 +613,7 @@ def _public_session(session: dict[str, Any]) -> dict[str, Any]:
         "fullName": session.get("fullName", ""),
         "appName": APP_NAME,
         "appVersion": APP_VERSION,
+        "client": client_summary(),
         "modules": _modules_for(role),
         "readOnlyModules": sorted(READ_ONLY_MODULES_BY_ROLE.get(role, set())),
         "csrfToken": session.get("csrfToken", ""),
@@ -523,15 +631,28 @@ def _dashboard_payload(session: dict[str, Any]) -> dict[str, Any]:
         "cards": [],
         "alerts": [],
         "recentActivity": [],
+        "charts": [],
     }
     full_visibility = role in FULL_VISIBILITY_ROLES
 
     if full_visibility or role == "Gestionnaire de stock":
         stock = DatabaseHelper.get_stock_summary()
         payload["stock"] = stock
-        payload["cards"].append({"label": "Farine restante", "value": stock.get("FarineRestante", 0), "unit": "sacs"})
+        payload["cards"].append({"label": "Farine restante", "value": stock.get("FarineRestante", 0), "unit": "sacs", "primary": True})
         payload["cards"].append({"label": "Approvisionnements du mois", "value": DatabaseHelper.count_stock_supplies_for_period(month_start, today), "unit": "entrées"})
         payload["cards"].append({"label": "Sorties stock du mois", "value": DatabaseHelper.count_stock_exits_for_period(month_start, today), "unit": "sorties"})
+        payload["charts"].append(
+            {
+                "title": "Stock matières",
+                "type": "bars",
+                "items": [
+                    {"label": "Farine", "value": stock.get("FarineRestante", 0), "unit": "sacs"},
+                    {"label": "Levure", "value": stock.get("LevureRestante", 0), "unit": "paquets"},
+                    {"label": "Sel", "value": stock.get("SelRestant", 0), "unit": "kg"},
+                    {"label": "Huile", "value": stock.get("HuileRestante", 0), "unit": "L"},
+                ],
+            }
+        )
         payload["alerts"].extend(
             {
                 "type": "stock",
@@ -549,9 +670,35 @@ def _dashboard_payload(session: dict[str, Any]) -> dict[str, Any]:
         orders["AvancesDisponibles"] = outstanding_orders.get("AvancesDisponibles", 0)
         payload["orders"] = orders
         payload["cards"].append({"label": "Commandes du mois", "value": orders.get("NombreCommandes", 0), "unit": "commandes"})
-        payload["cards"].append({"label": "Montant reçu ce mois", "value": orders.get("MontantRecu", 0), "unit": "FC", "money": True})
-        payload["cards"].append({"label": "Dettes non payées", "value": orders.get("TotalDettes", 0), "unit": "FC", "money": True})
+        payload["cards"].append({"label": "Reçu commandes ce mois", "value": orders.get("MontantRecu", 0), "unit": "FC", "money": True, "primary": True})
+        payload["cards"].append({"label": "Dettes non payées", "value": orders.get("TotalDettes", 0), "unit": "FC", "money": True, "primary": True})
         payload["cards"].append({"label": "Avances clients", "value": orders.get("AvancesDisponibles", 0), "unit": "FC", "money": True})
+        payload["charts"].append(
+            {
+                "title": "Commandes et paiements",
+                "type": "bars",
+                "items": [
+                    {"label": "Attendu", "value": orders.get("MontantAttendu", 0), "unit": "FC", "money": True},
+                    {"label": "Reçu", "value": orders.get("MontantRecu", 0), "unit": "FC", "money": True},
+                    {"label": "Dettes", "value": orders.get("TotalDettes", 0), "unit": "FC", "money": True},
+                    {"label": "Avances", "value": orders.get("AvancesDisponibles", 0), "unit": "FC", "money": True},
+                ],
+            }
+        )
+        payload["charts"].append(
+            {
+                "title": "Santé commandes",
+                "type": "donut",
+                "items": [
+                    {
+                        "label": "Sans dette",
+                        "value": max(_int(orders.get("NombreCommandes")) - _int(orders.get("NombreAvecDette")), 0),
+                        "unit": "cmd",
+                    },
+                    {"label": "Avec dette", "value": orders.get("NombreAvecDette", 0), "unit": "cmd"},
+                ],
+            }
+        )
         payload["alerts"].extend(
             {
                 "type": "debt",
@@ -572,16 +719,52 @@ def _dashboard_payload(session: dict[str, Any]) -> dict[str, Any]:
                 {"label": "Bacs foutus ce mois", "value": production.get("TotalBacsFoutus", 0), "unit": "bacs"},
             ]
         )
+        payload["charts"].append(
+            {
+                "title": "Production mensuelle",
+                "type": "bars",
+                "items": [
+                    {"label": "Commandés", "value": production.get("TotalBacsCommandes", 0), "unit": "bacs"},
+                    {"label": "Produits", "value": production.get("TotalBacsProduits", 0), "unit": "bacs"},
+                    {"label": "Restants", "value": production.get("TotalBacsRestants", 0), "unit": "bacs"},
+                    {"label": "Foutus", "value": production.get("TotalBacsFoutus", 0), "unit": "bacs"},
+                ],
+            }
+        )
 
     if full_visibility or role == "Caissier":
         workers = DatabaseHelper.get_workers_payroll_summary(month_start, today)
         payload["workers"] = workers
-        payload["cards"].append({"label": "Solde caisse du mois", "value": DatabaseHelper.get_cash_total_for_period(month_start, today), "unit": "FC", "money": True})
+        cash_total = DatabaseHelper.get_cash_total_for_period(month_start, today)
+        payload["cards"].append({"label": "Solde caisse du mois", "value": cash_total, "unit": "FC", "money": True, "primary": True})
         payload["cards"].append({"label": "Travailleurs actifs", "value": workers.get("TravailleursActifs", 0), "unit": "personnes"})
-        payload["cards"].append({"label": "Paies nettes du mois", "value": workers.get("TotalNet", 0), "unit": "FC", "money": True})
+        payload["cards"].append({"label": "Paies payées du mois", "value": workers.get("TotalPaye", 0), "unit": "FC", "money": True})
+        payload["cards"].append({"label": "Paies non payées", "value": workers.get("TotalNonPaye", 0), "unit": "FC", "money": True, "primary": True})
+        payload["charts"].append(
+            {
+                "title": "Caisse et paies",
+                "type": "bars",
+                "items": [
+                    {"label": "Caisse", "value": cash_total, "unit": "FC", "money": True},
+                    {"label": "Paies payées", "value": workers.get("TotalPaye", 0), "unit": "FC", "money": True},
+                    {"label": "Paies non payées", "value": workers.get("TotalNonPaye", 0), "unit": "FC", "money": True},
+                ],
+            }
+        )
 
     if full_visibility or role == "Gestionnaire des commandes":
-        payload["cards"].append({"label": "Commissions non payées", "value": DatabaseHelper.get_total_commissions(), "unit": "FC", "money": True})
+        commission_total = DatabaseHelper.get_total_commissions()
+        payload["cards"].append({"label": "Commissions non payées", "value": commission_total, "unit": "FC", "money": True, "primary": True})
+        payload["charts"].append(
+            {
+                "title": "Commissions",
+                "type": "bars",
+                "items": [
+                    {"label": "Non payées", "value": commission_total, "unit": "FC", "money": True},
+                    {"label": "Commandes dette", "value": DatabaseHelper.count_orders_with_debt(), "unit": "clients"},
+                ],
+            }
+        )
 
     if full_visibility:
         payload["cards"].append({"label": "Utilisateurs", "value": DatabaseHelper.count_users(), "unit": "comptes"})
@@ -589,6 +772,122 @@ def _dashboard_payload(session: dict[str, Any]) -> dict[str, Any]:
         payload["recentActivity"] = DatabaseHelper.get_recent_activity_summary(10)
 
     return payload
+
+
+def _format_system_bytes(size: int | float) -> str:
+    value = float(size or 0)
+    units = ["o", "Ko", "Mo", "Go", "To"]
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(value)} {units[unit_index]}"
+    return f"{value:.1f} {units[unit_index]}"
+
+
+def _system_status_payload() -> dict[str, Any]:
+    DatabaseHelper.initialize_database()
+    db_path = DatabaseHelper.db_path
+    db_size = db_path.stat().st_size if db_path.exists() else 0
+    storage_root = DatabaseHelper.app_data_dir
+    try:
+        disk = shutil.disk_usage(storage_root)
+        disk_payload = {
+            "total": disk.total,
+            "used": disk.used,
+            "free": disk.free,
+            "totalLabel": _format_system_bytes(disk.total),
+            "usedLabel": _format_system_bytes(disk.used),
+            "freeLabel": _format_system_bytes(disk.free),
+        }
+    except OSError:
+        disk_payload = {}
+
+    archives_dir = DatabaseHelper.reports_dir / "archives"
+    archive_files: list[dict[str, Any]] = []
+    if archives_dir.exists():
+        for archive_path in sorted(archives_dir.glob("*.csv"), key=lambda path: path.stat().st_mtime, reverse=True)[:5]:
+            try:
+                stat = archive_path.stat()
+            except OSError:
+                continue
+            archive_files.append(
+                {
+                    "NomFichier": archive_path.name,
+                    "CheminComplet": archive_path,
+                    "TailleOctets": stat.st_size,
+                    "Taille": _format_system_bytes(stat.st_size),
+                    "DateModification": datetime.fromtimestamp(stat.st_mtime),
+                }
+            )
+
+    backups = DatabaseHelper.list_backup_files(8)
+    for backup in backups:
+        backup["Taille"] = _format_system_bytes(int(backup.get("TailleOctets", 0) or 0))
+    automatic_backups = [
+        backup
+        for backup in backups
+        if str(backup.get("NomFichier", "")).startswith("sauvegarde-automatique-")
+    ]
+    maintenance_token_exists = _maintenance_token_path().exists()
+
+    return {
+        "appName": APP_NAME,
+        "version": APP_VERSION,
+        "publicUrl": APP_PUBLIC_URL,
+        "serverTime": datetime.now().isoformat(timespec="seconds"),
+        "database": {
+            "path": db_path,
+            "exists": db_path.exists(),
+            "size": db_size,
+            "sizeLabel": _format_system_bytes(db_size),
+        },
+        "paths": {
+            "data": storage_root,
+            "reports": DatabaseHelper.reports_dir,
+            "backups": DatabaseHelper.backups_dir,
+            "archives": archives_dir,
+        },
+        "disk": disk_payload,
+        "backups": backups,
+        "automaticBackups": {
+            "last": automatic_backups[0] if automatic_backups else None,
+            "tokenReady": maintenance_token_exists,
+            "tokenPath": _maintenance_token_path(),
+            "localStatusUrl": "http://127.0.0.1:8787/api/internal/maintenance/status",
+        },
+        "archives": archive_files,
+        "email": DatabaseHelper.get_email_notification_status(),
+        "sessions": DatabaseHelper.list_active_sessions(),
+        "license": status_payload(DatabaseHelper.app_data_dir, domain=APP_PUBLIC_URL),
+    }
+
+
+def _public_config_payload() -> dict[str, Any]:
+    return {
+        "appName": APP_NAME,
+        "appVersion": APP_VERSION,
+        "client": client_summary(),
+    }
+
+
+def _safe_license_payload(data: dict[str, Any], *, include_private: bool = False) -> dict[str, Any]:
+    safe = dict(data)
+    if not include_private:
+        safe.pop("licensePath", None)
+        safe.pop("registryPath", None)
+        safe.pop("payload", None)
+        safe["activations"] = [
+            {
+                "deviceName": item.get("deviceName", ""),
+                "activatedAt": item.get("activatedAt", ""),
+                "lastSeenAt": item.get("lastSeenAt", ""),
+            }
+            for item in safe.get("activations", [])
+            if isinstance(item, dict)
+        ]
+    return safe
 
 
 class WebProHandler(BaseHTTPRequestHandler):
@@ -727,6 +1026,33 @@ class WebProHandler(BaseHTTPRequestHandler):
             return bool(address.is_private or address.is_loopback)
         except ValueError:
             return False
+
+    def _license_domain(self) -> str:
+        host = self._request_host()
+        if host in LOCAL_HOSTS:
+            return ""
+        try:
+            address = ipaddress.ip_address(host)
+            if address.is_private or address.is_loopback:
+                return ""
+        except ValueError:
+            pass
+        return host
+
+    def _require_license_active(self) -> None:
+        data = status_payload(DatabaseHelper.app_data_dir, domain=self._license_domain())
+        if data.get("required") and not data.get("ok"):
+            raise PermissionError(str(data.get("message") or "Licence non valide."))
+
+    def _require_internal_maintenance_token(self) -> None:
+        if not self._is_local_client():
+            raise PermissionError("Maintenance locale reservee au PC serveur.")
+        provided = str(self.headers.get("X-Lomoto-Maintenance-Token", "") or "").strip()
+        if not provided:
+            provided = self._bearer_token()
+        expected = _get_or_create_maintenance_token()
+        if not provided or not hmac.compare_digest(provided, expected):
+            raise PermissionError("Jeton de maintenance invalide.")
 
     def _require_same_origin(self) -> None:
         origin = str(self.headers.get("Origin", "") or "").strip()
@@ -868,10 +1194,41 @@ class WebProHandler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._send_json({"ok": True, "app": APP_NAME, "version": APP_VERSION})
             return
+        if path == "/api/config":
+            self._send_json({"ok": True, **_public_config_payload()})
+            return
         if path == "/api/setup/status":
             self._send_json({"ok": True, "required": DatabaseHelper.count_users() == 0})
             return
+        if path == "/api/internal/maintenance/status":
+            self._require_internal_maintenance_token()
+            self._send_json(
+                {
+                    "ok": True,
+                    "app": APP_NAME,
+                    "version": APP_VERSION,
+                    "serverTime": datetime.now().isoformat(timespec="seconds"),
+                    "database": str(DatabaseHelper.db_path),
+                    "backups": DatabaseHelper.list_backup_files(5),
+                    "email": DatabaseHelper.get_email_notification_status(),
+                }
+            )
+            return
+        if path == "/api/license/status":
+            session = _get_session(self._session_token())
+            include_private = bool(session and str(session.get("role", "")) == "Admin")
+            self._send_json(
+                {
+                    "ok": True,
+                    "status": _safe_license_payload(
+                        status_payload(DatabaseHelper.app_data_dir, domain=self._license_domain()),
+                        include_private=include_private,
+                    ),
+                }
+            )
+            return
         if path == "/api/reports/file":
+            self._require_license_active()
             session = self._require_session()
             report_path = _get_report_file(_query_value(query, "token", ""), session)
             if report_path is None or not report_path.exists() or not report_path.is_file():
@@ -879,6 +1236,7 @@ class WebProHandler(BaseHTTPRequestHandler):
             self._send_path(report_path)
             return
 
+        self._require_license_active()
         session = self._require_session()
         if path == "/api/me":
             self._send_json({"ok": True, "user": _public_session(session)})
@@ -890,6 +1248,10 @@ class WebProHandler(BaseHTTPRequestHandler):
             raise PermissionError("Vous devez changer le mot de passe initial avant de continuer.")
         if path == "/api/dashboard":
             self._send_json({"ok": True, "data": _dashboard_payload(session)})
+            return
+        if path == "/api/system/status":
+            _require_admin(session, "l'etat systeme")
+            self._send_json({"ok": True, "data": _system_status_payload()})
             return
         if path == "/api/orders":
             _require_module(session, "orders")
@@ -975,8 +1337,27 @@ class WebProHandler(BaseHTTPRequestHandler):
             selected_date = _query_value(query, "date", _today())
             selected_date_value = _date_value(selected_date)
             show_all = _query_value(query, "all", "0") == "1"
+            status_filter = normalize_status_form_label(_query_value(query, "status", "Tous") or "Tous")
             rows = DatabaseHelper.list_commissions() if show_all else DatabaseHelper.list_commissions_by_date(selected_date_value)
-            self._send_json({"ok": True, "rows": rows, "total": sum(_money(row.get("Commissions")) for row in rows)})
+            if status_filter and status_filter != "Tous":
+                rows = [
+                    row
+                    for row in rows
+                    if normalize_status_form_label(str(row.get("Statut", ""))) == status_filter
+                ]
+            summary = DatabaseHelper.get_commissions_summary(
+                None if show_all else selected_date_value,
+                None if show_all else selected_date_value,
+                status_filter,
+            )
+            self._send_json(
+                {
+                    "ok": True,
+                    "rows": rows,
+                    "summary": summary,
+                    "total": _money(summary.get("TotalCommissions")),
+                }
+            )
             return
         if path == "/api/workers":
             _require_module(session, "workers")
@@ -1045,6 +1426,25 @@ class WebProHandler(BaseHTTPRequestHandler):
         raise ValueError("Route API introuvable.")
 
     def _handle_api_post(self, path: str, payload: dict[str, Any]) -> None:
+        if path == "/api/internal/maintenance/automatic-backup":
+            self._require_internal_maintenance_token()
+            backup_path = DatabaseHelper.create_automatic_backup_if_needed(force=bool(payload.get("force")))
+            self._send_json(
+                {
+                    "ok": True,
+                    "created": backup_path is not None,
+                    "path": str(backup_path) if backup_path is not None else "",
+                    "message": "Sauvegarde creee." if backup_path is not None else "Sauvegarde quotidienne deja presente.",
+                }
+            )
+            return
+
+        if path == "/api/internal/maintenance/email-drain":
+            self._require_internal_maintenance_token()
+            result = DatabaseHelper.process_pending_email_notifications(_int(payload.get("limit")) or 20)
+            self._send_json({"ok": True, "result": result})
+            return
+
         if path == "/api/setup":
             if not self._is_local_client():
                 raise PermissionError("La configuration initiale doit être effectuée depuis le réseau local.")
@@ -1057,7 +1457,35 @@ class WebProHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
 
+        if path == "/api/license/activate":
+            session = _get_session(self._session_token())
+            if session is None and not self._is_local_client():
+                raise PermissionError("L'activation sans session Admin doit etre effectuee depuis le PC serveur.")
+            if session is not None:
+                _require_admin(session, "l'activation du produit")
+            key = _clean(payload.get("key"))
+            if not key:
+                raise ValueError("Cle d'activation manquante.")
+            result = activate_device(key, DatabaseHelper.app_data_dir, domain=self._license_domain())
+            if session is not None:
+                _log_web_activity(
+                    session,
+                    "Activation",
+                    "Licence activee" if result.ok else "Activation refusee",
+                    result.message,
+                )
+            status = _safe_license_payload(
+                status_payload(DatabaseHelper.app_data_dir, domain=self._license_domain()),
+                include_private=bool(session and str(session.get("role", "")) == "Admin"),
+            )
+            if not result.ok:
+                self._send_json({"ok": False, "error": result.message, "status": status}, HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json({"ok": True, "message": result.message, "status": status})
+            return
+
         if path == "/api/login":
+            self._require_license_active()
             identifiant = _clean(payload.get("identifiant")).lower()
             password = _clean(payload.get("password"))
             force_session = bool(payload.get("forceSession") or payload.get("force"))
@@ -1124,6 +1552,7 @@ class WebProHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True}, extra_headers=self._session_cookie_headers(clear=True))
             return
 
+        self._require_license_active()
         session = self._require_session()
         if session.get("mustChangePassword") and path != "/api/password":
             raise PermissionError("Vous devez changer le mot de passe initial avant de continuer.")
@@ -1152,6 +1581,22 @@ class WebProHandler(BaseHTTPRequestHandler):
             _log_web_activity(session, "Utilisateurs", "Session utilisateur fermee", identifiant)
             self._send_json({"ok": True, "rows": DatabaseHelper.list_users()})
             return
+        if path == "/api/history/clear":
+            _require_admin(session, "l'effacement de l'historique")
+            archive_path = DatabaseHelper.archive_activity_logs()
+            deleted = DatabaseHelper.clear_activity_logs(archive=False)
+            details = f"{deleted} action(s) supprimee(s)."
+            if archive_path is not None:
+                details += f" Archive : {archive_path}"
+            _log_web_activity(session, "Historique", "Historique efface", details)
+            self._send_json(
+                {
+                    "ok": True,
+                    "deleted": deleted,
+                    "archivePath": str(archive_path) if archive_path is not None else "",
+                }
+            )
+            return
         if path == "/api/email/retry":
             _require_admin(session, "la relance des notifications par e-mail")
             result = DatabaseHelper.retry_email_notifications(100)
@@ -1172,15 +1617,15 @@ class WebProHandler(BaseHTTPRequestHandler):
                 raise ValueError("Veuillez saisir une adresse e-mail de test.")
             result = send_transactional_email(
                 recipient,
-                "Test e-mail - Boulangerie Lomoto",
+                f"Test e-mail - {APP_NAME}",
                 (
                     "Bonjour,\n\n"
-                    "Ceci est un e-mail de test envoye depuis Boulangerie Lomoto.\n"
+                    f"Ceci est un e-mail de test envoye depuis {APP_NAME}.\n"
                     "Si vous le recevez, la configuration d'envoi est operationnelle."
                 ),
                 (
                     "<p>Bonjour,</p>"
-                    "<p>Ceci est un e-mail de test envoye depuis <strong>Boulangerie Lomoto</strong>.</p>"
+                    f"<p>Ceci est un e-mail de test envoye depuis <strong>{html.escape(APP_NAME)}</strong>.</p>"
                     "<p>Si vous le recevez, la configuration d'envoi est operationnelle.</p>"
                 ),
             )
@@ -1216,7 +1661,7 @@ class WebProHandler(BaseHTTPRequestHandler):
                     "smtp_use_tls": bool(payload.get("smtpUseTls", True)),
                     "smtp_use_ssl": bool(payload.get("smtpUseSsl", False)),
                     "from_address": _clean(payload.get("fromAddress")),
-                    "from_name": _clean(payload.get("fromName")) or "Boulangerie Lomoto",
+                    "from_name": _clean(payload.get("fromName")) or APP_NAME,
                     "reply_to": _clean(payload.get("replyTo")),
                 }
             )
@@ -1556,7 +2001,27 @@ class WebProHandler(BaseHTTPRequestHandler):
         raise ValueError("Route API introuvable.")
 
     def _handle_api_delete(self, path: str, query: dict[str, list[str]]) -> None:
+        self._require_license_active()
         session = self._require_session()
+        if path == "/api/license/devices":
+            _require_admin(session, "la gestion des postes actives")
+            device_id = _query_value(query, "deviceId", "").strip()
+            if not device_id:
+                raise ValueError("Identifiant du poste manquant.")
+            removed = deactivate_device(DatabaseHelper.app_data_dir, device_id)
+            if not removed:
+                raise ValueError("Poste introuvable dans le registre d'activation.")
+            _log_web_activity(session, "Activation", "Poste desactive", device_id)
+            self._send_json(
+                {
+                    "ok": True,
+                    "status": _safe_license_payload(
+                        status_payload(DatabaseHelper.app_data_dir, domain=self._license_domain()),
+                        include_private=True,
+                    ),
+                }
+            )
+            return
         if path == "/api/users":
             _require_module(session, "users", write=True)
             identifiant = _query_value(query, "identifiant", "").strip().lower()
@@ -1659,8 +2124,10 @@ class WebProHandler(BaseHTTPRequestHandler):
     def _serve_static(self, path: str) -> None:
         if path in {"", "/"}:
             file_path = STATIC_DIR / "index.html"
+        elif path in {"/politique-confidentialite", "/privacy-policy"}:
+            file_path = STATIC_DIR / "politique-confidentialite.html"
         elif path.startswith("/brand-assets/"):
-            file_path = BRAND_ASSETS_DIR / path.replace("/brand-assets/", "", 1)
+            file_path = _brand_asset_path(path.replace("/brand-assets/", "", 1))
         else:
             relative = path.lstrip("/")
             file_path = STATIC_DIR / relative

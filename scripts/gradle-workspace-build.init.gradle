@@ -1,0 +1,7 @@
+gradle.beforeProject { project ->
+    def workspaceOutput = new File(
+        project.rootProject.projectDir,
+        "../../output/android-gradle-build/${project.name}"
+    )
+    project.layout.buildDirectory.set(workspaceOutput)
+}

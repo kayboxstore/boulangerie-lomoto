@@ -1,16 +1,12 @@
+param(
+    [switch]$OpenAndroidStudio
+)
+
 $ErrorActionPreference = "Stop"
 
-. "$PSScriptRoot\tool_paths.ps1"
-
-Push-Location "$PSScriptRoot\..\android-apk"
-try {
-    Invoke-Tool -Candidates @("npm.cmd", "npm") -Arguments @("install")
-    Invoke-Tool -Candidates @("npm.cmd", "npm") -Arguments @("run", "build:web")
-    Invoke-Tool -Candidates @("npm.cmd", "npm") -Arguments @("run", "add:android")
-    Invoke-Tool -Candidates @("npm.cmd", "npm") -Arguments @("run", "sync")
+if ($OpenAndroidStudio) {
+    & "$PSScriptRoot\build_android_apk.ps1" -SkipBuild -OpenAndroidStudio
 }
-finally {
-    Pop-Location
+else {
+    & "$PSScriptRoot\build_android_apk.ps1" -SkipBuild
 }
-
-Write-Host "Projet Android prepare. Ouvrez Android Studio avec : cd android-apk ; npm run open" -ForegroundColor Green

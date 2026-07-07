@@ -1,8 +1,21 @@
 {
-  "appId": "com.kayboxstore.boulangerielomoto",
-  "appName": "Boulangerie Lomoto",
-  "webDir": "../web-mobile-app/dist",
-  "server": {
-    "androidScheme": "https"
-  }
+    "appId":  "com.gis.boulangerielomoto",
+    "appName":  "Boulangerie Lomoto",
+    "webDir":  "www",
+    "server":  {
+                   "url":  "https://app.boulangerie-lomoto.com",
+                   "cleartext":  false,
+                   "androidScheme":  "https",
+                   "allowNavigation":  [
+                                           "app.boulangerie-lomoto.com",
+                                           "boulangerie-lomoto.com"
+                                       ]
+               },
+    "plugins":  {
+                    "StatusBar":  {
+                                      "overlaysWebView":  false,
+                                      "style":  "LIGHT",
+                                      "backgroundColor":  "#b71924"
+                                  }
+                }
 }
