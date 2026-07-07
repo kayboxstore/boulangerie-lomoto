@@ -43,8 +43,11 @@ function Resolve-DestinationRoot {
             continue
         }
         $root = Get-DriveRoot $volume.DriveLetter
-        if ((Test-Path -LiteralPath (Join-Path $root "BoulangerieLomoto-Backups")) -or
-            (Test-Path -LiteralPath (Join-Path $root "LOMOTO_BACKUP.marker"))) {
+        $backupFolder = Join-Path $root "BoulangerieLomoto-Backups"
+        if (Test-Path -LiteralPath $backupFolder) {
+            return (Resolve-Path -LiteralPath $backupFolder).Path
+        }
+        if (Test-Path -LiteralPath (Join-Path $root "LOMOTO_BACKUP.marker")) {
             return $root
         }
     }
@@ -93,12 +96,24 @@ try {
         Copy-Item -LiteralPath $serverSettings -Destination $target -Force
     }
 
+    $hashes = @()
+    Get-ChildItem -LiteralPath $target -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $relativePath = $_.FullName.Substring($target.Length).TrimStart("\")
+        $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+        $hashes += [ordered]@{
+            path = $relativePath
+            sha256 = $hash.Hash
+            bytes = $_.Length
+        }
+    }
+
     $manifest = [ordered]@{
         createdAt = (Get-Date).ToString("s")
         computer = $env:COMPUTERNAME
         source = $SourceRoot
         destination = $target
         retentionCount = $RetentionCount
+        fileHashes = $hashes
     }
     $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $target "manifest.json") -Encoding UTF8
 

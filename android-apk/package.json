@@ -1,17 +1,19 @@
 {
   "name": "boulangerie-lomoto-android",
-  "version": "1.3.21",
+  "version": "1.5.3",
   "private": true,
   "scripts": {
-    "build:web": "cd ../web-mobile-app && npm install && npm run build",
     "add:android": "npx cap add android",
     "sync": "npx cap sync android",
     "open": "npx cap open android",
-    "prepare": "npm run build:web && npm install && npm run sync"
+    "doctor": "npx cap doctor",
+    "build:debug": "cd android && gradlew.bat assembleDebug",
+    "build:release": "cd android && gradlew.bat assembleRelease"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.0",
     "@capacitor/cli": "^7.4.0",
-    "@capacitor/core": "^7.4.0"
+    "@capacitor/core": "^7.4.0",
+    "@capacitor/status-bar": "^7.0.2"
   }
 }

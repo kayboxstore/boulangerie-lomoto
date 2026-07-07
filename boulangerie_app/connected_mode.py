@@ -15,20 +15,22 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from .version import APP_VERSION
+from .client_config import get_client_id
+from .version import APP_NAME, APP_VERSION
 
 
 REMOTE_DEFAULT_PORT = 8765
 REMOTE_DISCOVERY_PORT = 8766
 REMOTE_DISCOVERY_TIMEOUT_SECONDS = 3.0
-REMOTE_REFRESH_INTERVAL_MS = 5000
+REMOTE_REFRESH_INTERVAL_MS = 10000
 CONNECTION_CONFIG_FILENAME = "connection_settings.json"
 PUBLIC_SERVER_DIRECTORY_URL = os.environ.get(
     "BOULANGERIE_PUBLIC_SERVER_DIRECTORY_URL",
     "https://api.github.com/repos/kayboxstore/boulangerie-lomoto-updates/contents/server.json?ref=main",
 ).strip()
 PUBLIC_SERVER_DIRECTORY_TIMEOUT_SECONDS = 4
-DISCOVERY_APP_ID = "boulangerie-lomoto-sync"
+_CLIENT_ID = get_client_id()
+DISCOVERY_APP_ID = "boulangerie-lomoto-sync" if _CLIENT_ID == "lomoto" else f"boulangerie-{_CLIENT_ID}-sync"
 DISCOVERY_REQUEST_ACTION = "discover_server"
 DISCOVERY_RESPONSE_ACTION = "server_available"
 
@@ -65,6 +67,7 @@ REMOTE_DATABASE_METHODS = {
     "count_users",
     "log_activity",
     "list_activity_logs",
+    "clear_activity_logs",
     "get_recent_activity_summary",
     "list_workers",
     "get_worker",
@@ -404,7 +407,7 @@ def _health_probe_server(ip_address: str, server_port: int) -> DiscoveredServerI
         return None
     if not isinstance(payload, dict) or not payload.get("ok", False):
         return None
-    if str(payload.get("app_name", "")).strip() not in {"", "Boulangerie Lomoto"}:
+    if str(payload.get("app_name", "")).strip() not in {"", APP_NAME, "Boulangerie Lomoto"}:
         return None
     detected_port = int(payload.get("server_port", server_port) or server_port)
     return DiscoveredServerInfo(
@@ -642,7 +645,7 @@ class RemoteDatabaseClient:
         request_body = None
         headers = {
             "Accept": "application/json",
-            "User-Agent": f"BoulangerieLomoto/{APP_VERSION} WindowsClient",
+            "User-Agent": f"{APP_NAME}/{APP_VERSION} WindowsClient",
         }
         if payload is not None:
             request_body = json.dumps(payload, ensure_ascii=True).encode("utf-8")

@@ -1,24 +1,62 @@
-# Version APK Android
+# APK Android Boulangerie Lomoto
 
-Ce projet emballe l'application web/mobile dans une application Android avec Capacitor.
+Cette application Android emballe la vraie version web pro :
 
-## Préparer le projet Android
+`https://app.boulangerie-lomoto.com`
+
+Elle utilise donc la meme base et les memes donnees que Windows et que le navigateur.
+
+## Preparation automatique
+
+Depuis la racine du projet :
 
 ```powershell
-cd android-apk
-npm install
-npm run build:web
-npm run add:android
-npm run sync
-npm run open
+.\scripts\build_android_apk.ps1
 ```
 
-Android Studio s'ouvre ensuite. Depuis Android Studio, lancez :
+Le script :
 
-- `Build > Generate Signed Bundle / APK`
-- choisissez `APK`
-- signez l'application avec une clé Android
+- retrouve Java et le SDK Android installes avec Android Studio ;
+- installe les dependances Capacitor ;
+- cree le projet Android si necessaire ;
+- synchronise la configuration ;
+- applique le logo et la version ;
+- genere un APK debug installable.
 
-## Remarque importante
+L'APK debug est genere dans :
 
-La génération finale d'un fichier `.apk` nécessite Android Studio, le SDK Android et une clé de signature. Sans ces outils installés sur le PC, le projet est prêt mais l'APK final ne peut pas être compilé localement.
+`installer\output\android\<version>\BoulangerieLomoto-<version>-debug.apk`
+
+## Ouvrir dans Android Studio
+
+```powershell
+.\scripts\build_android_apk.ps1 -OpenAndroidStudio
+```
+
+## APK final signe
+
+Pour livrer une version professionnelle hors test, il faut une cle de signature Android.
+Cette cle doit rester privee et sauvegardee hors du PC serveur.
+
+```powershell
+.\scripts\create_android_keystore.ps1
+.\scripts\build_android_apk.ps1 -Release
+```
+
+L'APK release est genere dans :
+
+`installer\output\android\<version>\BoulangerieLomoto-<version>-release.apk`
+
+Si la cle Android n'existe pas, le script refuse le build release. C'est volontaire : un APK release non signe ne doit pas etre livre.
+
+## Installation sur telephone de test
+
+Quand le telephone Android est branche avec un bon cable USB et que le debogage USB est autorise :
+
+```powershell
+.\scripts\install_android_debug.ps1
+```
+
+## Principe retenu
+
+On ne duplique pas la logique metier dans Android. L'APK ouvre l'application web pro officielle, deja synchronisee avec Windows via le serveur central. Cela donne un seul produit a maintenir et les memes droits d'acces sur PC, Web et Mobile.

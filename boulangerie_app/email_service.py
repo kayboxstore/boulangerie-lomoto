@@ -11,13 +11,15 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .client_config import get_app_data_dir_name, get_app_name
+
 
 EMAIL_SETTINGS_FILENAME = "email-settings.json"
 
 
 def email_settings_path() -> Path:
     program_data = os.environ.get("PROGRAMDATA", r"C:\ProgramData").strip() or r"C:\ProgramData"
-    return Path(program_data) / "BoulangerieLomoto" / EMAIL_SETTINGS_FILENAME
+    return Path(program_data) / get_app_data_dir_name() / EMAIL_SETTINGS_FILENAME
 
 
 @dataclass
@@ -34,7 +36,7 @@ class EmailSettings:
     smtp_use_tls: bool = True
     smtp_use_ssl: bool = False
     from_address: str = ""
-    from_name: str = "Boulangerie Lomoto"
+    from_name: str = get_app_name()
     reply_to: str = ""
 
     @property
@@ -126,7 +128,7 @@ def load_email_settings() -> EmailSettings:
         ),
         from_name=os.environ.get(
             "BOULANGERIE_EMAIL_FROM_NAME",
-            str(payload.get("from_name", "Boulangerie Lomoto")),
+            str(payload.get("from_name", get_app_name())),
         ),
         reply_to=os.environ.get("BOULANGERIE_EMAIL_REPLY_TO", str(payload.get("reply_to", ""))),
     )
@@ -157,7 +159,7 @@ def save_email_settings(values: dict[str, Any]) -> dict[str, Any]:
         smtp_use_tls=_bool_value(merged.get("smtp_use_tls"), True),
         smtp_use_ssl=_bool_value(merged.get("smtp_use_ssl"), False),
         from_address=str(merged.get("from_address", "")),
-        from_name=str(merged.get("from_name", "Boulangerie Lomoto")),
+        from_name=str(merged.get("from_name", get_app_name())),
         reply_to=str(merged.get("reply_to", "")),
     )
     path = email_settings_path()
@@ -190,7 +192,7 @@ def _cloudflare_send(
         "to": recipient.strip(),
         "from": {
             "address": settings.from_address.strip(),
-            "name": settings.from_name.strip() or "Boulangerie Lomoto",
+            "name": settings.from_name.strip() or get_app_name(),
         },
         "subject": subject.strip(),
         "text": text_body,
@@ -205,7 +207,7 @@ def _cloudflare_send(
             "Authorization": f"Bearer {settings.api_token.strip()}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "BoulangerieLomoto-EmailService/1.0",
+            "User-Agent": f"{get_app_name()}-EmailService/1.0",
         },
         method="POST",
     )

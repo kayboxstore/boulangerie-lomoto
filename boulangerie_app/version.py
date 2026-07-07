@@ -1,9 +1,10 @@
 import os
 
+from .client_config import get_app_name, get_publisher
 
-APP_NAME = os.environ.get("BOULANGERIE_APP_NAME", "Boulangerie Lomoto")
-APP_VERSION = os.environ.get("BOULANGERIE_APP_VERSION", "1.4.6")
-APP_PUBLISHER = "Kay Box Store"
+APP_NAME = get_app_name()
+APP_VERSION = os.environ.get("BOULANGERIE_APP_VERSION", "1.5.3")
+APP_PUBLISHER = get_publisher()
 APP_EDITION = os.environ.get("BOULANGERIE_APP_EDITION", "standard")
 APP_DEMO = APP_EDITION.strip().lower() == "demo"
 

@@ -14,25 +14,32 @@ from typing import Sequence
 
 from .connected_mode import REMOTE_DEFAULT_PORT, REMOTE_DISCOVERY_PORT
 from .connected_server import list_local_server_urls
+from .client_config import (
+    get_app_data_dir_name,
+    get_windows_firewall_rule_name,
+    get_windows_service_exe_name,
+    get_windows_service_name,
+)
 from .version import APP_NAME
 
-WINDOWS_SERVICE_NAME = "BoulangerieLomotoCentralServer"
+WINDOWS_SERVICE_NAME = get_windows_service_name()
 WINDOWS_SERVICE_DISPLAY_NAME = f"{APP_NAME} - Serveur central"
 WINDOWS_SERVICE_DESCRIPTION = (
-    "Service Windows du serveur central Boulangerie Lomoto pour le mode connecté."
+    f"Service Windows du serveur central {APP_NAME} pour le mode connecté."
 )
-WINDOWS_SERVICE_EXECUTABLE_NAME = "Boulangerie Lomoto Service.exe"
+WINDOWS_SERVICE_EXECUTABLE_NAME = get_windows_service_exe_name()
 SERVER_INSTALLATION_MARKER_NAME = "server-installation.flag"
 SERVER_HOST_SETTINGS_FILENAME = "server-host-settings.json"
 SERVER_DATA_FOLDER_NAME = "central-server-data"
 FIREWALL_RULE_TCP_NAME = f"{APP_NAME} - Serveur central TCP"
 FIREWALL_RULE_UDP_NAME = f"{APP_NAME} - Découverte serveur UDP"
+FIREWALL_RULE_WEB_NAME = get_windows_firewall_rule_name()
 SERVER_API_TOKEN_BYTES = 32
 
 
 def get_server_root_dir() -> Path:
     program_data = os.environ.get("PROGRAMDATA", r"C:\ProgramData").strip() or r"C:\ProgramData"
-    return Path(program_data) / "BoulangerieLomoto"
+    return Path(program_data) / get_app_data_dir_name()
 
 
 def get_server_settings_path() -> Path:
@@ -181,7 +188,7 @@ def prepare_central_server_data(source_data_dir: str | Path | None = None) -> bo
 
     local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
     if local_app_data:
-        candidates.append(Path(local_app_data) / "BoulangerieLomoto")
+        candidates.append(Path(local_app_data) / get_app_data_dir_name())
 
     seen: set[str] = set()
     for candidate_dir in candidates:

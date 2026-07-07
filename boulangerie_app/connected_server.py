@@ -69,7 +69,7 @@ class EmbeddedServerHandle:
 _embedded_server_handle: EmbeddedServerHandle | None = None
 _web_sessions: dict[str, dict[str, Any]] = {}
 _web_sessions_lock = threading.Lock()
-_WEB_SESSION_TTL_SECONDS = 12 * 60 * 60
+_WEB_SESSION_TTL_SECONDS = 15 * 60
 _MAX_JSON_BODY_BYTES = 256 * 1024
 _AUTO_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
 _AUTO_BACKUP_RETRY_INTERVAL_SECONDS = 5 * 60
@@ -192,6 +192,7 @@ _ADMIN_METHODS = {
     "count_users",
     "log_activity",
     "list_activity_logs",
+    "clear_activity_logs",
     "get_recent_activity_summary",
     "close_day",
     "reopen_day",

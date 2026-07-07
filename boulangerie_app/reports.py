@@ -29,7 +29,7 @@ from .report_branding import (
     register_pdf_fonts,
 )
 from .status_labels import is_depositary_status, normalize_status_label
-from .version import APP_NAME
+from .version import APP_NAME, APP_PUBLISHER
 
 REPORT_SECTIONS_BY_ROLE: dict[str, tuple[str, ...]] = {
     "Admin": ("stock", "production", "orders", "cash", "commissions", "workers"),
@@ -71,6 +71,16 @@ def _format_number(value: float) -> str:
     if abs(value - int(value)) < 1e-9:
         return str(int(value))
     return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _order_accounted_received(row: dict[str, Any]) -> float:
+    if "MontantRecuCommande" in row:
+        return max(float(row.get("MontantRecuCommande", 0) or 0), 0.0)
+    return max(float(row.get("MontantRecu", 0) or 0) - float(row.get("AvanceGeneree", 0) or 0), 0.0)
+
+
+def _order_gross_received(row: dict[str, Any]) -> float:
+    return max(float(row.get("MontantRecu", 0) or 0), 0.0)
 
 
 def _format_date(target_date: date) -> str:
@@ -265,7 +275,7 @@ def _cash_highlight_table_styles(rows: list[list[Any]]) -> list[tuple[Any, ...]]
             continue
         label = str(row[0]).strip()
         if label in {
-            "Montant reçu",
+            "Reçu commandes",
             "Dettes payées aujourd'hui",
             "Dettes payées du mois",
             "Dettes payées sur la période",
@@ -507,9 +517,9 @@ def _bold_markup(value: Any) -> str:
 
 def _order_table_rows(rows: list[dict[str, Any]], include_date: bool) -> list[list[Any]]:
     if include_date:
-        table_rows: list[list[Any]] = [["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu", "Avance (+/-)", "Dette"]]
+        table_rows: list[list[Any]] = [["Date", "Client", "Statut", "Bacs", "À percevoir", "Payé client", "Reçu commande", "Avance (+/-)", "Dette"]]
     else:
-        table_rows = [["Client", "Statut", "Bacs", "À percevoir", "Reçu", "Avance (+/-)", "Dette"]]
+        table_rows = [["Client", "Statut", "Bacs", "À percevoir", "Payé client", "Reçu commande", "Avance (+/-)", "Dette"]]
 
     for row in rows:
         row_values: list[Any] = []
@@ -522,7 +532,8 @@ def _order_table_rows(rows: list[dict[str, Any]], include_date: bool) -> list[li
                 normalize_status_label(row.get("Statut")),
                 str(int(row.get("NombreBacs", 0) or 0)),
                 _format_fc(float(row.get("MontantAPercevoir", 0) or 0)),
-                _format_fc(float(row.get("MontantRecu", 0) or 0)),
+                _format_fc(_order_gross_received(row)),
+                _format_fc(_order_accounted_received(row)),
                 (
                     f"+{_format_fc(float(row.get('AvanceGeneree', 0) or 0))} / "
                     f"-{_format_fc(float(row.get('AvanceUtilisee', 0) or 0))}"
@@ -547,9 +558,9 @@ def _order_table_flowables(
     depositary_orders = [row for row in orders if is_depositary_status(row.get("Statut"))]
     customer_orders = [row for row in orders if not is_depositary_status(row.get("Statut"))]
     column_widths = (
-        [18 * mm, 30 * mm, 22 * mm, 10 * mm, 24 * mm, 24 * mm, 26 * mm, 20 * mm]
+        [16 * mm, 28 * mm, 20 * mm, 9 * mm, 22 * mm, 21 * mm, 22 * mm, 24 * mm, 18 * mm]
         if include_date
-        else [34 * mm, 28 * mm, 12 * mm, 26 * mm, 24 * mm, 28 * mm, 22 * mm]
+        else [30 * mm, 25 * mm, 10 * mm, 23 * mm, 22 * mm, 23 * mm, 25 * mm, 18 * mm]
     )
     blocks: list[Any] = []
     grouped_orders = [
@@ -583,10 +594,10 @@ def _order_status_summary_rows(orders: list[dict[str, Any]]) -> list[list[Any]]:
         summary["Commandes"] += 1
         summary["Bacs"] += float(row.get("NombreBacs", 0) or 0)
         summary["Attendu"] += float(row.get("MontantAPercevoir", 0) or 0)
-        summary["Recu"] += float(row.get("MontantRecu", 0) or 0)
+        summary["Recu"] += _order_accounted_received(row)
         summary["Dette"] += float(row.get("Dette", 0) or 0)
 
-    table_rows: list[list[Any]] = [["Statut", "Commandes", "Bacs", "À percevoir", "Reçu", "Dette"]]
+    table_rows: list[list[Any]] = [["Statut", "Commandes", "Bacs", "À percevoir", "Reçu commande", "Dette"]]
     for status, summary in sorted(grouped.items(), key=lambda item: item[0].lower()):
         table_rows.append(
             [
@@ -740,6 +751,7 @@ def create_daily_pdf_report(
 
     total_expected = float(orders_summary.get("MontantAttendu", 0) or 0)
     total_received = float(orders_summary.get("MontantRecu", 0) or 0)
+    total_received_gross = float(orders_summary.get("MontantRecuBrut", total_received) or 0)
     advances_used = float(orders_summary.get("AvancesUtilisees", 0) or 0)
     advances_generated = float(orders_summary.get("AvancesGenerees", 0) or 0)
     total_debts = float(orders_summary.get("TotalDettes", 0) or 0)
@@ -768,7 +780,7 @@ def create_daily_pdf_report(
         topMargin=14 * mm,
         bottomMargin=18 * mm,
         title=f"{APP_NAME} - {scope_label} du {_format_date(target_date)}",
-        author="Kay Box Store",
+        author=APP_PUBLISHER,
     )
 
     elements: list[Any] = [
@@ -800,7 +812,8 @@ def create_daily_pdf_report(
                 ["Commandes du jour", str(len(orders))],
                 ["Total bacs", str(total_trays)],
                 ["Montant attendu", _format_fc(total_expected)],
-                ["Montant reçu", _format_fc(total_received)],
+                ["Payé par clients", _format_fc(total_received_gross)],
+                ["Reçu commandes", _format_fc(total_received)],
                 ["Avances utilisées", _format_fc(advances_used)],
                 ["Nouvelles avances", _format_fc(advances_generated)],
                 ["Dettes du jour", _format_fc(total_debts)],
@@ -925,7 +938,7 @@ def create_daily_pdf_report(
         cash_rows = [
             ["Champ", "Valeur"],
             ["Montant attendu", _format_fc(total_expected)],
-            ["Montant reçu", _format_fc(total_received)],
+            ["Reçu commandes", _format_fc(total_received)],
             ["Dettes du jour", _format_fc(total_debts)],
             ["Dettes accumulées", _format_fc(accumulated_debts_before)],
             ["Dettes payées aujourd'hui", _format_fc(paid_debts_today)],
@@ -1090,7 +1103,8 @@ def create_monthly_pdf_report(
 
     total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in orders)
     total_expected = sum(float(row.get("MontantAPercevoir", 0) or 0) for row in orders)
-    total_received = sum(float(row.get("MontantRecu", 0) or 0) for row in orders)
+    total_received = sum(_order_accounted_received(row) for row in orders)
+    total_received_gross = sum(_order_gross_received(row) for row in orders)
     advances_used = sum(float(row.get("AvanceUtilisee", 0) or 0) for row in orders)
     advances_generated = sum(float(row.get("AvanceGeneree", 0) or 0) for row in orders)
     total_debts = sum(float(row.get("Dette", 0) or 0) for row in orders)
@@ -1132,7 +1146,7 @@ def create_monthly_pdf_report(
         topMargin=14 * mm,
         bottomMargin=18 * mm,
         title=f"{APP_NAME} - {scope_label} du mois {month_label}",
-        author="Kay Box Store",
+        author=APP_PUBLISHER,
     )
 
     elements: list[Any] = [
@@ -1176,7 +1190,8 @@ def create_monthly_pdf_report(
                 ["Commandes du mois", str(len(orders))],
                 ["Total bacs", str(total_trays)],
                 ["Montant attendu", _format_fc(total_expected)],
-                ["Montant reçu", _format_fc(total_received)],
+                ["Payé par clients", _format_fc(total_received_gross)],
+                ["Reçu commandes", _format_fc(total_received)],
                 ["Avances utilisées", _format_fc(advances_used)],
                 ["Nouvelles avances", _format_fc(advances_generated)],
                 ["Dettes", _format_fc(total_debts)],
@@ -1308,7 +1323,7 @@ def create_monthly_pdf_report(
         cash_rows = [
             ["Champ", "Valeur"],
             ["Montant attendu", _format_fc(total_expected)],
-            ["Montant reçu", _format_fc(total_received)],
+            ["Reçu commandes", _format_fc(total_received)],
             ["Dettes", _format_fc(total_debts)],
             ["Dettes payées du mois", _format_fc(paid_debts_month)],
             ["Total des entrées", _format_fc(total_entries)],
@@ -1334,7 +1349,7 @@ def create_monthly_pdf_report(
         )
         if cash_days:
             elements.append(Spacer(1, 4 * mm))
-            daily_cash_rows: list[list[Any]] = [["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde"]]
+            daily_cash_rows: list[list[Any]] = [["Date", "Reçu commandes", "Dettes payées", "Entrées", "Dépenses", "Solde"]]
             for row in cash_days:
                 row_date = _parse_row_date(row.get("DateCaisse"))
                 daily_cash_rows.append(
@@ -1483,7 +1498,8 @@ def create_period_pdf_report(
 
     total_trays = sum(int(row.get("NombreBacs", 0) or 0) for row in orders)
     total_expected = sum(float(row.get("MontantAPercevoir", 0) or 0) for row in orders)
-    total_received = sum(float(row.get("MontantRecu", 0) or 0) for row in orders)
+    total_received = sum(_order_accounted_received(row) for row in orders)
+    total_received_gross = sum(_order_gross_received(row) for row in orders)
     advances_used = sum(float(row.get("AvanceUtilisee", 0) or 0) for row in orders)
     advances_generated = sum(float(row.get("AvanceGeneree", 0) or 0) for row in orders)
     total_debts = sum(float(row.get("Dette", 0) or 0) for row in orders)
@@ -1525,7 +1541,7 @@ def create_period_pdf_report(
         topMargin=14 * mm,
         bottomMargin=18 * mm,
         title=f"{APP_NAME} - {scope_label} sur la période {period_label}",
-        author="Kay Box Store",
+        author=APP_PUBLISHER,
     )
 
     elements: list[Any] = [
@@ -1569,7 +1585,8 @@ def create_period_pdf_report(
                 ["Commandes sur la période", str(len(orders))],
                 ["Total bacs", str(total_trays)],
                 ["Montant attendu", _format_fc(total_expected)],
-                ["Montant reçu", _format_fc(total_received)],
+                ["Payé par clients", _format_fc(total_received_gross)],
+                ["Reçu commandes", _format_fc(total_received)],
                 ["Avances utilisées", _format_fc(advances_used)],
                 ["Nouvelles avances", _format_fc(advances_generated)],
                 ["Dettes", _format_fc(total_debts)],
@@ -1698,7 +1715,7 @@ def create_period_pdf_report(
         cash_rows = [
             ["Champ", "Valeur"],
             ["Montant attendu", _format_fc(total_expected)],
-            ["Montant reçu", _format_fc(total_received)],
+            ["Reçu commandes", _format_fc(total_received)],
             ["Dettes", _format_fc(total_debts)],
             ["Dettes payées sur la période", _format_fc(paid_debts_period)],
             ["Total des entrées", _format_fc(total_entries)],
@@ -1724,7 +1741,7 @@ def create_period_pdf_report(
         )
         if cash_days:
             elements.append(Spacer(1, 4 * mm))
-            daily_cash_rows: list[list[Any]] = [["Date", "Reçu", "Dettes payées", "Entrées", "Dépenses", "Solde"]]
+            daily_cash_rows: list[list[Any]] = [["Date", "Reçu commandes", "Dettes payées", "Entrées", "Dépenses", "Solde"]]
             for row in cash_days:
                 row_date = _parse_row_date(row.get("DateCaisse"))
                 daily_cash_rows.append(

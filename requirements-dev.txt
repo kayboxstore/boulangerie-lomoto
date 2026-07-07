@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Outils de développement et de test
+pytest==9.1.1

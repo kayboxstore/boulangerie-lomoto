@@ -21,6 +21,8 @@ from boulangerie_app.version import APP_VERSION
 
 LOGO = ROOT / "boulangerie_app" / "assets" / "logo-boulangerie-lomoto.png"
 OUTPUT = ROOT / "docs" / "Besoins-techniques-et-mise-en-service-Boulangerie-Lomoto.docx"
+PRICE_OUTPUT = ROOT / "docs" / "Materiels-outils-prix-Boulangerie-Lomoto.docx"
+USD_TO_CDF = 2300
 
 RED = "B71924"
 BLUE = "163A63"
@@ -118,7 +120,7 @@ def add_footer(section) -> None:
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.space_before = Pt(5)
     run = paragraph.add_run(
-        f"© {date.today().year} Boulangerie Lomoto - Augustin Kayembe / Kay Box Store. "
+        f"© {date.today().year} Boulangerie Lomoto - General Investment Services (GIS). "
         "Tous droits réservés."
     )
     run.font.name = "Poppins"
@@ -206,6 +208,88 @@ def add_requirements_table(document: Document) -> None:
             set_cell_shading(cells[2], "FDE8EA")
         else:
             set_cell_shading(cells[2], LIGHT_BLUE)
+
+
+def format_usd_range(low: int, high: int) -> str:
+    if low == high:
+        return f"{low} USD"
+    return f"{low} - {high} USD"
+
+
+def format_cdf_range(low: int, high: int) -> str:
+    low_cdf = low * USD_TO_CDF
+    high_cdf = high * USD_TO_CDF
+    if low == high:
+        return f"{low_cdf:,} FC".replace(",", " ")
+    return f"{low_cdf:,} - {high_cdf:,} FC".replace(",", " ")
+
+
+def add_price_proposal_table(document: Document) -> None:
+    rows = [
+        ("PC serveur reconditionne Core i5/Ryzen 5, 8 Go RAM, SSD 256/512 Go", "Indispensable si aucun PC fiable", 350, 650, "Choisir une machine sobre, stable et facile a reparer."),
+        ("Upgrade RAM ou SSD du PC serveur existant", "Recommande si le PC est lent", 35, 120, "A faire seulement si le PC actuel est conserve."),
+        ("Onduleur PC 650 a 1000 VA", "Indispensable", 80, 160, "Protege le PC serveur et laisse le temps d'arreter proprement."),
+        ("Mini UPS routeur/ONT", "Indispensable", 25, 60, "Garde Internet actif pendant une coupure courte."),
+        ("Disque USB externe 1 To", "Indispensable", 55, 100, "Sauvegarde hebdomadaire hors PC serveur."),
+        ("Cable Ethernet, multiprise, rangement", "Indispensable", 15, 40, "Connexion serveur stable et installation propre."),
+        ("Routeur 4G/5G ou connexion de secours", "Recommande", 70, 180, "Reduit les coupures d'acces distant."),
+        ("Forfait Internet principal", "Mensuel", 25, 80, "A dimensionner selon l'operateur disponible."),
+        ("Domaine boulangerie-lomoto.com", "Annuel", 10, 25, "Deja choisi; renouvellement annuel a surveiller."),
+        ("Cloudflare Tunnel / DNS / HTTPS", "Service", 0, 0, "Plan gratuit suffisant pour l'architecture retenue."),
+        ("Envoi e-mails transactionnels", "Service", 0, 20, "Cloudflare Email Sending teste; prevoir une alternative SMTP si les quotas changent."),
+        ("Compte Google Play Console", "Une seule fois", 25, 25, "Necessaire pour publier l'APK sur Play Store."),
+        ("Telephone Android de test", "Recommande", 120, 300, "Un telephone recent suffit pour la recette mobile."),
+    ]
+    table = document.add_table(rows=1, cols=5)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.style = "Table Grid"
+    headers = ("Element / outil", "Priorite", "Prix USD", "Prix FC approx.", "Conseil")
+    for index, label in enumerate(headers):
+        cell = table.rows[0].cells[index]
+        cell.text = label
+        set_cell_shading(cell, BLUE)
+        for run in cell.paragraphs[0].runs:
+            run.bold = True
+            run.font.color.rgb = RGBColor.from_string(WHITE)
+    for item, priority, low, high, detail in rows:
+        cells = table.add_row().cells
+        values = (item, priority, format_usd_range(low, high), format_cdf_range(low, high), detail)
+        for index, value in enumerate(values):
+            cells[index].text = value
+            cells[index].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            set_cell_margins(cells[index])
+        if "Indispensable" in priority:
+            set_cell_shading(cells[1], "FDE8EA")
+        elif "Recommande" in priority:
+            set_cell_shading(cells[1], LIGHT_BLUE)
+        else:
+            set_cell_shading(cells[1], LIGHT_GRAY)
+
+
+def add_budget_summary_table(document: Document) -> None:
+    rows = [
+        ("Budget minimum avec PC serveur deja disponible", 210, 460, "Onduleur, mini UPS, disque externe, cables, Internet et domaine."),
+        ("Budget minimum si achat d'un PC serveur", 560, 1110, "PC serveur fiable + equipements indispensables."),
+        ("Budget confort avec secours Internet et telephone de test", 750, 1590, "Ajoute routeur/connexion de secours et appareil de recette."),
+        ("Couts annuels/mensuels a suivre", 35, 125, "Domaine annuel, Internet mensuel, eventuel SMTP/Email selon quotas."),
+    ]
+    table = document.add_table(rows=1, cols=4)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.style = "Table Grid"
+    headers = ("Scenario", "Budget USD", "Budget FC approx.", "Contenu")
+    for index, label in enumerate(headers):
+        cell = table.rows[0].cells[index]
+        cell.text = label
+        set_cell_shading(cell, NAVY)
+        for run in cell.paragraphs[0].runs:
+            run.bold = True
+            run.font.color.rgb = RGBColor.from_string(WHITE)
+    for scenario, low, high, detail in rows:
+        cells = table.add_row().cells
+        for index, value in enumerate((scenario, format_usd_range(low, high), format_cdf_range(low, high), detail)):
+            cells[index].text = value
+            cells[index].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            set_cell_margins(cells[index])
 
 
 def add_checklist_table(document: Document) -> None:
@@ -327,18 +411,29 @@ def build_document() -> None:
     heading(document, "1. Matériels nécessaires")
     add_requirements_table(document)
 
-    heading(document, "2. Logiciels, services et outils")
+    heading(document, "2. Propositions de prix")
+    note = document.add_paragraph()
+    note.paragraph_format.space_after = Pt(6)
+    note.add_run(
+        f"Base de conversion indicative utilisee dans ce document : 1 USD = {USD_TO_CDF:,} FC. "
+        "Les prix sont des fourchettes d'achat a confirmer chez les fournisseurs locaux avant depense."
+    )
+    add_price_proposal_table(document)
+    heading(document, "3. Budgets conseilles", level=2)
+    add_budget_summary_table(document)
+
+    heading(document, "4. Logiciels, services et outils")
     bullet(document, "Application Windows Boulangerie Lomoto installée sur le PC serveur.", "Application Windows : ")
     bullet(document, "service Web Pro démarré automatiquement sur le PC serveur.", "Application Web : ")
     bullet(document, "choix obligatoire entre PC serveur principal et poste client pendant l'installation.", "Mode d'installation : ")
     bullet(document, "Cloudflare Tunnel utilisé pour publier le Web en HTTPS sans redirection de port routeur.", "Accès Internet : ")
     bullet(document, "boulangerie-lomoto.com configuré dans Cloudflare; renouvellement annuel à suivre.", "Domaine : ")
-    bullet(document, "envoi des e-mails mis en pause; Cloudflare Email Sending sera finalisé après la mise en production.", "E-mails : ")
+    bullet(document, "Cloudflare Email Sending configuré; le test d'envoi a été reçu. Continuer la recette avec les vrais e-mails transactionnels.", "E-mails : ")
     bullet(document, "Chrome, Edge, Firefox ou Safari à jour sur les appareils clients.", "Navigateurs : ")
-    bullet(document, "Android Studio, SDK Android, Java et clé de signature conservée en lieu sûr.", "APK Android : ")
+    bullet(document, "Android Studio, SDK Android, Java et clé de signature conservée en lieu sûr; APK Android signé en version 1.4.6.", "APK Android : ")
     bullet(document, "antivirus Windows actif avec exclusions limitées aux services de l'application si nécessaire.", "Protection : ")
 
-    heading(document, "3. Architecture réseau retenue")
+    heading(document, "5. Architecture réseau retenue")
     bullet(document, "Le PC serveur conserve l'unique base de données de production.")
     bullet(document, "Sur le même réseau, le téléphone ouvre l'adresse locale du PC, par exemple http://192.168.1.225:8787.")
     bullet(document, "Depuis une autre connexion Internet, le Web utilise https://app.boulangerie-lomoto.com via Cloudflare Tunnel.")
@@ -346,7 +441,7 @@ def build_document() -> None:
     bullet(document, "Aucune ouverture directe du fichier SQLite, aucune exposition publique du port Web et aucune redirection de port routeur.")
     bullet(document, "Le mini UPS maintient le routeur et l'ONT; l'onduleur classique protège le PC serveur.")
 
-    heading(document, "4. Synchronisation Windows, Web et mobile")
+    heading(document, "6. Synchronisation Windows, Web et mobile")
     bullet(document, "Toutes les écritures passent par le serveur central et la même base.")
     bullet(document, "Une commande saisie sur Windows devient visible sur le Web après actualisation automatique ou manuelle.")
     bullet(document, "Une opération saisie sur le Web est immédiatement disponible pour l'application Windows.")
@@ -354,21 +449,21 @@ def build_document() -> None:
     bullet(document, "Le PC serveur doit rester allumé et connecté pour les accès distants dans l'architecture locale retenue.")
 
     document.add_page_break()
-    heading(document, "5. Comptes, sécurité et connexion rapide")
+    heading(document, "7. Comptes, sécurité et connexion rapide")
     add_security_status_table(document)
     bullet(document, "Le premier administrateur est créé uniquement sur le PC serveur principal et uniquement si la base centrale ne contient encore aucun utilisateur.")
     bullet(document, "Une réinstallation ou l'installation d'un poste client conserve les comptes existants et ne redemande jamais cette configuration.")
     bullet(document, "Chaque utilisateur reçoit son propre rôle et ne voit que les modules autorisés.")
     bullet(document, "L'adresse e-mail est obligatoire pour les nouveaux utilisateurs et peut servir à la connexion.")
-    bullet(document, "Après création d'un compte, ses informations de connexion pourront être envoyées par e-mail quand le service d'envoi sera réactivé.")
-    bullet(document, "Les travailleurs recevront par e-mail les changements de statut de leur paie quand l'envoi sera réactivé : préparée, validée ou payée.")
+    bullet(document, "Après création d'un compte, ses informations de connexion sont placées dans la file d'envoi e-mail.")
+    bullet(document, "Les travailleurs reçoivent par e-mail les changements de statut de leur paie : préparée, validée ou payée.")
     bullet(document, "Le navigateur peut mémoriser la connexion avec son gestionnaire de mots de passe.")
     bullet(document, "L'application ne conserve plus une case de mémorisation visible; les champs de connexion sont vidés après une connexion réussie.")
-    bullet(document, "Le domaine est actif; les paramètres Cloudflare Email Sending restent à finaliser avant l'activation réelle des envois.")
+    bullet(document, "Le domaine est actif et les paramètres Cloudflare Email Sending ont été testés avec succès.")
     bullet(document, "Le mot de passe communiqué par e-mail doit être changé par l'utilisateur dès sa première connexion.")
     bullet(document, "Activer l'authentification à deux facteurs sur Cloudflare, le compte du domaine et l'adresse e-mail utilisée.")
 
-    heading(document, "6. Sauvegardes et continuité")
+    heading(document, "8. Sauvegardes et continuité")
     bullet(document, "Sauvegarde automatique quotidienne de la base sur le PC serveur.")
     bullet(document, "Copie hebdomadaire automatisée sur un disque USB externe nommé LOMOTO_BACKUP, puis disque débranché après contrôle.")
     bullet(document, "Conservation de plusieurs sauvegardes, pas seulement la dernière.")
@@ -376,13 +471,13 @@ def build_document() -> None:
     bullet(document, "Sauvegarde créée automatiquement lors de la clôture journalière.")
     bullet(document, "Après hébergement, ajouter une copie chiffrée hors site.")
 
-    heading(document, "7. Téléphones, tablettes et Android")
+    heading(document, "9. Téléphones, tablettes et Android")
     bullet(document, "L'interface Web est responsive et utilisable sur téléphone, tablette et ordinateur.")
     bullet(document, "La PWA pourra être installée depuis le navigateur une fois le site servi en HTTPS.")
-    bullet(document, "L'APK Android sera construit et signé après fixation de l'URL HTTPS finale.")
+    bullet(document, "L'APK Android ouvre l'URL HTTPS finale, utilise le logo Boulangerie Lomoto et respecte l'affichage mobile.")
     bullet(document, "La clé de signature Android doit être sauvegardée; sans elle, les futures mises à jour de l'APK deviennent impossibles.")
 
-    heading(document, "8. Exploitation quotidienne")
+    heading(document, "10. Exploitation quotidienne")
     bullet(document, "Vérifier chaque matin que le PC serveur, le service Web et la connexion Internet sont actifs.")
     bullet(document, "Clôturer la journée; seul l'administrateur peut la rouvrir.")
     bullet(document, "Ne jamais enregistrer une opération pour une date future.")
@@ -390,10 +485,10 @@ def build_document() -> None:
     bullet(document, "Installer les mises à jour d'abord sur le serveur, puis vérifier le Web et les postes Windows.")
 
     document.add_section(WD_SECTION.NEW_PAGE)
-    heading(document, "9. Recette et contrôles avant exploitation finale")
+    heading(document, "11. Recette et contrôles avant exploitation finale")
     add_checklist_table(document)
 
-    heading(document, "10. Suite logique recommandée")
+    heading(document, "12. Suite logique recommandée")
     steps = [
         "Vérifier le serveur Web local, le service Windows et le tunnel Cloudflare après redémarrage du PC serveur.",
         "Exécuter une recette complète Windows/Web pendant 72 heures avec la vraie base.",
@@ -403,7 +498,7 @@ def build_document() -> None:
         "Activer la 2FA Cloudflare, la 2FA de l'adresse e-mail et conserver les codes de récupération hors PC serveur.",
         "Tester https://app.boulangerie-lomoto.com depuis un téléphone en données mobiles, Wi-Fi du serveur désactivé.",
         "Vérifier dans le routeur qu'aucune redirection de port vers le PC serveur n'existe.",
-        "Construire et signer l'APK Android avec l'URL finale.",
+        "Installer la dernière APK signée sur le téléphone et vérifier l'icône, la barre système, les thèmes et les formulaires.",
     ]
     for index, step in enumerate(steps, start=1):
         paragraph = document.add_paragraph()
@@ -431,7 +526,8 @@ def build_document() -> None:
     )
 
     document.save(OUTPUT)
-    print(OUTPUT)
+    document.save(PRICE_OUTPUT)
+    print(PRICE_OUTPUT)
 
 
 if __name__ == "__main__":

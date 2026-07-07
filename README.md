@@ -20,10 +20,32 @@ Application desktop Python qui reprend la version VB.NET avec :
 python main.py
 ```
 
-## Compte par défaut
+## Première utilisation
 
-- identifiant : `a.kayembe`
-- mot de passe : `010203`
+Au tout premier lancement, l'application ouvre un écran de **configuration
+initiale** qui vous demande de créer le compte administrateur (nom, identifiant,
+e-mail et mot de passe). Aucun mot de passe par défaut n'est distribué : le mot
+de passe est choisi par l'administrateur et doit respecter la politique de
+sécurité (longueur minimale, majuscule, minuscule, chiffre et symbole).
+
+> Si vous migrez depuis une ancienne base contenant un compte au mot de passe
+> hérité, l'application force son changement dès la première connexion.
+
+## Tests
+
+Une suite de tests couvre la logique sensible (mots de passe, montants de
+commande, commissions, paies, verrouillage des journées clôturées,
+authentification, licences et versionnage de schéma).
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Les tests s'exécutent sur une base SQLite jetable dans un dossier temporaire :
+ils ne touchent jamais la base réelle. La CI GitHub Actions
+([.github/workflows/ci.yml](/A:/Mon application python/.github/workflows/ci.yml))
+les lance automatiquement à chaque push et pull request sur `main`.
 
 ## Base de données
 

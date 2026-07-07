@@ -1,10 +1,11 @@
 const app = document.querySelector("#app");
 const OWNER = {
-  name: "Augustin Kayembe",
+  responsibleName: "Christian Lomoto",
+  initiatorName: "Augustin Kayembe",
   phone: "+243 991 599 600",
   emailPrimary: "kayboxstore@gmail.com",
   emailSecondary: "kayboxstore@outlook.fr",
-  company: "Kay Box Store",
+  company: "General Investment Services (GIS)",
 };
 
 const moduleLabels = {
@@ -18,6 +19,8 @@ const moduleLabels = {
   reports: "Rapports",
   users: "Utilisateurs",
   history: "Historique",
+  system: "État système",
+  activation: "Activation",
   about: "À propos",
 };
 
@@ -30,6 +33,9 @@ const orderRates = {
 const state = {
   setupRequired: null,
   user: null,
+  client: null,
+  license: null,
+  appVersion: "1.5.3",
   active: "dashboard",
   loading: false,
   error: "",
@@ -38,6 +44,7 @@ const state = {
     date: todayIso(),
     all: false,
     orderStatus: "all",
+    commissionStatus: "Tous",
     start: `${todayIso().slice(0, 8)}01`,
     end: todayIso(),
   },
@@ -47,6 +54,12 @@ const state = {
 };
 
 let heartbeatTimer = null;
+let idleTimer = null;
+let lastActivityAt = Date.now();
+let idleLogoutInProgress = false;
+const WEB_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const WEB_HEARTBEAT_INTERVAL_MS = 30 * 1000;
+const WEB_ACTIVITY_EVENTS = ["pointerdown", "keydown", "input", "scroll", "touchstart"];
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
@@ -54,6 +67,47 @@ function todayIso() {
 
 function currentYear() {
   return new Date().getFullYear();
+}
+
+function activeClient() {
+  return state.user?.client || state.client || {};
+}
+
+function appName() {
+  return activeClient().appName || state.user?.appName || "Boulangerie Lomoto";
+}
+
+function companyName() {
+  return activeClient().companyName || appName();
+}
+
+function publisherName() {
+  return activeClient().publisher || OWNER.company || "General Investment Services (GIS)";
+}
+
+function legalNotice() {
+  return activeClient().legalNotice || `Application de gestion commerciale développée pour ${companyName()}. Toute reproduction, distribution ou modification non autorisée est interdite.`;
+}
+
+function responsibleName() {
+  return activeClient().responsibleName || OWNER.responsibleName;
+}
+
+function initiatorName() {
+  return activeClient().initiatorName || OWNER.initiatorName;
+}
+
+function contactPhone() {
+  return activeClient().contactPhone || OWNER.phone;
+}
+
+function contactEmail() {
+  return activeClient().contactEmail || OWNER.emailPrimary;
+}
+
+function getOrderRate(status) {
+  const prices = activeClient().trayPrices || {};
+  return Number(prices[status] ?? prices.Depositaire ?? orderRates[status] ?? 0);
 }
 
 function escapeHtml(value) {
@@ -88,10 +142,34 @@ function isDirectorGeneral() {
   return state.user?.role === "Directeur Général";
 }
 
+function isSessionError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return error?.status === 403 && (
+    message.includes("session expir") ||
+    message.includes("jeton de sécurité") ||
+    message.includes("reconnect")
+  );
+}
+
 function setState(patch) {
   Object.assign(state, patch);
   syncHeartbeat();
-  render();
+  return render();
+}
+
+function resetViewportPosition() {
+  const scrollingElement = document.scrollingElement;
+  if (scrollingElement) {
+    scrollingElement.scrollTop = 0;
+    scrollingElement.scrollLeft = 0;
+  }
+  window.scrollTo(0, 0);
+}
+
+async function navigateToModule(moduleName) {
+  resetViewportPosition();
+  await setState({ active: moduleName, error: "", notice: "" });
+  resetViewportPosition();
 }
 
 async function api(path, options = {}) {
@@ -126,19 +204,30 @@ function delay(milliseconds) {
 
 function syncHeartbeat() {
   if (state.user && !heartbeatTimer) {
-    heartbeatTimer = window.setInterval(sendHeartbeat, 30000);
-  } else if (!state.user && heartbeatTimer) {
-    window.clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
+    heartbeatTimer = window.setInterval(sendHeartbeat, WEB_HEARTBEAT_INTERVAL_MS);
+    scheduleIdleLogout();
+  } else if (state.user) {
+    scheduleIdleLogout();
+  } else if (!state.user) {
+    if (heartbeatTimer) {
+      window.clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+    clearIdleLogout();
   }
 }
 
 async function sendHeartbeat() {
   if (!state.user) return;
+  if (Date.now() - lastActivityAt >= WEB_IDLE_TIMEOUT_MS) {
+    await expireDueToInactivity();
+    return;
+  }
   try {
     await api("/api/session/ping");
-  } catch {
+  } catch (error) {
     if (!state.user) return;
+    if (!isSessionError(error) && error?.status !== 401 && error?.status !== 403) return;
     state.user = null;
     state.active = "dashboard";
     state.loading = false;
@@ -149,8 +238,70 @@ async function sendHeartbeat() {
   }
 }
 
+function scheduleIdleLogout() {
+  clearIdleLogout();
+  if (!state.user) return;
+  const remaining = Math.max(WEB_IDLE_TIMEOUT_MS - (Date.now() - lastActivityAt), 0);
+  idleTimer = window.setTimeout(expireDueToInactivity, remaining);
+}
+
+function clearIdleLogout() {
+  if (idleTimer) {
+    window.clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+}
+
+function recordUserActivity() {
+  if (!state.user || idleLogoutInProgress) return;
+  if (Date.now() - lastActivityAt >= WEB_IDLE_TIMEOUT_MS) {
+    expireDueToInactivity();
+    return;
+  }
+  lastActivityAt = Date.now();
+  scheduleIdleLogout();
+}
+
+function installIdleActivityTracking() {
+  WEB_ACTIVITY_EVENTS.forEach((eventName) => {
+    document.addEventListener(eventName, recordUserActivity, { passive: true, capture: true });
+  });
+}
+
+async function expireDueToInactivity() {
+  if (!state.user || idleLogoutInProgress) return;
+  idleLogoutInProgress = true;
+  try {
+    await post("/api/logout", {});
+  } catch {
+    // La fermeture locale reste prioritaire si la session serveur est déjà expirée.
+  }
+  state.user = null;
+  state.active = "dashboard";
+  state.loading = false;
+  state.notice = "";
+  state.error = "Votre session a été fermée après 15 minutes d'inactivité.";
+  idleLogoutInProgress = false;
+  syncHeartbeat();
+  render();
+}
+
 async function boot() {
   localStorage.removeItem("lomoto.webpro.token");
+  try {
+    const config = await api("/api/config");
+    state.client = config.client || null;
+    state.appVersion = config.appVersion || state.appVersion;
+  } catch {
+    state.client = null;
+  }
+  await refreshLicenseStatus({ silent: true });
+  if (state.license?.required && !state.license?.ok) {
+    state.setupRequired = false;
+    state.user = null;
+    render();
+    return;
+  }
   try {
     const setup = await api("/api/setup/status");
     state.setupRequired = Boolean(setup.required);
@@ -165,6 +316,9 @@ async function boot() {
   try {
     const payload = await api("/api/me");
     state.user = payload.user;
+    state.client = payload.user?.client || state.client;
+    state.appVersion = payload.user?.appVersion || state.appVersion;
+    lastActivityAt = Date.now();
   } catch {
     state.user = null;
   }
@@ -172,12 +326,23 @@ async function boot() {
   render();
 }
 
+async function refreshLicenseStatus({ silent = false } = {}) {
+  try {
+    const payload = await api("/api/license/status");
+    state.license = payload.status || null;
+    return state.license;
+  } catch (error) {
+    if (!silent) setState({ error: error.message, notice: "" });
+    return state.license;
+  }
+}
+
 function setupView() {
   return `
     <main class="login-page">
       <section class="login-card">
         <div class="brand-mark">
-          <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Logo" />
+          <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="Logo" />
           <span>Première configuration</span>
         </div>
         <p class="eyebrow">Configuration initiale</p>
@@ -202,19 +367,23 @@ function loginView() {
     <main class="login-page">
       <section class="login-card">
         <div class="brand-mark">
-          <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Logo" />
-          <span>Version web professionnelle 1.4.6</span>
+          <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="Logo" />
+          <span>Version web professionnelle ${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.3")}</span>
         </div>
         <p class="eyebrow">Application connectée</p>
-        <h1>BOULANGERIE LOMOTO</h1>
+        <h1>${escapeHtml(appName()).toUpperCase()}</h1>
         ${state.error ? `<div class="alert danger">${escapeHtml(state.error)}</div>` : ""}
         ${state.notice ? `<div class="alert success">${escapeHtml(state.notice)}</div>` : ""}
-        <form id="loginForm" class="form-grid" autocomplete="off">
-          <input class="autofill-decoy" name="username" autocomplete="username" tabindex="-1" aria-hidden="true" />
-          <input class="autofill-decoy" name="password" type="password" autocomplete="current-password" tabindex="-1" aria-hidden="true" />
-          <label>Identifiant ou e-mail <input id="loginIdentifiant" name="lomotoLoginIdentifiant" autocomplete="off" autocapitalize="none" spellcheck="false" required /></label>
-          <label>Mot de passe <input id="passwordInput" name="lomotoLoginPassword" type="password" autocomplete="new-password" required /></label>
-          <label class="toggle-line"><input id="showPassword" type="checkbox" /><span>Afficher le mot de passe</span></label>
+        <form id="loginForm" class="form-grid" autocomplete="on" data-lomoto-login="manual">
+          <div class="field-block">
+            <label for="loginIdentifiant">Identifiant ou e-mail</label>
+            <input id="loginIdentifiant" name="username" type="text" inputmode="text" tabindex="0" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" value="" readonly required />
+          </div>
+          <div class="field-block">
+            <label for="passwordInput">Mot de passe</label>
+            <input id="passwordInput" name="password" type="password" tabindex="0" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" value="" readonly required />
+          </div>
+          <label class="toggle-line" for="showPassword"><input id="showPassword" type="checkbox" autocomplete="off" /><span>Afficher le mot de passe</span></label>
           ${state.loading ? `<div class="login-progress" aria-label="Connexion en cours"><span></span></div>` : ""}
           <button class="primary" type="submit" ${state.loading ? "disabled" : ""}>${state.loading ? "Connexion..." : "Se connecter"}</button>
         </form>
@@ -230,11 +399,11 @@ function shell(content) {
       <aside class="sidebar">
         <div class="sidebar-header">
           <div class="side-brand">
-            <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Logo" />
+            <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="Logo" />
             <div>
-              <strong>BOULANGERIE LOMOTO</strong>
+              <strong>${escapeHtml(appName()).toUpperCase()}</strong>
               <span>Pain Lia o Tonda</span>
-              <small>Données Windows v${escapeHtml(state.user?.appVersion || "1.4.6")}</small>
+              <small>Données Windows v${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.3")}</small>
             </div>
           </div>
           <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-expanded="false" aria-controls="sidebarMenu" title="Ouvrir le menu">☰</button>
@@ -260,7 +429,7 @@ function shell(content) {
             </div>
             <div class="version-card">
               <span>Version</span>
-              <strong>${escapeHtml(state.user?.appVersion || "1.4.6")}</strong>
+              <strong>${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.3")}</strong>
             </div>
           </div>
         </header>
@@ -277,8 +446,8 @@ function shell(content) {
 function legalFooter() {
   return `
     <footer class="legal-footer">
-      <strong>© ${currentYear()} ${escapeHtml(state.user?.appName || "Boulangerie Lomoto")} - ${OWNER.name} / ${OWNER.company}. Tous droits réservés.</strong>
-      <span>Application de gestion commerciale développée pour Boulangerie Lomoto. Toute reproduction, distribution ou modification non autorisée est interdite.</span>
+      <strong>© ${currentYear()} ${escapeHtml(appName())} - ${escapeHtml(publisherName())}. Tous droits réservés.</strong>
+      <span>${escapeHtml(legalNotice())}</span>
     </footer>
   `;
 }
@@ -302,14 +471,125 @@ function toolbar(moduleName, extra = "") {
   `;
 }
 
+function metricDecor(label) {
+  const l = (label || "").toLowerCase();
+  if (l.includes("caisse") || l.includes("solde")) return { icon: "💰", color: "#f59e0b" };
+  if (l.includes("dette")) return { icon: "⚠️", color: "#ef4444" };
+  if (l.includes("commission")) return { icon: "🤝", color: "#14b8a6" };
+  if (l.includes("paie") || l.includes("salaire")) return { icon: "💼", color: "#8b5cf6" };
+  if (l.includes("farine") || l.includes("stock") || l.includes("levure") || l.includes("appro") || l.includes("sortie")) return { icon: "🌾", color: "#3b82f6" };
+  if (l.includes("avance")) return { icon: "💵", color: "#0ea5e9" };
+  if (l.includes("commande") || l.includes("reçu") || l.includes("recu")) return { icon: "🧾", color: "#10b981" };
+  if (l.includes("bac") || l.includes("production")) return { icon: "🍞", color: "#d97706" };
+  if (l.includes("travailleur") || l.includes("utilisateur") || l.includes("personne") || l.includes("compte")) return { icon: "👥", color: "#6366f1" };
+  return { icon: "📊", color: "#64748b" };
+}
+
 function cards(items) {
-  return `<section class="card-grid">${items.map((item) => `
-    <article class="metric">
-      <span>${escapeHtml(item.label)}</span>
-      <strong>${item.money ? money(item.value) : escapeHtml(number(item.value))}</strong>
-      <small>${escapeHtml(item.unit || "")}</small>
+  return `<section class="card-grid">${items.map((item) => {
+    const deco = metricDecor(item.label);
+    return `
+    <article class="metric" style="--metric-color:${deco.color}">
+      <div class="metric-text">
+        <span>${escapeHtml(item.label)}</span>
+        <strong>${item.money ? money(item.value) : escapeHtml(number(item.value))}</strong>
+        <small>${escapeHtml(item.unit || "")}</small>
+      </div>
+      <div class="metric-badge" aria-hidden="true">${deco.icon}</div>
+    </article>`;
+  }).join("")}</section>`;
+}
+
+function dashboardHeroStats(items = []) {
+  const highlights = items.slice(0, 3);
+  if (!highlights.length) return "";
+  return `
+    <div class="home-hero-stats">
+      ${highlights.map((item) => `
+        <article class="hero-stat">
+          <span>${escapeHtml(item.label)}</span>
+          <strong>${item.money ? money(item.value) : escapeHtml(number(item.value))}</strong>
+          <small>${escapeHtml(item.unit || "")}</small>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+const chartPalette = ["#b71924", "#102a43", "#6f7b8a", "#9a5b00"];
+
+function formatChartValue(item) {
+  if (item.money) return money(item.value);
+  const unit = item.unit ? ` ${item.unit}` : "";
+  return `${number(item.value)}${unit}`;
+}
+
+function dashboardCharts(charts) {
+  if (!charts?.length) return "";
+  return `
+    <section class="dashboard-analytics">
+      ${charts.map((chart, chartIndex) => chart.type === "donut" ? donutChart(chart, chartIndex) : barChart(chart, chartIndex)).join("")}
+    </section>
+  `;
+}
+
+function barChart(chart, chartIndex) {
+  const items = chart.items || [];
+  const maxValue = Math.max(...items.map((item) => Math.abs(Number(item.value || 0))), 1);
+  return `
+    <article class="analytics-card analytics-card-${chartIndex % 4}">
+      <div class="analytics-heading">
+        <p class="eyebrow">Analyse</p>
+        <h3>${escapeHtml(chart.title || "Graphique")}</h3>
+      </div>
+      <div class="bar-chart">
+        ${items.map((item, index) => {
+          const value = Math.abs(Number(item.value || 0));
+          const pct = Math.max(0, Math.min(100, (value / maxValue) * 100));
+          return `
+            <div class="bar-row">
+              <div class="bar-meta">
+                <span>${escapeHtml(item.label || "")}</span>
+                <strong>${escapeHtml(formatChartValue(item))}</strong>
+              </div>
+              <div class="bar-track"><i style="--bar-pct:${pct.toFixed(2)}%; --bar-color:${chartPalette[index % chartPalette.length]}"></i></div>
+            </div>
+          `;
+        }).join("")}
+      </div>
     </article>
-  `).join("")}</section>`;
+  `;
+}
+
+function donutChart(chart, chartIndex) {
+  const items = chart.items || [];
+  const total = items.reduce((sum, item) => sum + Math.max(Number(item.value || 0), 0), 0);
+  let cursor = 0;
+  const segments = total > 0
+    ? items.map((item, index) => {
+        const value = Math.max(Number(item.value || 0), 0);
+        const start = cursor;
+        const end = cursor + (value / total) * 100;
+        cursor = end;
+        return `${chartPalette[index % chartPalette.length]} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+      }).join(", ")
+    : "#d9dee7 0% 100%";
+  return `
+    <article class="analytics-card analytics-card-${chartIndex % 4}">
+      <div class="analytics-heading">
+        <p class="eyebrow">Répartition</p>
+        <h3>${escapeHtml(chart.title || "Graphique")}</h3>
+      </div>
+      <div class="donut-layout">
+        <div class="donut-chart" style="--donut:${segments}"><span>${escapeHtml(number(total))}</span></div>
+        <div class="donut-legend">
+          ${items.map((item, index) => `
+            <div><i style="background:${chartPalette[index % chartPalette.length]}"></i><span>${escapeHtml(item.label || "")}</span><strong>${escapeHtml(formatChartValue(item))}</strong></div>
+          `).join("")}
+        </div>
+      </div>
+    </article>
+  `;
 }
 
 function table(rows, columns, headings, actions = []) {
@@ -396,17 +676,40 @@ function reportFilesList(files) {
 async function dashboardView() {
   const payload = await api("/api/dashboard");
   const data = payload.data;
+  const allCards = data.cards || [];
+  // Sur les tableaux de bord chargés (vue admin ≈ 18 cartes), on ne garde que
+  // les indicateurs essentiels. La sélection fonctionne soit via le drapeau
+  // « primary » envoyé par le serveur, soit — pour rester autonome même quand
+  // seul le fichier statique est déployé — via la liste de libellés ci-dessous.
+  // Les dashboards par rôle (peu de cartes) restent affichés en entier.
+  const PRIMARY_CARD_LABELS = new Set([
+    "Solde caisse du mois",
+    "Reçu commandes ce mois",
+    "Dettes non payées",
+    "Farine restante",
+    "Paies non payées",
+    "Commissions non payées",
+  ]);
+  const primaryCards = allCards.filter((card) => card.primary || PRIMARY_CARD_LABELS.has(card.label));
+  const featuredCards = allCards.length > 8 && primaryCards.length >= 3 ? primaryCards : allCards;
   return shell(`
-    <section class="hero">
-      <div>
-        <p class="eyebrow">Tableau de bord</p>
-        <h2>${escapeHtml(state.user?.role || "")}</h2>
-        <small>Indicateurs de ${escapeHtml(data.periodLabel || "")}</small>
+    <section class="home-hero">
+      <div class="home-hero-main">
+        <p class="eyebrow">Accueil</p>
+        <h2>${escapeHtml(appName())}</h2>
+        <div class="home-meta">
+          <span>${escapeHtml(state.user?.fullName || "")}</span>
+          <span>${escapeHtml(state.user?.role || "")}</span>
+          <span>${escapeHtml(data.periodLabel || "")}</span>
+        </div>
       </div>
-      <button title="Actualiser" data-refresh>↻ Actualiser</button>
-      <img src="/brand-assets/icon-baguette.png" alt="Baguette" />
+      <div class="home-hero-panel">
+        ${dashboardHeroStats(featuredCards)}
+        <button class="home-hero-refresh" title="Actualiser" data-refresh>↻ Actualiser</button>
+      </div>
     </section>
-    ${cards(data.cards || [])}
+    ${dashboardCharts(data.charts || [])}
+    ${cards(featuredCards)}
     ${(data.alerts || []).length || (data.recentActivity || []).length ? `
       <section class="split">
         ${(data.alerts || []).length ? `<article class="panel">
@@ -439,13 +742,14 @@ async function ordersView() {
     ${cards([
       { label: "Bacs", value: summary.NombreTotalBacs || 0, unit: "bacs" },
       { label: "À percevoir", value: summary.MontantAttendu || 0, unit: "FC", money: true },
-      { label: "Reçu", value: summary.MontantRecu || 0, unit: "FC", money: true },
+      { label: "Payé par clients", value: summary.MontantRecuBrut || summary.MontantRecu || 0, unit: "FC", money: true },
+      { label: "Reçu commande", value: summary.MontantRecu || 0, unit: "FC", money: true },
       { label: "Dettes", value: summary.TotalDettes || 0, unit: "FC", money: true },
       { label: "Avances utilisées", value: summary.AvancesUtilisees || 0, unit: "FC", money: true },
       { label: "Nouvelles avances", value: summary.AvancesGenerees || 0, unit: "FC", money: true },
     ])}
     ${readonly && !directorView ? `<div class="alert warning">Lecture seule : vous pouvez consulter les commandes, pas les modifier.</div>` : orderForm()}
-    ${table(payload.rows || [], ["DateCommande", "Client", "Statut", "NombreBacs", "MontantAPercevoir", "MontantRecu", "AvanceUtilisee", "AvanceGeneree", "SoldeAvance", "Dette"], ["Date", "Client", "Statut", "Bacs", "À percevoir", "Reçu en caisse", "Avance utilisée", "Nouvelle avance", "Solde avance", "Dette"], readonly && !directorView ? [] : [{ name: "edit-order", label: "Modifier" }, { name: "delete-order", label: "Supprimer" }])}
+    ${table(payload.rows || [], ["DateCommande", "Client", "Statut", "NombreBacs", "MontantAPercevoir", "MontantRecu", "MontantRecuCommande", "AvanceUtilisee", "AvanceGeneree", "SoldeAvance", "Dette"], ["Date", "Client", "Statut", "Bacs", "À percevoir", "Payé client", "Reçu commande", "Avance utilisée", "Nouvelle avance", "Solde avance", "Dette"], readonly && !directorView ? [] : [{ name: "edit-order", label: "Modifier" }, { name: "delete-order", label: "Supprimer" }])}
   `);
 }
 
@@ -481,7 +785,7 @@ async function cashView() {
   return shell(`
     ${toolbar("cash")}
     ${cards([
-      { label: "Montant reçu", value: orders.MontantRecu || 0, unit: "FC", money: true },
+      { label: "Reçu commandes", value: orders.MontantRecu || 0, unit: "FC", money: true },
       { label: "Dettes payées", value: summary.DettesPayeesAujourdHui || 0, unit: "FC", money: true },
       { label: "Total entrées", value: entries, unit: "FC", money: true },
       { label: "Solde", value: balance, unit: "FC", money: true },
@@ -611,10 +915,24 @@ function productionForm() {
 }
 
 async function commissionsView() {
-  const payload = await api(`/api/commissions?date=${state.filters.date}&all=${state.filters.all ? 1 : 0}`);
+  const commissionStatus = state.filters.commissionStatus || "Tous";
+  const payload = await api(`/api/commissions?date=${state.filters.date}&all=${state.filters.all ? 1 : 0}&status=${encodeURIComponent(commissionStatus)}`);
+  const summary = payload.summary || {};
   return shell(`
-    ${toolbar("commissions")}
-    ${cards([{ label: "Total commissions", value: payload.total || 0, unit: "FC", money: true }])}
+    ${toolbar("commissions", `
+      <select id="commissionStatusFilter" title="Filtrer les commissions">
+        <option value="Tous" ${commissionStatus === "Tous" ? "selected" : ""}>Toutes les commissions</option>
+        <option value="Maman" ${commissionStatus === "Maman" ? "selected" : ""}>Mamans</option>
+        <option value="Dépositaire" ${commissionStatus === "Dépositaire" ? "selected" : ""}>Dépositaires</option>
+        <option value="Vente cash" ${commissionStatus === "Vente cash" ? "selected" : ""}>Vente cash</option>
+      </select>
+    `)}
+    ${cards([
+      { label: "Commissions", value: summary.TotalCommissions || 0, unit: "FC", money: true },
+      { label: "Net à payer", value: summary.TotalNetAPayer || 0, unit: "FC", money: true },
+      { label: "Dettes", value: summary.TotalDettes || 0, unit: "FC", money: true },
+      { label: "Bacs concernés", value: summary.TotalBacs || 0, unit: "bacs" },
+    ])}
     ${table(payload.rows || [], ["DateCommission", "Nom", "Statut", "NombreBacs", "Commissions", "Dettes", "NetAPayer"], ["Date", "Nom", "Statut", "Bacs", "Commission", "Dette", "Net"])}
   `);
 }
@@ -636,7 +954,8 @@ async function workersView() {
     ${cards([
       { label: "Travailleurs actifs", value: payload.summary?.TravailleursActifs || 0, unit: "personnes" },
       { label: "Masse salariale", value: payload.summary?.MasseSalarialeMensuelle || 0, unit: "FC", money: true },
-      { label: "Net payé", value: payload.summary?.TotalNet || 0, unit: "FC", money: true },
+      { label: "Paies payées", value: payload.summary?.TotalPaye || 0, unit: "FC", money: true },
+      { label: "Paies non payées", value: payload.summary?.TotalNonPaye || 0, unit: "FC", money: true },
       { label: "Paies", value: payload.summary?.NombrePaies || 0, unit: "opérations" },
     ])}
     <section class="split">
@@ -647,7 +966,7 @@ async function workersView() {
           <label>Nom complet <input name="fullName" required /></label>
           <label>Fonction <input name="function" /></label>
           <label>Téléphone <input name="phone" /></label>
-          <label>Adresse e-mail <input name="email" type="email" required /></label>
+          <label>Adresse e-mail <input name="email" type="email" placeholder="auto si vide" /></label>
           <label>Date d'embauche <input name="hireDate" type="date" value="${todayIso()}" /></label>
           <label>Salaire <input name="salary" type="number" min="0" step="1" /></label>
           <label>Statut <select name="status"><option>Actif</option><option>Inactif</option></select></label>
@@ -722,23 +1041,22 @@ async function reportView() {
       <div id="reportsFolderResult" class="calc-note wide">Cliquez sur « Afficher le dossier des rapports » pour consulter les fichiers.</div>
     </section>
     <section class="report-page">
-      <img class="watermark" src="/brand-assets/logo-boulangerie-lomoto-watermark.png" alt="" />
+      <img class="watermark" src="/brand-assets/logo-boulangerie-lomoto-watermark.png?v=20260701" alt="" />
       <header class="report-header">
-        <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Logo" />
+        <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="Logo" />
         <div>
           <h2>BOULANGERIE LOMOTO</h2>
           <p>Rapport du ${state.filters.date}</p>
           <small>Généré par ${escapeHtml(payload.data.generatedBy)} (${escapeHtml(payload.data.role)})</small>
         </div>
-        <img src="/brand-assets/icon-baguette.png" alt="Baguette" />
       </header>
       <div class="report-grid">
-        ${sections.orders ? `<article><h3>Commandes</h3><p>Bacs : <strong>${orders.NombreTotalBacs || 0}</strong></p><p>Reçu : <strong>${money(orders.MontantRecu || 0)}</strong></p><p>Dettes : <strong>${money(orders.TotalDettes || 0)}</strong></p></article>` : ""}
+        ${sections.orders ? `<article><h3>Commandes</h3><p>Bacs : <strong>${orders.NombreTotalBacs || 0}</strong></p><p>Payé par clients : <strong>${money(orders.MontantRecuBrut || orders.MontantRecu || 0)}</strong></p><p>Reçu commande : <strong>${money(orders.MontantRecu || 0)}</strong></p><p>Avances : <strong>${money(orders.AvancesGenerees || 0)}</strong></p><p>Dettes : <strong>${money(orders.TotalDettes || 0)}</strong></p></article>` : ""}
         ${sections.cash ? `<article><h3>Caisse</h3><p>Entrées : <strong>${money(entries)}</strong></p><p class="green">Dépenses : <strong>${money(cash.MontantTotalDepenses || 0)}</strong></p><p class="red">Solde : <strong>${money(entries - Number(cash.MontantTotalDepenses || 0))}</strong></p></article>` : ""}
         ${sections.stock ? `<article><h3>Stock</h3><p>Farine : <strong>${number(sections.stock.FarineRestante || 0)} sacs</strong></p><p>Levure : <strong>${number(sections.stock.LevureRestante || 0)} paquets</strong></p></article>` : ""}
         ${sections.production ? `<article><h3>Production</h3><p>Produits : <strong>${sections.production.NombreBacsProduits || 0} bacs</strong></p><p>Sacs : <strong>${number(sections.production.NombreSacsUtilises || 0)}</strong></p></article>` : ""}
         ${sections.commissions ? `<article><h3>Commissions</h3><p>Total : <strong>${money(sections.commissions.total || 0)}</strong></p></article>` : ""}
-        ${sections.workers ? `<article><h3>Travailleurs</h3><p>Actifs : <strong>${sections.workers.TravailleursActifs || 0}</strong></p><p>Net payé : <strong>${money(sections.workers.TotalNet || 0)}</strong></p></article>` : ""}
+        ${sections.workers ? `<article><h3>Travailleurs</h3><p>Actifs : <strong>${sections.workers.TravailleursActifs || 0}</strong></p><p>Payées : <strong>${money(sections.workers.TotalPaye || 0)}</strong></p><p>Non payées : <strong>${money(sections.workers.TotalNonPaye || 0)}</strong></p></article>` : ""}
       </div>
       <p class="nb"><strong>NB :</strong> ce rapport donne une lecture simple des entrées, sorties, dettes, stocks et charges pour comprendre la santé de l'activité.</p>
     </section>
@@ -827,7 +1145,7 @@ async function usersView() {
             </select>
           </label>
           <label>Adresse d'envoi <input name="fromAddress" type="email" value="${escapeHtml(emailSettings.from_address || "notifications@boulangerie-lomoto.com")}" /></label>
-          <label>Nom d'envoi <input name="fromName" value="Boulangerie Lomoto" /></label>
+          <label>Nom d'envoi <input name="fromName" value="${escapeHtml(appName())}" /></label>
           <label>Répondre à <input name="replyTo" type="email" value="${escapeHtml(emailSettings.reply_to || "")}" /></label>
           <label>Compte Cloudflare <input name="accountId" value="${escapeHtml(emailSettings.account_id || "")}" /></label>
           <label>Jeton Cloudflare <input name="apiToken" type="password" autocomplete="new-password" placeholder="Conserver le jeton actuel si vide" /></label>
@@ -884,6 +1202,7 @@ async function historyView() {
           ${["Admin", "Directeur Général", "Caissier", "Chargé de la production", "Gestionnaire des commandes", "Gestionnaire de stock"].map((item) => `<option ${role === item ? "selected" : ""}>${item}</option>`).join("")}
         </select>
         <button id="historyFilterButton">Filtrer</button>
+        ${state.user?.role === "Admin" ? `<button id="historyClearButton" type="button">Effacer l'historique</button>` : ""}
       </div>
     </section>
     ${table(visibleRows, ["DateAction", "NomComplet", "Identifiant", "Role", "Module", "Action", "Details"], ["Date et heure", "Nom complet", "Identifiant", "Rôle", "Module", "Action", "Détails"])}
@@ -919,39 +1238,170 @@ async function historyView() {
   `);
 }
 
-function aboutView() {
+async function systemView() {
+  const payload = await api("/api/system/status");
+  const data = payload.data || {};
+  const database = data.database || {};
+  const disk = data.disk || {};
+  const email = data.email || {};
+  const license = data.license || {};
+  const emailSettings = email.settings || {};
+  const emailCounts = email.counts || {};
+  const paths = data.paths || {};
+  const automaticBackups = data.automaticBackups || {};
+  const latestAutoBackup = automaticBackups.last || {};
+  const overviewRows = [
+    { Champ: "Application", Valeur: data.appName || "Boulangerie Lomoto" },
+    { Champ: "Version", Valeur: data.version || "" },
+    { Champ: "URL publique", Valeur: data.publicUrl || "" },
+    { Champ: "Licence", Valeur: license.required ? `${license.ok ? "Active" : "Non valide"} - ${license.message || ""}` : "Non obligatoire" },
+    { Champ: "Validité licence", Valeur: license.validUntil || "" },
+    { Champ: "Heure serveur", Valeur: data.serverTime || "" },
+    { Champ: "Base de données", Valeur: database.exists ? `${database.sizeLabel || ""} - ${database.path || ""}` : "Introuvable" },
+    { Champ: "Espace disque libre", Valeur: disk.freeLabel ? `${disk.freeLabel} libres sur ${disk.totalLabel || ""}` : "Non disponible" },
+  ];
+  const pathRows = [
+    { Dossier: "Données", Chemin: paths.data || "" },
+    { Dossier: "Rapports", Chemin: paths.reports || "" },
+    { Dossier: "Sauvegardes", Chemin: paths.backups || "" },
+    { Dossier: "Archives historique", Chemin: paths.archives || "" },
+  ];
+  const emailRows = [
+    { Champ: "Service", Valeur: emailSettings.provider || "Non configuré" },
+    { Champ: "Configuré", Valeur: emailSettings.configured ? "Oui" : "Non" },
+    { Champ: "En attente", Valeur: email.pending || 0 },
+    { Champ: "Envoyés", Valeur: emailCounts["Envoyé"] || emailCounts["Envoye"] || 0 },
+    { Champ: "Échecs", Valeur: emailCounts["Échec"] || emailCounts["Echec"] || 0 },
+  ];
+  const maintenanceRows = [
+    { Champ: "Taches planifiees", Valeur: "Sauvegarde quotidienne, sauvegarde externe hebdomadaire, surveillance service" },
+    { Champ: "Jeton maintenance local", Valeur: automaticBackups.tokenReady ? "Pret" : "Sera cree au premier lancement de maintenance" },
+    { Champ: "Derniere sauvegarde automatique", Valeur: latestAutoBackup.NomFichier ? `${latestAutoBackup.NomFichier} - ${latestAutoBackup.DateModification || ""}` : "Aucune sauvegarde automatique detectee" },
+    { Champ: "Endpoint local", Valeur: automaticBackups.localStatusUrl || "" },
+  ];
   return shell(`
     <section class="panel toolbar">
+      <div><p class="eyebrow">Maintenance</p><strong>État système</strong></div>
+      <div class="toolbar-actions"><button title="Actualiser" data-refresh>↻ Actualiser</button></div>
+    </section>
+    ${table(overviewRows, ["Champ", "Valeur"], ["Élément", "Valeur"])}
+    <section class="panel">
+      <h2>Maintenance automatique</h2>
+      ${table(maintenanceRows, ["Champ", "Valeur"], ["Controle", "Etat"])}
+    </section>
+    ${table(pathRows, ["Dossier", "Chemin"], ["Dossier", "Chemin"])}
+    <section class="split">
+      <div>
+        <h2>Sauvegardes récentes</h2>
+        ${table(data.backups || [], ["NomFichier", "Taille", "DateModification", "CheminComplet"], ["Fichier", "Taille", "Date", "Chemin"])}
+      </div>
+      <div>
+        <h2>Archives d'historique</h2>
+        ${table(data.archives || [], ["NomFichier", "Taille", "DateModification", "CheminComplet"], ["Fichier", "Taille", "Date", "Chemin"])}
+      </div>
+    </section>
+    <section class="split">
+      <div>
+        <h2>E-mails</h2>
+        ${table(emailRows, ["Champ", "Valeur"], ["Élément", "Valeur"])}
+      </div>
+      <div>
+        <h2>Sessions actives</h2>
+        ${table(data.sessions || [], ["Identifiant", "Plateforme", "NomAppareil", "AdresseIP", "DerniereActivite", "ExpireLe"], ["Identifiant", "Plateforme", "Appareil", "Adresse IP", "Dernière activité", "Expire le"])}
+      </div>
+    </section>
+  `);
+}
+
+function aboutView() {
+  return shell(`
+    <section class="panel toolbar about-toolbar">
       <div><p class="eyebrow">À propos</p><strong>Propriétaire et contact</strong></div>
       <div class="toolbar-actions"><button title="Actualiser" data-refresh>↻ Actualiser</button></div>
     </section>
-    <section class="panel">
-      <h2>À propos de Boulangerie Lomoto Web Pro</h2>
+    <section class="panel about-panel">
+      <h2>À propos de ${escapeHtml(appName())} Web Pro</h2>
       <div class="owner-card">
-        <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Boulangerie Lomoto" />
+        <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="${escapeHtml(appName())}" />
         <div>
           <p class="eyebrow">Responsable</p>
-          <h3>${OWNER.name}</h3>
-          <p>${OWNER.name} est le responsable de ${OWNER.company} et l'initiateur de cette solution.</p>
+          <h3>${escapeHtml(responsibleName())}</h3>
+          <p>${escapeHtml(responsibleName())} est le responsable de ${escapeHtml(publisherName())}. ${escapeHtml(initiatorName())} est l'IT et l'initiateur de cette solution.</p>
           <p>Cette application accompagne la gestion quotidienne de la boulangerie : ventes, commandes, stock, production, caisse, travailleurs, rapports et suivi des activités.</p>
         </div>
       </div>
       <section class="contact-strip">
         <article>
           <span>Téléphone</span>
-          <strong>${OWNER.phone}</strong>
+          <strong>${escapeHtml(contactPhone())}</strong>
         </article>
         <article>
-          <span>E-mail principal</span>
-          <strong>${OWNER.emailPrimary}</strong>
+          <span>E-mail</span>
+          <strong>${escapeHtml(contactEmail())}</strong>
         </article>
-        <article>
-          <span>E-mail secondaire</span>
-          <strong>${OWNER.emailSecondary}</strong>
-        </article>
+        <article><span>Entreprise</span><strong>${escapeHtml(publisherName())}</strong></article>
       </section>
     </section>
   `);
+}
+
+function activationContent(status) {
+  const activeStatus = status || state.license || {};
+  const rows = activeStatus.activations || [];
+  const actions = state.user?.role === "Admin"
+    ? [{ name: "deactivate-license-device", label: "Libérer", visible: (row) => Boolean(row.deviceId) }]
+    : [];
+  return `
+    <section class="panel toolbar">
+      <div>
+        <p class="eyebrow">Licence</p>
+        <strong>${activeStatus.ok ? "Produit activé" : "Activation requise"}</strong>
+      </div>
+      <div class="toolbar-actions"><button title="Actualiser" data-refresh-license>↻ Actualiser</button></div>
+    </section>
+    ${activeStatus.ok
+      ? `<div class="alert success">${escapeHtml(activeStatus.message || "Licence valide.")}</div>`
+      : `<div class="alert warning">${escapeHtml(activeStatus.message || "Aucune licence active.")}</div>`}
+    <section class="panel"><strong>Client : ${escapeHtml(activeStatus.clientName || companyName())}</strong>${activeStatus.validUntil ? `<br /><span>Validité : ${escapeHtml(activeStatus.validUntil)}</span>` : ""}</section>
+    ${cards([
+      { label: "Postes autorisés", value: activeStatus.maxDevices || 0, unit: "postes" },
+      { label: "Postes activés", value: rows.length || 0, unit: "postes" },
+    ])}
+    <section class="panel">
+      <h2>Code de ce poste</h2>
+      <div class="calc-note">${escapeHtml(activeStatus.installationCode || "Non disponible")}</div>
+      <h2>Clé d'activation</h2>
+      <form id="activationForm" class="form-grid">
+        <label class="wide">Coller la clé reçue
+          <textarea name="key" rows="5" required></textarea>
+        </label>
+        <button class="primary wide" type="submit">Activer cette installation</button>
+      </form>
+    </section>
+    ${table(rows, ["deviceName", "deviceId", "activatedAt", "lastSeenAt"], ["Poste", "Identifiant", "Activé le", "Dernière activité"], actions)}
+  `;
+}
+
+async function activationView() {
+  const status = await refreshLicenseStatus({ silent: true });
+  return shell(activationContent(status));
+}
+
+function publicActivationView() {
+  return `
+    <main class="login-page">
+      <section class="login-card wide-card">
+        <div class="brand-mark">
+          <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="Logo" />
+          <span>Activation du produit</span>
+        </div>
+        <h1>${escapeHtml(appName()).toUpperCase()}</h1>
+        ${state.error ? `<div class="alert danger">${escapeHtml(state.error)}</div>` : ""}
+        ${state.notice ? `<div class="alert success">${escapeHtml(state.notice)}</div>` : ""}
+        ${activationContent(state.license)}
+      </section>
+    </main>
+  `;
 }
 
 function forcedPasswordView() {
@@ -959,7 +1409,7 @@ function forcedPasswordView() {
     <main class="login-page">
       <section class="login-card">
         <div class="brand-mark">
-          <img src="/brand-assets/logo-boulangerie-lomoto.png" alt="Boulangerie Lomoto" />
+          <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="Boulangerie Lomoto" />
           <span>Sécurité du compte</span>
         </div>
         <p class="eyebrow">Action obligatoire</p>
@@ -979,6 +1429,11 @@ function forcedPasswordView() {
 }
 
 async function render() {
+  if (state.license?.required && !state.license?.ok) {
+    app.innerHTML = publicActivationView();
+    bindEvents();
+    return;
+  }
   if (state.setupRequired) {
     app.innerHTML = setupView();
     bindEvents();
@@ -1005,6 +1460,8 @@ async function render() {
     reports: reportView,
     users: usersView,
     history: historyView,
+    system: systemView,
+    activation: activationView,
     about: aboutView,
   };
   app.innerHTML = shell(`<section class="panel"><h2>Chargement...</h2><p>Le serveur prépare les données.</p></section>`);
@@ -1031,7 +1488,7 @@ function bindEvents() {
     if (!input.dataset.allowFuture) input.max = todayIso();
   });
   document.querySelectorAll("[data-module]").forEach((button) => {
-    button.addEventListener("click", () => setState({ active: button.dataset.module, error: "", notice: "" }));
+    button.addEventListener("click", () => navigateToModule(button.dataset.module));
   });
   document.querySelector("#mobileMenuToggle")?.addEventListener("click", (event) => {
     const sidebar = document.querySelector(".sidebar");
@@ -1043,6 +1500,10 @@ function bindEvents() {
   document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => updateFilter(button.dataset.filter)));
   document.querySelector("#orderStatusFilter")?.addEventListener("change", (event) => {
     state.filters.orderStatus = event.currentTarget.value;
+    setState({ error: "", notice: "" });
+  });
+  document.querySelector("#commissionStatusFilter")?.addEventListener("change", (event) => {
+    state.filters.commissionStatus = event.currentTarget.value;
     setState({ error: "", notice: "" });
   });
   document.querySelector("#orderForm")?.addEventListener("submit", submitOrder);
@@ -1058,13 +1519,21 @@ function bindEvents() {
   document.querySelector("#emailSettingsForm")?.addEventListener("submit", submitEmailSettings);
   document.querySelector("#emailTestButton")?.addEventListener("click", testEmailSending);
   document.querySelector("#emailRetryButton")?.addEventListener("click", retryEmails);
+  document.querySelector("#activationForm")?.addEventListener("submit", submitActivation);
   document.querySelector("#reportGenerateForm")?.addEventListener("submit", submitGeneratedReport);
   document.querySelector("#reportsFolderButton")?.addEventListener("click", showReportsFolder);
   document.querySelector("#closureForm")?.addEventListener("submit", submitClosure);
   document.querySelector("#backupButton")?.addEventListener("click", createBackup);
   document.querySelector("#historyFilterButton")?.addEventListener("click", applyHistoryFilters);
+  document.querySelector("#historyClearButton")?.addEventListener("click", clearHistoryLogs);
   document.querySelectorAll("[data-refresh]").forEach((button) => {
     button.addEventListener("click", () => setState({ error: "", notice: "" }));
+  });
+  document.querySelectorAll("[data-refresh-license]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await refreshLicenseStatus({ silent: false });
+      setState({ error: "", notice: "" });
+    });
   });
   document.querySelectorAll("[data-row-action]").forEach((button) => {
     button.addEventListener("click", () => handleRowAction(button.dataset.rowAction, button.dataset.row));
@@ -1082,19 +1551,32 @@ function prepareLoginCredentialControls() {
   const form = document.querySelector("#loginForm");
   const identifiantInput = document.querySelector("#loginIdentifiant");
   const passwordInput = document.querySelector("#passwordInput");
+  const showPasswordInput = document.querySelector("#showPassword");
   if (!form || !identifiantInput || !passwordInput) return;
 
-  const lockAutofill = () => {
-    form.setAttribute("autocomplete", "off");
-    identifiantInput.setAttribute("autocomplete", "off");
-    passwordInput.setAttribute("autocomplete", "new-password");
-  };
   const clearLoginFields = () => {
+    if (form.dataset.userActivated === "true") return;
     identifiantInput.value = "";
     passwordInput.value = "";
+    passwordInput.type = "password";
+    if (showPasswordInput) showPasswordInput.checked = false;
   };
-  lockAutofill();
-  [0, 80, 350, 900].forEach((delayMs) => window.setTimeout(clearLoginFields, delayMs));
+  const unlockForCredentialSelection = () => {
+    form.dataset.userActivated = "true";
+    [identifiantInput, passwordInput].forEach((input) => {
+      input.removeAttribute("readonly");
+      input.readOnly = false;
+    });
+  };
+  form.dataset.userActivated = "false";
+  clearLoginFields();
+  if (showPasswordInput) showPasswordInput.checked = false;
+  [identifiantInput, passwordInput].forEach((input) => {
+    ["pointerdown", "focus", "keydown"].forEach((eventName) => {
+      input.addEventListener(eventName, unlockForCredentialSelection, { once: true });
+    });
+  });
+  [0, 80, 350].forEach((delayMs) => window.setTimeout(clearLoginFields, delayMs));
 }
 
 function applyDirectorGeneralReadOnly() {
@@ -1140,6 +1622,34 @@ function applyDirectorGeneralReadOnly() {
   }
 }
 
+async function submitActivation(event) {
+  event.preventDefault();
+  const data = formObject(event.currentTarget);
+  try {
+    const payload = await post("/api/license/activate", { key: data.key });
+    state.license = payload.status || state.license;
+    setState({ error: "", notice: payload.message || "Activation effectuée." });
+    if (state.license?.ok && !state.user) {
+      await boot();
+    }
+  } catch (error) {
+    state.license = error.payload?.status || state.license;
+    setState({ error: error.message, notice: "" });
+  }
+}
+
+async function deactivateLicenseDevice(row) {
+  if (!row.deviceId) return;
+  if (!window.confirm(`Libérer le poste ${row.deviceName || row.deviceId} ?`)) return;
+  try {
+    const payload = await api(`/api/license/devices?deviceId=${encodeURIComponent(row.deviceId)}`, { method: "DELETE" });
+    state.license = payload.status || state.license;
+    setState({ error: "", notice: "Poste libéré." });
+  } catch (error) {
+    setState({ error: error.message, notice: "" });
+  }
+}
+
 async function submitSetup(event) {
   event.preventDefault();
   const data = formObject(event.currentTarget);
@@ -1166,6 +1676,10 @@ async function login(event) {
       delay(850),
     ]);
     state.user = payload.user;
+    state.client = payload.user?.client || state.client;
+    state.appVersion = payload.user?.appVersion || state.appVersion;
+    lastActivityAt = Date.now();
+    idleLogoutInProgress = false;
     setState({ active: "dashboard", loading: false, error: "", notice: "" });
   };
   setState({ loading: true, error: "" });
@@ -1227,7 +1741,7 @@ function bindCalculations() {
   const order = document.querySelector("#orderForm");
   if (order) {
     const calculate = () => {
-      const rate = orderRates[order.elements.status.value] || 0;
+      const rate = getOrderRate(order.elements.status.value);
       const trays = Number(order.elements.trays.value || 0);
       const received = Number(order.elements.amountReceived.value || 0);
       const availableAdvance = Number(order.dataset.advance || 0);
@@ -1262,7 +1776,7 @@ function bindCalculations() {
       const expenses = Number(cash.elements.expenses.value || 0);
       cash.elements.entries.value = money(received + paidDebts);
       cash.elements.balance.value = money(received + paidDebts - expenses);
-      document.querySelector("#cashCalc").textContent = `Entrées = ${money(received)} + ${money(paidDebts)}. Solde = entrées - dépenses.`;
+      document.querySelector("#cashCalc").textContent = `Entrées = reçu commandes ${money(received)} + dettes payées ${money(paidDebts)}. Solde = entrées - dépenses.`;
     };
     ["paidDebts", "expenses"].forEach((name) => cash.elements[name].addEventListener("input", calculate));
     calculate();
@@ -1301,12 +1815,18 @@ function formObject(form) {
 
 async function submitOrder(event) {
   event.preventDefault();
-  await refreshOrderAdvance();
-  const data = formObject(event.currentTarget);
+  const form = event.currentTarget;
+  try {
+    await refreshOrderAdvance({ showError: false });
+  } catch {
+    // Le calcul d'avance ne doit pas bloquer l'enregistrement principal.
+  }
+  const data = formObject(form);
   await save("/api/orders", data, "Commande enregistrée.");
 }
 
-async function refreshOrderAdvance() {
+async function refreshOrderAdvance(options = {}) {
+  const showError = options.showError !== false;
   const form = document.querySelector("#orderForm");
   if (!form) return;
   const client = form.elements.client.value.trim();
@@ -1325,7 +1845,10 @@ async function refreshOrderAdvance() {
     form.dataset.advance = String(Number(payload.balance || 0));
     form.elements.amountReceived.dispatchEvent(new Event("input"));
   } catch (error) {
-    setState({ error: error.message, notice: "" });
+    if (showError) {
+      setState({ error: error.message, notice: "" });
+    }
+    throw error;
   }
 }
 
@@ -1464,7 +1987,7 @@ async function testEmailSending() {
     const payload = await post("/api/email/test", { recipient });
     const result = payload.result || {};
     setState({
-      notice: `E-mail test envoyÃ© : ${result.message || "acceptÃ© par le service."}`,
+      notice: `E-mail test envoyé : ${result.message || "accepté par le service."}`,
       error: "",
     });
   } catch (error) {
@@ -1559,11 +2082,41 @@ function applyHistoryFilters() {
   });
 }
 
+async function clearHistoryLogs() {
+  const confirmed = window.confirm(
+    "Effacer l'historique des actions ?\n\nCette operation supprime les anciennes lignes, puis garde une trace de l'effacement."
+  );
+  if (!confirmed) return;
+  const doubleCheck = window.confirm("Confirmation finale : voulez-vous vraiment effacer l'historique ?");
+  if (!doubleCheck) return;
+  try {
+    const payload = await post("/api/history/clear", {});
+    const archiveText = payload.archivePath ? ` Archive creee : ${payload.archivePath}` : "";
+    setState({
+      historyPage: 1,
+      notice: `Historique efface : ${payload.deleted || 0} action(s) supprimee(s).${archiveText}`,
+      error: "",
+    });
+  } catch (error) {
+    setState({ error: error.message, notice: "" });
+  }
+}
+
 async function save(path, data, notice) {
   try {
     await post(path, data);
     setState({ notice, error: "" });
   } catch (error) {
+    if (isSessionError(error)) {
+      setState({
+        user: null,
+        active: "dashboard",
+        loading: false,
+        error: `${error.message} Si vous avez ouvert le même compte sur un autre appareil, reconnectez-vous ici pour continuer.`,
+        notice: "",
+      });
+      return;
+    }
     setState({ error: error.message, notice: "" });
   }
 }
@@ -1578,6 +2131,7 @@ function parseRow(rowText) {
 
 async function handleRowAction(action, rowText) {
   const row = parseRow(rowText);
+  if (action === "deactivate-license-device") return deactivateLicenseDevice(row);
   if (action === "edit-order") {
     fillForm("#orderForm", {
       id: row.Id,
@@ -1761,9 +2315,11 @@ async function remove(path, notice) {
 }
 
 boot();
+installIdleActivityTracking();
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/service-worker.js").catch(() => {});
   });
 }
+
