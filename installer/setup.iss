@@ -2,7 +2,7 @@
   #define MyAppName "Boulangerie Lomoto"
 #endif
 #ifndef MyAppVersion
-#define MyAppVersion "1.5.6"
+#define MyAppVersion "1.5.7"
 #endif
 #ifndef MyAppPublisher
   #define MyAppPublisher "GIS"

@@ -14,6 +14,7 @@ const moduleLabels = {
   cash: "Caisse",
   stock: "Stock",
   production: "Production",
+  previsions: "Prévisions",
   commissions: "Commissions",
   workers: "Travailleurs",
   reports: "Rapports",
@@ -35,7 +36,7 @@ const state = {
   user: null,
   client: null,
   license: null,
-  appVersion: "1.5.6",
+  appVersion: "1.5.7",
   active: "dashboard",
   loading: false,
   error: "",
@@ -45,6 +46,8 @@ const state = {
     all: false,
     orderStatus: "all",
     commissionStatus: "Tous",
+    previsionDate: tomorrowIso(),
+    previsionAll: false,
     start: `${todayIso().slice(0, 8)}01`,
     end: todayIso(),
   },
@@ -66,6 +69,15 @@ function todayIso() {
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function tomorrowIso() {
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const year = tomorrow.getFullYear();
+  const month = String(tomorrow.getMonth() + 1).padStart(2, "0");
+  const day = String(tomorrow.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
@@ -372,7 +384,7 @@ function loginView() {
       <section class="login-card">
         <div class="brand-mark">
           <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="Logo" />
-          <span>Version web professionnelle ${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.6")}</span>
+          <span>Version web professionnelle ${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.7")}</span>
         </div>
         <p class="eyebrow">Application connectée</p>
         <h1>${escapeHtml(appName()).toUpperCase()}</h1>
@@ -407,7 +419,7 @@ function shell(content) {
             <div>
               <strong>${escapeHtml(appName()).toUpperCase()}</strong>
               <span>Pain Lia o Tonda</span>
-              <small>Données Windows v${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.6")}</small>
+              <small>Données Windows v${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.7")}</small>
             </div>
           </div>
           <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-expanded="false" aria-controls="sidebarMenu" title="Ouvrir le menu">☰</button>
@@ -433,7 +445,7 @@ function shell(content) {
             </div>
             <div class="version-card">
               <span>Version</span>
-              <strong>${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.6")}</strong>
+              <strong>${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.7")}</strong>
             </div>
           </div>
         </header>
@@ -913,6 +925,96 @@ function productionForm() {
         <label class="wide">Observations <textarea name="observations"></textarea></label>
         <div id="productionCalc" class="calc-note wide">Total automatique.</div>
         <button class="primary wide" type="submit">Enregistrer la production</button>
+      </form>
+    </section>
+  `;
+}
+
+function previsionToolbar() {
+  const selectedDate = state.filters.previsionDate || tomorrowIso();
+  return `
+    <section class="panel toolbar">
+      <div>
+        <p class="eyebrow">Date prévue</p>
+        <strong>${state.filters.previsionAll ? "Toutes les prévisions" : `Prévision du ${escapeHtml(formatDate(selectedDate))}`}</strong>
+      </div>
+      <div class="toolbar-actions">
+        <button title="Actualiser" data-refresh>↻ Actualiser</button>
+        <input id="previsionFilterDate" type="date" value="${escapeHtml(selectedDate)}" data-allow-future="true" />
+        <button data-prevision-filter="date">Afficher</button>
+        <button data-prevision-filter="tomorrow">Demain</button>
+        <button data-prevision-filter="all">Tout afficher</button>
+        <button class="primary" id="previsionExportButton" type="button">Exporter Excel</button>
+      </div>
+    </section>
+  `;
+}
+
+async function previsionsView() {
+  const selectedDate = state.filters.previsionDate || tomorrowIso();
+  const payload = await api(`/api/previsions?date=${encodeURIComponent(selectedDate)}&all=${state.filters.previsionAll ? 1 : 0}`);
+  const rows = payload.rows || [];
+  const summary = payload.summary || {};
+  const depositaryRows = rows.filter((row) => String(row.Statut || "").trim() === "Dépositaire");
+  const mamaRows = rows.filter((row) => String(row.Statut || "").trim() === "Maman");
+  const readonly = readOnly("previsions");
+  const actions = readonly ? [] : [
+    { name: "edit-prevision", label: "Modifier" },
+    { name: "delete-prevision", label: "Supprimer" },
+  ];
+  return shell(`
+    ${previsionToolbar()}
+    ${cards([
+      { label: "Clients prévus", value: summary.NombreClients || 0, unit: "clients" },
+      { label: "Articles dépositaires", value: summary.TotalDepositaires || 0, unit: "articles" },
+      { label: "Articles mamans", value: summary.TotalMamans || 0, unit: "articles" },
+      { label: "Total articles prévus", value: summary.TotalArticlesPrevus || 0, unit: "articles" },
+      { label: "Sacs à produire", value: summary.NombreSacsAProduire || 0, unit: "sacs" },
+      { label: "Montant prévu", value: summary.MontantPrevu || 0, unit: "FC", money: true },
+    ])}
+    ${readonly && !isDirectorGeneral()
+      ? `<div class="alert warning">Lecture seule : vous pouvez consulter et exporter les prévisions, pas les modifier.</div>`
+      : previsionForm()}
+    <h2>Fiche de commande des dépositaires</h2>
+    ${table(
+      depositaryRows,
+      ["DatePrevision", "Localisation", "Client", "Carre1500", "Carre1000", "Baguette500", "Baguette1000", "TotalArticles", "MontantPrevu"],
+      ["Date prévue", "Localisation", "Client", "Carré 1.500", "Carré 1.000", "Baguette 500", "Baguette 1.000", "Total", "Montant prévu"],
+      actions,
+    )}
+    <h2>Fiche de commande des mamans</h2>
+    ${table(
+      mamaRows,
+      ["DatePrevision", "Client", "Carre1500", "Carre1000", "Baguette500", "Baguette1000", "TotalArticles", "MontantPrevu"],
+      ["Date prévue", "Cliente", "Carré 1.500", "Carré 1.000", "Baguette 500", "Baguette 1.000", "Total", "Montant prévu"],
+      actions,
+    )}
+  `);
+}
+
+function previsionForm() {
+  const selectedDate = state.filters.previsionDate || tomorrowIso();
+  return `
+    <section class="panel">
+      <h2>Nouvelle prévision de commande</h2>
+      <p class="muted-text">Préparez les quantités du lendemain ou d'une autre date future. Les montants et le nombre de sacs sont calculés automatiquement.</p>
+      <form id="previsionForm" class="form-grid cols-4">
+        <input name="id" type="hidden" />
+        <label>Date prévue <input name="date" type="date" value="${escapeHtml(selectedDate)}" data-allow-future="true" required /></label>
+        <label>Statut
+          <select name="status"><option>Dépositaire</option><option>Maman</option></select>
+        </label>
+        <label>Localisation
+          <input name="location" list="previsionLocations" value="Siège" required />
+          <datalist id="previsionLocations"><option value="Siège"></option><option value="Dépôt 1"></option><option value="Dépôt 2"></option><option value="Point de vente"></option></datalist>
+        </label>
+        <label>Nom du client <input name="client" autocomplete="off" required /></label>
+        <label>Carré 1.500 FC <input name="square1500" type="number" min="0" step="1" value="0" required /></label>
+        <label>Carré 1.000 FC <input name="square1000" type="number" min="0" step="1" value="0" required /></label>
+        <label>Baguette 500 FC <input name="baguette500" type="number" min="0" step="1" value="0" required /></label>
+        <label>Baguette 1.000 FC <input name="baguette1000" type="number" min="0" step="1" value="0" required /></label>
+        <div id="previsionCalc" class="calc-note wide">Saisissez au moins une quantité.</div>
+        <button class="primary wide" type="submit">Enregistrer la prévision</button>
       </form>
     </section>
   `;
@@ -1459,6 +1561,7 @@ async function render() {
     cash: cashView,
     stock: stockView,
     production: productionView,
+    previsions: previsionsView,
     commissions: commissionsView,
     workers: workersView,
     reports: reportView,
@@ -1502,6 +1605,9 @@ function bindEvents() {
   });
   document.querySelector("#logoutButton")?.addEventListener("click", logout);
   document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => updateFilter(button.dataset.filter)));
+  document.querySelectorAll("[data-prevision-filter]").forEach((button) => {
+    button.addEventListener("click", () => updatePrevisionFilter(button.dataset.previsionFilter));
+  });
   document.querySelector("#orderStatusFilter")?.addEventListener("change", (event) => {
     state.filters.orderStatus = event.currentTarget.value;
     setState({ error: "", notice: "" });
@@ -1516,6 +1622,8 @@ function bindEvents() {
   document.querySelector("#stockExitForm")?.addEventListener("submit", (event) => submitStock(event, "/api/stock/exit"));
   document.querySelector("#stockConfigForm")?.addEventListener("submit", submitStockConfig);
   document.querySelector("#productionForm")?.addEventListener("submit", submitProduction);
+  document.querySelector("#previsionForm")?.addEventListener("submit", submitPrevision);
+  document.querySelector("#previsionExportButton")?.addEventListener("click", exportPrevisions);
   document.querySelector("#workerForm")?.addEventListener("submit", submitWorker);
   document.querySelector("#payrollForm")?.addEventListener("submit", submitPayroll);
   document.querySelector("#userForm")?.addEventListener("submit", submitUser);
@@ -1594,6 +1702,7 @@ function applyDirectorGeneralReadOnly() {
     "#stockExitForm",
     "#stockConfigForm",
     "#productionForm",
+    "#previsionForm",
     "#workerForm",
     "#payrollForm",
     "#userForm",
@@ -1741,6 +1850,19 @@ function updateFilter(mode) {
   setState({ filters: state.filters, error: "", notice: "" });
 }
 
+function updatePrevisionFilter(mode) {
+  if (mode === "tomorrow") {
+    state.filters.previsionDate = tomorrowIso();
+    state.filters.previsionAll = false;
+  } else if (mode === "all") {
+    state.filters.previsionAll = true;
+  } else {
+    state.filters.previsionDate = document.querySelector("#previsionFilterDate")?.value || tomorrowIso();
+    state.filters.previsionAll = false;
+  }
+  setState({ filters: state.filters, error: "", notice: "" });
+}
+
 function bindCalculations() {
   const order = document.querySelector("#orderForm");
   if (order) {
@@ -1795,6 +1917,32 @@ function bindCalculations() {
       document.querySelector("#productionCalc").textContent = `Total produit : ${produced} bacs. Écart : ${produced - ordered}. Couverture : ${number(coverage)} %.`;
     };
     ["ordered", "depositaries", "mamas", "given", "samples", "remaining", "wasted"].forEach((name) => production.elements[name].addEventListener("input", calculate));
+    calculate();
+  }
+  const prevision = document.querySelector("#previsionForm");
+  if (prevision) {
+    const calculate = () => {
+      const square1500 = Number(prevision.elements.square1500.value || 0);
+      const square1000 = Number(prevision.elements.square1000.value || 0);
+      const baguette500 = Number(prevision.elements.baguette500.value || 0);
+      const baguette1000 = Number(prevision.elements.baguette1000.value || 0);
+      const total = square1500 + square1000 + baguette500 + baguette1000;
+      const amount = (square1500 * 1500) + (square1000 * 1000) + (baguette500 * 500) + (baguette1000 * 1000);
+      const sacks = total > 0 ? total / 33 : 0;
+      document.querySelector("#previsionCalc").textContent = `${number(total)} article(s) | ${money(amount)} | ${number(sacks)} sac(s) à produire.`;
+    };
+    const updateLocation = () => {
+      const isMama = prevision.elements.status.value === "Maman";
+      prevision.elements.location.disabled = isMama;
+      prevision.elements.location.required = !isMama;
+      if (isMama) prevision.elements.location.value = "";
+      if (!isMama && !prevision.elements.location.value.trim()) prevision.elements.location.value = "Siège";
+    };
+    ["square1500", "square1000", "baguette500", "baguette1000"].forEach((name) => {
+      prevision.elements[name].addEventListener("input", calculate);
+    });
+    prevision.elements.status.addEventListener("change", updateLocation);
+    updateLocation();
     calculate();
   }
   const payroll = document.querySelector("#payrollForm");
@@ -1874,6 +2022,37 @@ async function submitStockConfig(event) {
 async function submitProduction(event) {
   event.preventDefault();
   await save("/api/production", formObject(event.currentTarget), "Production enregistrée.");
+}
+
+async function submitPrevision(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = formObject(form);
+  const quantityFields = ["square1500", "square1000", "baguette500", "baguette1000"];
+  const total = quantityFields.reduce((sum, name) => sum + Number(data[name] || 0), 0);
+  if (total <= 0) {
+    setState({ error: "Veuillez saisir au moins une quantité dans la prévision.", notice: "" });
+    return;
+  }
+  if (data.status === "Maman") data.location = "";
+  await save("/api/previsions", data, data.id ? "Prévision modifiée." : "Prévision enregistrée.");
+}
+
+async function exportPrevisions() {
+  const selectedDate = document.querySelector("#previsionFilterDate")?.value || state.filters.previsionDate || tomorrowIso();
+  const reportWindow = window.open("about:blank", "_blank");
+  try {
+    const payload = await post("/api/previsions/export", { date: selectedDate });
+    if (reportWindow) {
+      reportWindow.location.href = payload.url;
+    } else {
+      window.location.href = payload.url;
+    }
+    setState({ notice: `Fiches de prévision générées : ${payload.name}.`, error: "" });
+  } catch (error) {
+    if (reportWindow) reportWindow.close();
+    setState({ error: error.message, notice: "" });
+  }
 }
 
 async function submitWorker(event) {
@@ -2211,6 +2390,25 @@ async function handleRowAction(action, rowText) {
     return;
   }
   if (action === "delete-production") return removeById("/api/production", row.Id, "Production supprimée.");
+  if (action === "edit-prevision") {
+    state.filters.previsionDate = row.DatePrevision || state.filters.previsionDate;
+    state.filters.previsionAll = false;
+    fillForm("#previsionForm", {
+      id: row.Id,
+      date: row.DatePrevision,
+      location: row.Localisation,
+      client: row.Client,
+      status: row.Statut,
+      square1500: row.Carre1500,
+      square1000: row.Carre1000,
+      baguette500: row.Baguette500,
+      baguette1000: row.Baguette1000,
+    });
+    bindCalculations();
+    scrollToForm("#previsionForm");
+    return;
+  }
+  if (action === "delete-prevision") return removeById("/api/previsions", row.Id, "Prévision supprimée.");
   if (action === "edit-worker") {
     fillForm("#workerForm", {
       id: row.Id,

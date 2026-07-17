@@ -3,7 +3,7 @@ import os
 from .client_config import get_app_name, get_publisher
 
 APP_NAME = get_app_name()
-APP_VERSION = os.environ.get("BOULANGERIE_APP_VERSION", "1.5.6")
+APP_VERSION = os.environ.get("BOULANGERIE_APP_VERSION", "1.5.7")
 APP_PUBLISHER = get_publisher()
 APP_EDITION = os.environ.get("BOULANGERIE_APP_EDITION", "standard")
 APP_DEMO = APP_EDITION.strip().lower() == "demo"

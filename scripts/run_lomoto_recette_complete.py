@@ -21,7 +21,7 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-VERSION = "1.5.6"
+VERSION = "1.5.7"
 DIRECTOR_ROLE = "Directeur G\u00e9n\u00e9ral"
 PRODUCTION_ROLE = "Charg\u00e9 de la production"
 DEPOSITARY_STATUS = "D\u00e9positaire"
@@ -65,7 +65,7 @@ class ApiClient:
         data = None
         request_headers = {
             "Accept": "application/json",
-            "User-Agent": "LomotoRecette/1.5.6",
+            "User-Agent": "LomotoRecette/1.5.7",
         }
         if payload is not None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -111,7 +111,7 @@ class ApiClient:
     def text(self, path: str) -> str:
         request = urllib.request.Request(
             self.base_url + path,
-            headers={"User-Agent": "LomotoRecette/1.5.6", "Cache-Control": "no-cache"},
+            headers={"User-Agent": "LomotoRecette/1.5.7", "Cache-Control": "no-cache"},
             method="GET",
         )
         with self.opener.open(request, timeout=30) as response:
@@ -369,7 +369,7 @@ class RecetteRunner:
     def check_manual_login_form(self) -> str:
         html = self.admin.text("/")
         js = self.admin.text("/app.js?recette=1")
-        assert "webpro-1.5.6-20260717" in html
+        assert "webpro-1.5.7-20260717" in html
         assert 'name="username"' in js
         assert 'autocomplete="username"' in js
         assert 'autocomplete="current-password"' in js
@@ -531,30 +531,68 @@ class RecetteRunner:
         return "20 bacs produits, 2 sacs"
 
     def check_prevision_flow(self) -> str:
-        from boulangerie_app.connected_mode import ConnectionSettings
-        from boulangerie_app.database import DatabaseHelper
-        from boulangerie_app.excel_reports import create_prevision_excel_workbook
+        production = self.clients["production.recette"]  # type: ignore[assignment]
+        commandes = self.clients["commandes.recette"]  # type: ignore[assignment]
+        dg = self.clients["dg.recette"]  # type: ignore[assignment]
+        caissier = self.clients["caissier.recette"]  # type: ignore[assignment]
+        assert all(isinstance(client, ApiClient) for client in (production, commandes, dg, caissier))
+        assert "previsions" in production.user.get("modules", [])
+        assert "previsions" in commandes.user.get("modules", [])
+        assert "previsions" in dg.user.get("readOnlyModules", [])
 
-        DatabaseHelper.set_storage_root(self.data_dir)
-        DatabaseHelper.apply_connection_settings(ConnectionSettings(mode="local"), persist=False)
-        DatabaseHelper.initialize_local_database()
-        DatabaseHelper.add_prevision_order(
-            self.tomorrow, "Dépôt 1", "Client Prévision", DEPOSITARY_STATUS, 5, 0, 3, 0
+        production.post(
+            "/api/previsions",
+            {
+                "date": self.tomorrow.isoformat(),
+                "location": "Dépôt 1",
+                "client": "Client Prévision",
+                "status": DEPOSITARY_STATUS,
+                "square1500": 5,
+                "square1000": 0,
+                "baguette500": 3,
+                "baguette1000": 0,
+            },
         )
-        DatabaseHelper.add_prevision_order(self.tomorrow, "", "Maman Prévision", "Maman", 0, 2, 0, 1)
-        rows = DatabaseHelper.list_previsions_by_date(self.tomorrow)
-        summary = DatabaseHelper.get_prevision_summary_for_date(self.tomorrow)
-        workbook = create_prevision_excel_workbook(
-            self.tomorrow,
-            self.output_dir / "fiches-prevision-recette.xlsx",
-            generated_by="Production Recette",
-            generated_role=PRODUCTION_ROLE,
+        commandes.post(
+            "/api/previsions",
+            {
+                "date": self.tomorrow.isoformat(),
+                "location": "",
+                "client": "Maman Prévision",
+                "status": "Maman",
+                "square1500": 0,
+                "square1000": 2,
+                "baguette500": 0,
+                "baguette1000": 1,
+            },
         )
+        payload = dg.get(f"/api/previsions?date={self.tomorrow.isoformat()}")
+        rows = payload["rows"]
+        summary = payload["summary"]
+        export = production.post("/api/previsions/export", {"date": self.tomorrow.isoformat()})
         assert len(rows) == 2
         assert int(summary.get("TotalArticlesPrevus") or 0) == 11
         assert int(float(summary.get("MontantPrevu") or 0)) == 12000
-        assert workbook.exists() and workbook.stat().st_size > 0
-        return "2 lignes futures, 11 articles, 12 000 FC, export Excel OK"
+        assert Path(export["path"]).exists() and export["url"].startswith("/api/reports/file?token=")
+        self.expect_api_error(
+            dg,
+            "POST",
+            "/api/previsions",
+            {
+                "date": self.tomorrow.isoformat(),
+                "client": "Refus DG",
+                "status": "Maman",
+                "square1500": 1,
+            },
+            expected_status=403,
+        )
+        self.expect_api_error(
+            caissier,
+            "GET",
+            f"/api/previsions?date={self.tomorrow.isoformat()}",
+            expected_status=403,
+        )
+        return "Web/Android : 2 lignes futures, droits par role et export Excel OK"
 
     def create_stock_entries(self) -> str:
         stock = self.clients["stock.recette"]  # type: ignore[assignment]
@@ -789,7 +827,7 @@ class RecetteRunner:
 
 
 def fetch_json(url: str, timeout: int = 15) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "LomotoRecette/1.5.6"})
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "LomotoRecette/1.5.7"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8-sig"))
 

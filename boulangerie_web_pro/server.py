@@ -17,7 +17,7 @@ import time
 import traceback
 import webbrowser
 from dataclasses import asdict, is_dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,6 +55,7 @@ from boulangerie_app.excel_reports import (  # noqa: E402
     create_daily_excel_report,
     create_monthly_excel_report,
     create_period_excel_report,
+    create_prevision_excel_workbook,
 )
 from boulangerie_app.reports import (  # noqa: E402
     create_daily_pdf_report,
@@ -125,6 +126,7 @@ ROLE_MODULES = {
         "cash",
         "stock",
         "production",
+        "previsions",
         "orders",
         "commissions",
         "workers",
@@ -140,6 +142,7 @@ ROLE_MODULES = {
         "cash",
         "stock",
         "production",
+        "previsions",
         "orders",
         "commissions",
         "workers",
@@ -149,9 +152,9 @@ ROLE_MODULES = {
         "about",
     ],
     "Caissier": ["dashboard", "cash", "production", "orders", "commissions", "workers", "reports", "about"],
-    "Chargé de la production": ["dashboard", "production", "reports", "about"],
+    "Chargé de la production": ["dashboard", "production", "previsions", "reports", "about"],
     "Gestionnaire de stock": ["dashboard", "stock", "reports", "about"],
-    "Gestionnaire des commandes": ["dashboard", "orders", "commissions", "reports", "about"],
+    "Gestionnaire des commandes": ["dashboard", "previsions", "orders", "commissions", "reports", "about"],
 }
 
 
@@ -174,16 +177,16 @@ def _apply_configured_role_modules() -> None:
 _apply_configured_role_modules()
 
 WRITE_MODULES_BY_ROLE = {
-    "Admin": {"orders", "cash", "stock", "production", "workers", "users", "history", "closures", "backups"},
+    "Admin": {"orders", "cash", "stock", "production", "previsions", "workers", "users", "history", "closures", "backups"},
     "Directeur Général": {"history"},
     "Caissier": {"cash", "workers"},
-    "Chargé de la production": {"production"},
-    "Gestionnaire des commandes": {"orders"},
+    "Chargé de la production": {"production", "previsions"},
+    "Gestionnaire des commandes": {"orders", "previsions"},
     "Gestionnaire de stock": {"stock"},
 }
 
 READ_ONLY_MODULES_BY_ROLE = {
-    "Directeur Général": {"orders", "cash", "stock", "production", "commissions", "workers", "users"},
+    "Directeur Général": {"orders", "cash", "stock", "production", "previsions", "commissions", "workers", "users"},
     "Caissier": {"orders", "production", "commissions"},
 }
 
@@ -1379,6 +1382,32 @@ class WebProHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if path == "/api/previsions":
+            _require_module(session, "previsions")
+            default_date = (date.today() + timedelta(days=1)).isoformat()
+            selected_date = _query_value(query, "date", default_date)
+            selected_date_value = _date_value(selected_date)
+            show_all = _query_value(query, "all", "0") == "1"
+            rows = (
+                DatabaseHelper.list_previsions()
+                if show_all
+                else DatabaseHelper.list_previsions_by_date(selected_date_value)
+            )
+            summary = (
+                DatabaseHelper.get_global_prevision_summary()
+                if show_all
+                else DatabaseHelper.get_prevision_summary_for_date(selected_date_value)
+            )
+            self._send_json(
+                {
+                    "ok": True,
+                    "rows": rows,
+                    "summary": summary,
+                    "selectedDate": selected_date_value.isoformat(),
+                    "all": show_all,
+                }
+            )
+            return
         if path == "/api/commissions":
             _require_module(session, "commissions")
             selected_date = _query_value(query, "date", _today())
@@ -1834,6 +1863,73 @@ class WebProHandler(BaseHTTPRequestHandler):
             _log_web_activity(session, "Production", "Production enregistrée", production_date.isoformat())
             self._send_json({"ok": True})
             return
+        if path == "/api/previsions":
+            _require_module(session, "previsions", write=True)
+            prevision_date = _date_value(payload.get("date") or (date.today() + timedelta(days=1)))
+            args = [
+                prevision_date,
+                _clean(payload.get("location")),
+                _clean(payload.get("client")),
+                _clean(payload.get("status")),
+                _int(payload.get("square1500")),
+                _int(payload.get("square1000")),
+                _int(payload.get("baguette500")),
+                _int(payload.get("baguette1000")),
+            ]
+            record_id = _int(payload.get("id"))
+            if record_id:
+                updated = DatabaseHelper.update_prevision_order(record_id, *args)
+                if not updated:
+                    raise ValueError("Prévision introuvable.")
+                action = "Prévision modifiée"
+            else:
+                DatabaseHelper.add_prevision_order(*args)
+                action = "Prévision enregistrée"
+            _log_web_activity(
+                session,
+                "Prévisions",
+                action,
+                (
+                    f"{prevision_date.isoformat()} | {args[1]} | {args[2]} | {args[3]} | "
+                    f"Carré 1.500 : {args[4]} | Carré 1.000 : {args[5]} | "
+                    f"Baguette 500 : {args[6]} | Baguette 1.000 : {args[7]}"
+                ),
+            )
+            self._send_json({"ok": True})
+            return
+        if path == "/api/previsions/export":
+            _require_module(session, "previsions")
+            prevision_date = _date_value(payload.get("date") or (date.today() + timedelta(days=1)))
+            generated_by = str(session.get("fullName", "") or session.get("identifiant", ""))
+            role = str(session.get("role", ""))
+            reports_dir = DatabaseHelper.get_reports_dir_for_user(str(session.get("identifiant", "")))
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%H%M%S")
+            destination = reports_dir / (
+                f"fiches-prevision-production-{prevision_date.strftime('%Y%m%d')}-{timestamp}.xlsx"
+            )
+            report_path = create_prevision_excel_workbook(
+                prevision_date,
+                destination,
+                generated_by=generated_by,
+                generated_role=role,
+            )
+            _log_web_activity(
+                session,
+                "Prévisions",
+                "Fiches de prévision générées",
+                f"{prevision_date.isoformat()} | {report_path}",
+            )
+            file_token = _create_report_file_token(session, Path(report_path))
+            self._send_json(
+                {
+                    "ok": True,
+                    "path": str(report_path),
+                    "name": Path(report_path).name,
+                    "url": f"/api/reports/file?token={quote(file_token)}",
+                }
+            )
+            return
         if path == "/api/workers":
             _require_module(session, "workers", write=True)
             args = [
@@ -2116,6 +2212,14 @@ class WebProHandler(BaseHTTPRequestHandler):
             _require_module(session, "production", write=True)
             DatabaseHelper.delete_production_day(record_id)
             _log_web_activity(session, "Production", "Production supprimée", f"Id {record_id}")
+            self._send_json({"ok": True})
+            return
+        if path == "/api/previsions":
+            _require_module(session, "previsions", write=True)
+            deleted = DatabaseHelper.delete_prevision_day(record_id)
+            if not deleted:
+                raise ValueError("Prévision introuvable.")
+            _log_web_activity(session, "Prévisions", "Prévision supprimée", f"Id {record_id}")
             self._send_json({"ok": True})
             return
         if path == "/api/workers":

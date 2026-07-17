@@ -1,4 +1,4 @@
-const CACHE_NAME = "lomoto-web-pro-1.5.6-previsions-operations-20260717";
+const CACHE_NAME = "lomoto-web-pro-1.5.7-previsions-web-android-20260717";
 const APP_SHELL = [
   "/",
   "/index.html",
