@@ -4114,7 +4114,7 @@ class DatabaseHelper:
         baguette_1000: int,
     ) -> None:
         target_date = cls._coerce_date(target_date)
-        cls.ensure_day_open_for_write(target_date, "la prévision")
+        cls.ensure_prevision_date_open_for_write(target_date)
         clean_localisation, clean_client, clean_status = cls._validate_prevision_order_values(
             localisation,
             client,
@@ -4157,7 +4157,10 @@ class DatabaseHelper:
     ) -> int:
         target_date = cls._coerce_date(target_date)
         original_date_text = cls._get_record_date_text("PrevisionsCommandes", "DatePrevision", prevision_id)
-        cls._ensure_update_dates_open("la prévision", original_date_text, target_date)
+        if original_date_text:
+            cls.ensure_prevision_date_open_for_write(original_date_text)
+        if original_date_text != target_date.strftime(DB_DATE_FORMAT):
+            cls.ensure_prevision_date_open_for_write(target_date)
         clean_localisation, clean_client, clean_status = cls._validate_prevision_order_values(
             localisation,
             client,
@@ -4205,7 +4208,7 @@ class DatabaseHelper:
         observations: str = "",
     ) -> None:
         target_date = cls._coerce_date(target_date)
-        cls.ensure_day_open_for_write(target_date, "la prévision")
+        cls.ensure_prevision_date_open_for_write(target_date)
         if min(planned_trays, flour_planned, yeast_planned, salt_planned, oil_planned) < 0:
             raise ValueError("Les valeurs de prévision ne peuvent pas être négatives.")
 
@@ -4262,12 +4265,12 @@ class DatabaseHelper:
     def delete_prevision_day(cls, prevision_id: int) -> int:
         original_date_text = cls._get_record_date_text("PrevisionsCommandes", "DatePrevision", prevision_id)
         if original_date_text:
-            cls.ensure_day_open_for_write(original_date_text, "la prévision")
+            cls.ensure_prevision_date_open_for_write(original_date_text)
             return cls._execute("DELETE FROM PrevisionsCommandes WHERE Id = ?", (prevision_id,))
 
         legacy_date_text = cls._get_record_date_text("PrevisionsProduction", "DatePrevision", prevision_id)
         if legacy_date_text:
-            cls.ensure_day_open_for_write(legacy_date_text, "la prévision")
+            cls.ensure_prevision_date_open_for_write(legacy_date_text)
         return cls._execute("DELETE FROM PrevisionsProduction WHERE Id = ?", (prevision_id,))
 
     @staticmethod
@@ -5776,6 +5779,21 @@ class DatabaseHelper:
         closed_date = normalized_date.strftime("%d/%m/%Y")
         module_label = module_name.strip() or "ce module"
         message = f"La journée du {closed_date} est déjà clôturée pour {module_label}."
+        if closed_by:
+            message += f" Clôturée par {closed_by}."
+        message += " Réouvrez-la d'abord depuis le tableau de bord administrateur."
+        raise ValueError(message)
+
+    @classmethod
+    def ensure_prevision_date_open_for_write(cls, target_date: date | str) -> date:
+        """Autorise la préparation future, sans contourner une clôture existante."""
+        normalized_date = cls._coerce_date(target_date)
+        closure = cls.get_day_closure(normalized_date)
+        if not closure or bool(closure.get("EstReouverte", False)):
+            return normalized_date
+
+        closed_by = str(closure.get("NomComplet", "") or closure.get("Identifiant", "")).strip()
+        message = f"La journée du {normalized_date.strftime('%d/%m/%Y')} est déjà clôturée pour la prévision."
         if closed_by:
             message += f" Clôturée par {closed_by}."
         message += " Réouvrez-la d'abord depuis le tableau de bord administrateur."

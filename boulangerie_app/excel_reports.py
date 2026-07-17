@@ -148,6 +148,189 @@ def _safe_text(value: Any) -> str:
     return str(sanitize_spreadsheet_value("" if value is None else str(value)))
 
 
+def _prevision_quantity(row: dict[str, Any], key: str) -> int:
+    return max(int(float(row.get(key, 0) or 0)), 0)
+
+
+def _prevision_amount(row: dict[str, Any]) -> float:
+    return max(float(row.get("MontantPrevu", 0) or 0), 0.0)
+
+
+def _configure_prevision_printing(sheet: Worksheet, repeat_row: int) -> None:
+    sheet.freeze_panes = f"A{repeat_row + 1}"
+    sheet.print_title_rows = f"1:{repeat_row}"
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.page_margins.left = 0.25
+    sheet.page_margins.right = 0.25
+    sheet.page_margins.top = 0.4
+    sheet.page_margins.bottom = 0.4
+
+
+def _write_prevision_order_sheet(
+    workbook: Workbook,
+    *,
+    title: str,
+    target_date: date,
+    rows: list[dict[str, Any]],
+    include_location: bool,
+    generated_by: str,
+    generated_role: str,
+) -> None:
+    sheet = workbook.create_sheet(title)
+    start_row = _apply_brand_header(
+        sheet,
+        _format_date(target_date),
+        f"Fiche de commande - {title}",
+        "Prévisions",
+        "Quantités prévues pour préparer la production et les livraisons.",
+        generated_by,
+        generated_role,
+    )
+    headers = (["Localisation"] if include_location else []) + [
+        "Client",
+        "Carré 1.500 FC",
+        "Carré 1.000 FC",
+        "Baguette 500 FC",
+        "Baguette 1.000 FC",
+        "Total articles",
+        "Montant prévu",
+    ]
+    for column_index, header in enumerate(headers, start=1):
+        cell = sheet.cell(start_row, column_index, header)
+        _apply_cell_style(
+            cell,
+            fill=HEADER_FILL,
+            alignment=Alignment(horizontal="center", vertical="center", wrap_text=True),
+            font=HEADER_FONT,
+        )
+
+    current_row = start_row + 1
+    for row in rows:
+        values: list[Any] = []
+        if include_location:
+            values.append(_safe_text(row.get("Localisation", "")))
+        values.extend(
+            [
+                _safe_text(row.get("Client", "")),
+                _prevision_quantity(row, "Carre1500"),
+                _prevision_quantity(row, "Carre1000"),
+                _prevision_quantity(row, "Baguette500"),
+                _prevision_quantity(row, "Baguette1000"),
+                _prevision_quantity(row, "TotalArticles"),
+                _prevision_amount(row),
+            ]
+        )
+        for column_index, value in enumerate(values, start=1):
+            cell = sheet.cell(current_row, column_index, value)
+            alignment = Alignment(horizontal="left" if column_index <= (2 if include_location else 1) else "center")
+            _apply_cell_style(cell, alignment=alignment)
+        sheet.cell(current_row, len(headers)).number_format = MONEY_FORMAT
+        current_row += 1
+
+    if rows:
+        totals = {
+            "Carre1500": sum(_prevision_quantity(row, "Carre1500") for row in rows),
+            "Carre1000": sum(_prevision_quantity(row, "Carre1000") for row in rows),
+            "Baguette500": sum(_prevision_quantity(row, "Baguette500") for row in rows),
+            "Baguette1000": sum(_prevision_quantity(row, "Baguette1000") for row in rows),
+            "TotalArticles": sum(_prevision_quantity(row, "TotalArticles") for row in rows),
+            "MontantPrevu": sum(_prevision_amount(row) for row in rows),
+        }
+        label_columns = 2 if include_location else 1
+        sheet.merge_cells(
+            start_row=current_row,
+            start_column=1,
+            end_row=current_row,
+            end_column=label_columns,
+        )
+        sheet.cell(current_row, 1, "TOTAL")
+        total_values = [
+            totals["Carre1500"],
+            totals["Carre1000"],
+            totals["Baguette500"],
+            totals["Baguette1000"],
+            totals["TotalArticles"],
+            totals["MontantPrevu"],
+        ]
+        for column_index in range(1, len(headers) + 1):
+            cell = sheet.cell(current_row, column_index)
+            if column_index > label_columns:
+                cell.value = total_values[column_index - label_columns - 1]
+            _apply_cell_style(
+                cell,
+                fill=SECTION_FILL,
+                alignment=Alignment(horizontal="center", vertical="center"),
+                font=SECTION_FONT,
+            )
+        sheet.cell(current_row, len(headers)).number_format = MONEY_FORMAT
+    else:
+        sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(headers))
+        sheet.cell(current_row, 1, "Aucune prévision enregistrée pour cette catégorie.")
+        _apply_cell_style(
+            sheet.cell(current_row, 1),
+            alignment=Alignment(horizontal="left"),
+            font=NOTE_FONT,
+        )
+
+    _configure_prevision_printing(sheet, start_row)
+    _autofit_columns(sheet, min_width=13, max_width=28)
+
+
+def _write_prevision_summary_sheet(
+    workbook: Workbook,
+    *,
+    target_date: date,
+    summary: dict[str, Any],
+    generated_by: str,
+    generated_role: str,
+) -> None:
+    sheet = workbook.active
+    sheet.title = "Résumé"
+    start_row = _apply_brand_header(
+        sheet,
+        _format_date(target_date),
+        "Résumé de la prévision de production",
+        "Prévisions",
+        "Synthèse des commandes prévues et des besoins de production.",
+        generated_by,
+        generated_role,
+    )
+    rows = [
+        ("Nombre de clients", int(summary.get("NombreClients", 0) or 0), None),
+        ("Dépositaires", int(summary.get("NombreDepositaires", 0) or 0), None),
+        ("Mamans", int(summary.get("NombreMamans", 0) or 0), None),
+        ("Carré 1.500 FC", int(summary.get("TotalCarre1500", 0) or 0), None),
+        ("Carré 1.000 FC", int(summary.get("TotalCarre1000", 0) or 0), None),
+        ("Baguette 500 FC", int(summary.get("TotalBaguette500", 0) or 0), None),
+        ("Baguette 1.000 FC", int(summary.get("TotalBaguette1000", 0) or 0), None),
+        ("Total des articles prévus", int(summary.get("TotalArticlesPrevus", 0) or 0), None),
+        ("Nombre de sacs à produire", float(summary.get("NombreSacsAProduire", 0) or 0), "0.00"),
+        ("Montant prévu", float(summary.get("MontantPrevu", 0) or 0), MONEY_FORMAT),
+    ]
+    sheet.cell(start_row, 1, "Rubrique")
+    sheet.cell(start_row, 2, "Valeur")
+    for column_index in (1, 2):
+        _apply_cell_style(
+            sheet.cell(start_row, column_index),
+            fill=HEADER_FILL,
+            alignment=Alignment(horizontal="center"),
+            font=HEADER_FONT,
+        )
+    for row_index, (label, value, number_format) in enumerate(rows, start=start_row + 1):
+        _apply_cell_style(sheet.cell(row_index, 1, label), alignment=Alignment(horizontal="left"))
+        _apply_cell_style(
+            sheet.cell(row_index, 2, value),
+            alignment=Alignment(horizontal="right"),
+            number_format=number_format,
+        )
+    _configure_prevision_printing(sheet, start_row)
+    _autofit_columns(sheet, min_width=18, max_width=38)
+
+
 def _summarize_production_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
     keys = [
         "NombreBacsCommandes",
@@ -2234,6 +2417,60 @@ def _build_period_commissions_sheet(workbook: Workbook, context: dict[str, Any])
         sheet["A4"] = "Aucune commission enregistrée pour cette période."
 
     _autofit_columns(sheet)
+
+
+def create_prevision_excel_workbook(
+    target_date: date,
+    destination: str | Path | None = None,
+    generated_by: str = "",
+    generated_role: str = "",
+) -> Path:
+    report_path = Path(destination) if destination is not None else DatabaseHelper.build_report_path(
+        f"fiches-prevision-production-{target_date.strftime('%Y%m%d')}"
+    )
+    if report_path.suffix.lower() != ".xlsx":
+        report_path = report_path.with_suffix(".xlsx")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows = DatabaseHelper.list_previsions_by_date(target_date)
+    summary = DatabaseHelper.get_prevision_summary_for_date(target_date)
+    depositary_rows = [row for row in rows if str(row.get("Statut") or "").strip() == "Dépositaire"]
+    mama_rows = [row for row in rows if str(row.get("Statut") or "").strip() == "Maman"]
+    workbook = Workbook()
+
+    try:
+        _write_prevision_summary_sheet(
+            workbook,
+            target_date=target_date,
+            summary=summary,
+            generated_by=generated_by,
+            generated_role=generated_role,
+        )
+        _write_prevision_order_sheet(
+            workbook,
+            title="Dépositaires",
+            target_date=target_date,
+            rows=depositary_rows,
+            include_location=True,
+            generated_by=generated_by,
+            generated_role=generated_role,
+        )
+        _write_prevision_order_sheet(
+            workbook,
+            title="Mamans",
+            target_date=target_date,
+            rows=mama_rows,
+            include_location=False,
+            generated_by=generated_by,
+            generated_role=generated_role,
+        )
+        workbook.save(report_path)
+    except Exception as exc:
+        raise ReportGenerationError("Impossible de générer les fiches de prévision Excel.") from exc
+    finally:
+        workbook.close()
+
+    return report_path
 
 
 def create_daily_excel_report(

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import threading
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import servicemanager  # type: ignore
 import win32event  # type: ignore
@@ -23,6 +25,34 @@ from boulangerie_web_pro.server import WebProHandler
 
 
 WEB_PRO_PORT = 8787
+
+
+def inspect_sqlite_database(database_path: str | Path) -> tuple[str, int]:
+    path = Path(database_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Sauvegarde SQLite introuvable : {path}")
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0] or "")
+        table_count = int(
+            connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'").fetchone()[0] or 0
+        )
+    finally:
+        connection.close()
+    if integrity.lower() != "ok" or table_count < 5:
+        raise sqlite3.DatabaseError(f"Integrity={integrity}; tables={table_count}")
+    return integrity, table_count
+
+
+def run_sqlite_integrity_check(database_path: str | Path) -> int:
+    try:
+        integrity, table_count = inspect_sqlite_database(database_path)
+    except Exception as exc:  # noqa: BLE001 - message required by scheduled task
+        print(f"ECHEC controle SQLite : {exc}", file=sys.stderr)
+        return 1
+    print(f"OK integrity={integrity}; tables={table_count}")
+    return 0
 
 
 class CentralServerWindowsService(win32serviceutil.ServiceFramework):
@@ -73,6 +103,8 @@ class CentralServerWindowsService(win32serviceutil.ServiceFramework):
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--check-sqlite":
+        raise SystemExit(run_sqlite_integrity_check(sys.argv[2]))
     if len(sys.argv) == 1:
         servicemanager.Initialize()
         servicemanager.PrepareToHostSingle(CentralServerWindowsService)

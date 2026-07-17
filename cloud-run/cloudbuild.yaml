@@ -5,11 +5,12 @@ steps:
       - -f
       - cloud-run/Dockerfile
       - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:latest
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:${_TAG}
       - .
 images:
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:latest
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE}:${_TAG}
 substitutions:
   _REGION: europe-west1
   _REPOSITORY: boulangerie-lomoto
   _SERVICE: boulangerie-lomoto-api
+  _TAG: dev

@@ -35,34 +35,25 @@ try {
     $copyPath = Join-Path $testDir "boulangerie-test.db"
     Copy-Item -LiteralPath $BackupPath -Destination $copyPath -Force
 
-    $python = Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $python) {
-        $python = Get-Command py -ErrorAction SilentlyContinue | Select-Object -First 1
-    }
-    if (-not $python) {
-        throw "Python introuvable pour verifier l'integrite SQLite."
-    }
-
-    $checkCode = @"
-import sqlite3, sys
-db = sys.argv[1]
-con = sqlite3.connect(db)
-try:
-    result = con.execute("PRAGMA integrity_check").fetchone()[0]
-    tables = con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
-finally:
-    con.close()
-if result != "ok" or tables < 5:
-    raise SystemExit(f"Integrity={result}; tables={tables}")
-print(f"OK integrity={result}; tables={tables}")
-"@
-    $checkFile = Join-Path $testDir "check_sqlite.py"
-    Set-Content -LiteralPath $checkFile -Value $checkCode -Encoding UTF8
-    if ($python.Name -eq "py.exe") {
-        & $python.Source -3 $checkFile $copyPath
+    $serviceChecker = Join-Path $env:ProgramFiles "Boulangerie Lomoto\Boulangerie Lomoto Service.exe"
+    if (Test-Path -LiteralPath $serviceChecker) {
+        & $serviceChecker --check-sqlite $copyPath
     }
     else {
-        & $python.Source $checkFile $copyPath
+        $python = Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $python) {
+            $python = Get-Command py -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        if (-not $python) {
+            throw "Ni le service Boulangerie Lomoto ni Python ne permettent de verifier SQLite."
+        }
+        $checkCode = 'import sqlite3,sys; con=sqlite3.connect(sys.argv[1]); result=con.execute("PRAGMA integrity_check").fetchone()[0]; tables=con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type=''table''").fetchone()[0]; con.close(); print(f"Integrity={result}; tables={tables}"); raise SystemExit(0 if result == "ok" and tables >= 5 else 1)'
+        if ($python.Name -eq "py.exe") {
+            & $python.Source -3 -c $checkCode $copyPath
+        }
+        else {
+            & $python.Source -c $checkCode $copyPath
+        }
     }
     if ($LASTEXITCODE -ne 0) {
         throw "Controle SQLite echoue."

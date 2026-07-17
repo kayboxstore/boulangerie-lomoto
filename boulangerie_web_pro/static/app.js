@@ -35,7 +35,7 @@ const state = {
   user: null,
   client: null,
   license: null,
-  appVersion: "1.5.5",
+  appVersion: "1.5.6",
   active: "dashboard",
   loading: false,
   error: "",
@@ -372,7 +372,7 @@ function loginView() {
       <section class="login-card">
         <div class="brand-mark">
           <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="Logo" />
-          <span>Version web professionnelle ${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.5")}</span>
+          <span>Version web professionnelle ${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.6")}</span>
         </div>
         <p class="eyebrow">Application connectée</p>
         <h1>${escapeHtml(appName()).toUpperCase()}</h1>
@@ -407,7 +407,7 @@ function shell(content) {
             <div>
               <strong>${escapeHtml(appName()).toUpperCase()}</strong>
               <span>Pain Lia o Tonda</span>
-              <small>Données Windows v${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.5")}</small>
+              <small>Données Windows v${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.6")}</small>
             </div>
           </div>
           <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-expanded="false" aria-controls="sidebarMenu" title="Ouvrir le menu">☰</button>
@@ -433,7 +433,7 @@ function shell(content) {
             </div>
             <div class="version-card">
               <span>Version</span>
-              <strong>${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.5")}</strong>
+              <strong>${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.6")}</strong>
             </div>
           </div>
         </header>

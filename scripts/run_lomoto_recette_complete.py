@@ -19,7 +19,9 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "1.5.5"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+VERSION = "1.5.6"
 DIRECTOR_ROLE = "Directeur G\u00e9n\u00e9ral"
 PRODUCTION_ROLE = "Charg\u00e9 de la production"
 DEPOSITARY_STATUS = "D\u00e9positaire"
@@ -63,7 +65,7 @@ class ApiClient:
         data = None
         request_headers = {
             "Accept": "application/json",
-            "User-Agent": "LomotoRecette/1.5.5",
+            "User-Agent": "LomotoRecette/1.5.6",
         }
         if payload is not None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -109,7 +111,7 @@ class ApiClient:
     def text(self, path: str) -> str:
         request = urllib.request.Request(
             self.base_url + path,
-            headers={"User-Agent": "LomotoRecette/1.5.5", "Cache-Control": "no-cache"},
+            headers={"User-Agent": "LomotoRecette/1.5.6", "Cache-Control": "no-cache"},
             method="GET",
         )
         with self.opener.open(request, timeout=30) as response:
@@ -120,7 +122,6 @@ class ApiClient:
         self.user = payload["user"]
         self.csrf_token = str(self.user.get("csrfToken") or "")
         return payload
-
 
 class RecetteRunner:
     def __init__(self, keep_server: bool = False) -> None:
@@ -166,6 +167,7 @@ class RecetteRunner:
             self.step("Creation des roles et unicite du Directeur General", self.create_roles_and_check_director_unique)
             self.step("Acces par role et modules visibles", self.check_role_access)
             self.step("Session unique et deconnexion forcee par Admin", self.check_single_session_and_admin_disconnect)
+            self.step("Previsions futures et droits du profil production", self.check_prevision_flow)
             self.step("Production journaliere", self.create_production)
             self.step("Stock : approvisionnement, sortie et parametres", self.create_stock_entries)
             self.step("Commandes : mamans, depositaires, dette et avance", self.create_orders_and_advances)
@@ -367,7 +369,7 @@ class RecetteRunner:
     def check_manual_login_form(self) -> str:
         html = self.admin.text("/")
         js = self.admin.text("/app.js?recette=1")
-        assert "webpro-production-153" in html
+        assert "webpro-1.5.6-20260717" in html
         assert 'name="username"' in js
         assert 'autocomplete="username"' in js
         assert 'autocomplete="current-password"' in js
@@ -423,7 +425,19 @@ class RecetteRunner:
 
     def login_role(self, identifiant: str) -> ApiClient:
         client = ApiClient(self.base_url)
-        client.login(identifiant, str(self.clients[f"{identifiant}:password"]))  # type: ignore[index]
+        password_key = f"{identifiant}:password"
+        password = str(self.clients[password_key])  # type: ignore[index]
+        client.login(identifiant, password)
+        if client.user.get("mustChangePassword"):
+            new_password = f"{password}N8!"
+            client.post(
+                "/api/password",
+                {"currentPassword": password, "newPassword": new_password},
+            )
+            client.csrf_token = ""
+            client.user = {}
+            client.login(identifiant, new_password)
+            self.clients[password_key] = new_password  # type: ignore[assignment]
         self.clients[identifiant] = client  # type: ignore[assignment]
         return client
 
@@ -515,6 +529,32 @@ class RecetteRunner:
         summary = production.get(f"/api/production?date={self.today.isoformat()}")["summary"]
         assert int(summary.get("NombreBacsProduits") or 0) == 20
         return "20 bacs produits, 2 sacs"
+
+    def check_prevision_flow(self) -> str:
+        from boulangerie_app.connected_mode import ConnectionSettings
+        from boulangerie_app.database import DatabaseHelper
+        from boulangerie_app.excel_reports import create_prevision_excel_workbook
+
+        DatabaseHelper.set_storage_root(self.data_dir)
+        DatabaseHelper.apply_connection_settings(ConnectionSettings(mode="local"), persist=False)
+        DatabaseHelper.initialize_local_database()
+        DatabaseHelper.add_prevision_order(
+            self.tomorrow, "Dépôt 1", "Client Prévision", DEPOSITARY_STATUS, 5, 0, 3, 0
+        )
+        DatabaseHelper.add_prevision_order(self.tomorrow, "", "Maman Prévision", "Maman", 0, 2, 0, 1)
+        rows = DatabaseHelper.list_previsions_by_date(self.tomorrow)
+        summary = DatabaseHelper.get_prevision_summary_for_date(self.tomorrow)
+        workbook = create_prevision_excel_workbook(
+            self.tomorrow,
+            self.output_dir / "fiches-prevision-recette.xlsx",
+            generated_by="Production Recette",
+            generated_role=PRODUCTION_ROLE,
+        )
+        assert len(rows) == 2
+        assert int(summary.get("TotalArticlesPrevus") or 0) == 11
+        assert int(float(summary.get("MontantPrevu") or 0)) == 12000
+        assert workbook.exists() and workbook.stat().st_size > 0
+        return "2 lignes futures, 11 articles, 12 000 FC, export Excel OK"
 
     def create_stock_entries(self) -> str:
         stock = self.clients["stock.recette"]  # type: ignore[assignment]
@@ -749,7 +789,7 @@ class RecetteRunner:
 
 
 def fetch_json(url: str, timeout: int = 15) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "LomotoRecette/1.5.5"})
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "LomotoRecette/1.5.6"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8-sig"))
 

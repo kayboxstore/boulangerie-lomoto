@@ -26,8 +26,9 @@ $ScriptRootResolved = (Resolve-Path -LiteralPath $PSScriptRoot).Path
 $BackupScript = Join-Path $ScriptRootResolved "sauvegarde-automatique-quotidienne.ps1"
 $ExternalBackupScript = Join-Path $ScriptRootResolved "sauvegarde-externe-hebdomadaire.ps1"
 $WatchdogScript = Join-Path $ScriptRootResolved "surveiller-service-lomoto.ps1"
+$RestoreTestScript = Join-Path $ScriptRootResolved "tester-restauration-sauvegarde-lomoto.ps1"
 
-foreach ($script in @($BackupScript, $ExternalBackupScript, $WatchdogScript)) {
+foreach ($script in @($BackupScript, $ExternalBackupScript, $WatchdogScript, $RestoreTestScript)) {
     if (-not (Test-Path -LiteralPath $script)) {
         throw "Script introuvable: $script"
     }
@@ -56,6 +57,17 @@ Register-ScheduledTask `
     -Principal $taskPrincipal `
     -Settings $taskSettings `
     -Description "Cree une sauvegarde SQLite quotidienne via le service local Boulangerie Lomoto." `
+    -Force | Out-Null
+
+$restoreTestTask = "Boulangerie Lomoto - Test restauration hebdomadaire"
+$restoreTestTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At "02:00"
+Register-ScheduledTask `
+    -TaskName $restoreTestTask `
+    -Action (New-PowerShellAction -ScriptPath $RestoreTestScript) `
+    -Trigger $restoreTestTrigger `
+    -Principal $taskPrincipal `
+    -Settings $taskSettings `
+    -Description "Controle chaque semaine une copie de la derniere sauvegarde SQLite, sans toucher a la base active." `
     -Force | Out-Null
 
 $weeklyBackupTask = "Boulangerie Lomoto - Sauvegarde externe hebdomadaire"
@@ -88,3 +100,4 @@ Write-Host "Taches planifiees installees :" -ForegroundColor Green
 Write-Host "- $dailyBackupTask"
 Write-Host "- $weeklyBackupTask"
 Write-Host "- $watchdogTask"
+Write-Host "- $restoreTestTask"

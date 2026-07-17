@@ -10,7 +10,8 @@ $OutputPath = Join-Path $MaintenanceRoot "taches-production-status.json"
 $TaskNames = @(
     "Boulangerie Lomoto - Sauvegarde quotidienne",
     "Boulangerie Lomoto - Sauvegarde externe hebdomadaire",
-    "Boulangerie Lomoto - Surveillance service"
+    "Boulangerie Lomoto - Surveillance service",
+    "Boulangerie Lomoto - Test restauration hebdomadaire"
 )
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -39,12 +40,14 @@ New-Item -ItemType Directory -Force -Path $MaintenanceRoot | Out-Null
 $rows = foreach ($taskName in $TaskNames) {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($task) {
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
         [ordered]@{
             taskName = $taskName
             exists = $true
             state = [string]$task.State
-            lastRunTime = (Get-ScheduledTaskInfo -TaskName $taskName).LastRunTime
-            nextRunTime = (Get-ScheduledTaskInfo -TaskName $taskName).NextRunTime
+            lastRunTime = $taskInfo.LastRunTime
+            lastResult = $taskInfo.LastTaskResult
+            nextRunTime = $taskInfo.NextRunTime
         }
     }
     else {
@@ -53,6 +56,7 @@ $rows = foreach ($taskName in $TaskNames) {
             exists = $false
             state = ""
             lastRunTime = ""
+            lastResult = ""
             nextRunTime = ""
         }
     }

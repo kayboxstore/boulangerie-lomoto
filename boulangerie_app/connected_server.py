@@ -120,6 +120,14 @@ _ORDER_READ_METHODS = {
     "get_debt_alerts",
 }
 
+_PREVISION_READ_METHODS = {
+    "get_prevision_for_date",
+    "get_prevision_summary_for_date",
+    "list_previsions",
+    "list_previsions_by_date",
+    "get_global_prevision_summary",
+}
+
 _CASH_READ_METHODS = {
     "get_cash_for_date",
     "get_accumulated_debt_totals_for_date",
@@ -149,6 +157,7 @@ _CLOSURE_READ_METHODS = {
 _READ_METHODS = (
     _STOCK_READ_METHODS
     | _PRODUCTION_READ_METHODS
+    | _PREVISION_READ_METHODS
     | _ORDER_READ_METHODS
     | _CASH_READ_METHODS
     | _COMMISSION_READ_METHODS
@@ -242,14 +251,24 @@ _DIRECTOR_GENERAL_READ_METHODS = {
     "get_recent_activity_summary",
 }
 
+_PREVISION_WRITE_METHODS = {
+    "add_prevision_order",
+    "update_prevision_order",
+    "save_prevision_day",
+    "delete_prevision_day",
+}
+
 _ROLE_READ_METHODS = {
     "Gestionnaire de stock": _STOCK_READ_METHODS | _CLOSURE_READ_METHODS,
     "Chargé de la production": (
         _PRODUCTION_READ_METHODS
+        | _PREVISION_READ_METHODS
         | _CLOSURE_READ_METHODS
         | {"get_orders_summary_for_date", "get_stock_sacks_used_for_date"}
     ),
-    "Gestionnaire des commandes": _ORDER_READ_METHODS | _COMMISSION_READ_METHODS | _CLOSURE_READ_METHODS,
+    "Gestionnaire des commandes": (
+        _PREVISION_READ_METHODS | _ORDER_READ_METHODS | _COMMISSION_READ_METHODS | _CLOSURE_READ_METHODS
+    ),
     "Caissier": (
         _CASH_READ_METHODS
         | _PRODUCTION_READ_METHODS
@@ -262,8 +281,8 @@ _ROLE_READ_METHODS = {
 
 _ROLE_WRITE_METHODS = {
     "Gestionnaire de stock": _STOCK_WRITE_METHODS,
-    "Chargé de la production": _PRODUCTION_WRITE_METHODS,
-    "Gestionnaire des commandes": _ORDER_WRITE_METHODS,
+    "Chargé de la production": _PRODUCTION_WRITE_METHODS | _PREVISION_WRITE_METHODS,
+    "Gestionnaire des commandes": _PREVISION_WRITE_METHODS | _ORDER_WRITE_METHODS,
     "Caissier": _CASH_WRITE_METHODS | _WORKER_WRITE_METHODS,
 }
 
@@ -830,6 +849,14 @@ def run_server(
     api_token: str = "",
     data_dir: str | Path | None = None,
 ) -> None:
+    require_configured_token = bool(os.environ.get("K_SERVICE", "").strip()) or str(
+        os.environ.get("BOULANGERIE_REQUIRE_CONFIGURED_API_TOKEN", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if require_configured_token and not api_token.strip():
+        raise RuntimeError(
+            "BOULANGERIE_API_TOKEN doit être fourni par un gestionnaire de secrets "
+            "pour démarrer le serveur dans cet environnement."
+        )
     handle = start_embedded_server(host=host, port=port, api_token=api_token, data_dir=data_dir)
     print(f"{APP_NAME} - serveur central actif")
     print(f"Version : {APP_VERSION}")
@@ -859,7 +886,7 @@ def main() -> None:
     parser.add_argument(
         "--token",
         default=os.environ.get("BOULANGERIE_API_TOKEN", ""),
-        help="Jeton d'acces optionnel.",
+        help="Jeton d'acces (obligatoire sur Cloud Run, généré localement s'il est omis).",
     )
     parser.add_argument(
         "--data-dir",

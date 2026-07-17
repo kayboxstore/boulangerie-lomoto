@@ -44,7 +44,12 @@ from .connected_server import (
 )
 from .database import AUTO_BACKUP_PREFIX, ActiveSessionConflictError, AuthenticatedUser, DatabaseHelper
 from .demo_data import DEMO_ADMIN_PASSWORD, DEMO_ADMIN_USERNAME
-from .excel_reports import create_daily_excel_report, create_monthly_excel_report, create_period_excel_report
+from .excel_reports import (
+    create_daily_excel_report,
+    create_monthly_excel_report,
+    create_period_excel_report,
+    create_prevision_excel_workbook,
+)
 from .reports import (
     ReportGenerationError,
     create_daily_pdf_report,
@@ -158,17 +163,18 @@ ROLES = [
     "Gestionnaire des commandes",
 ]
 ROLE_MODULE_ACCESS = {
-    "Admin": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
-    "Directeur Général": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
+    "Admin": {"Caisse", "Stock", "Production", "Prévisions", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
+    "Directeur Général": {"Caisse", "Stock", "Production", "Prévisions", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
     "Caissier": {"Caisse", "Production", "Commandes", "Commissions", "Travailleurs"},
-    "Chargé de la production": {"Production"},
+    "Chargé de la production": {"Production", "Prévisions"},
     "Gestionnaire de stock": {"Stock"},
-    "Gestionnaire des commandes": {"Commandes", "Commissions"},
+    "Gestionnaire des commandes": {"Prévisions", "Commandes", "Commissions"},
 }
 MODULE_ID_TO_WINDOWS_LABEL = {
     "cash": "Caisse",
     "stock": "Stock",
     "production": "Production",
+    "previsions": "Prévisions",
     "orders": "Commandes",
     "commissions": "Commissions",
     "workers": "Travailleurs",
@@ -191,7 +197,7 @@ def _apply_configured_role_modules() -> None:
 _apply_configured_role_modules()
 
 ROLE_READ_ONLY_MODULES = {
-    "Directeur Général": {"Caisse", "Stock", "Production", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
+    "Directeur Général": {"Caisse", "Stock", "Production", "Prévisions", "Commandes", "Commissions", "Travailleurs", "Utilisateurs"},
     "Caissier": {"Production", "Commandes", "Commissions"},
 }
 
@@ -3587,6 +3593,7 @@ class DashboardWindow(tk.Toplevel):
             ("Caisse", self.open_cash),
             ("Stock", self.open_stock),
             ("Production", self.open_production),
+            ("Prévisions", self.open_previsions),
             ("Commandes", self.open_orders),
             ("Commissions", self.open_commissions),
             ("Travailleurs", self.open_workers_payroll),
@@ -4931,6 +4938,11 @@ class DashboardWindow(tk.Toplevel):
         if not self.can_access("Production"):
             return
         self.open_large_module(ProductionWindow, "la production")
+
+    def open_previsions(self) -> None:
+        if not self.can_access("Prévisions"):
+            return
+        self.open_large_module(PrevisionWindow, "les prévisions")
 
     def open_orders(self) -> None:
         if not self.can_access("Commandes"):
@@ -7556,7 +7568,7 @@ class PrevisionWindow(BaseModuleWindow):
             self.date_field,
             [self.save_button, self.edit_button, self.delete_button],
         )
-        self.hide_read_only_buttons("Commandes", [self.save_button, self.edit_button, self.delete_button])
+        self.hide_read_only_buttons("Prévisions", [self.save_button, self.edit_button, self.delete_button])
         self._on_status_change()
 
     def _make_label_value(
@@ -7638,6 +7650,8 @@ class PrevisionWindow(BaseModuleWindow):
         return target_date, localisation, client, status, square_1500, square_1000, baguette_500, baguette_1000
 
     def save_prevision(self) -> None:
+        if not self.ensure_module_writable("Prévisions"):
+            return
         validated = self.validate_prevision()
         if validated is None:
             return
@@ -7928,6 +7942,8 @@ class PrevisionWindow(BaseModuleWindow):
         )
 
     def load_prevision_for_edit(self) -> None:
+        if not self.ensure_module_writable("Prévisions"):
+            return
         row = self.selected_prevision_row()
         if row is None or row.get("RowKind") != "detail":
             messagebox.showwarning("Prévision", "Veuillez sélectionner une ligne client dans une des grilles.")
@@ -7949,6 +7965,8 @@ class PrevisionWindow(BaseModuleWindow):
         messagebox.showinfo("Prévision", "La prévision a été chargée. Modifiez-la puis enregistrez.")
 
     def delete_prevision(self) -> None:
+        if not self.ensure_module_writable("Prévisions"):
+            return
         row = self.selected_prevision_row()
         if row is None or row.get("RowKind") != "detail":
             messagebox.showwarning("Prévision", "Veuillez sélectionner une ligne client dans une des grilles.")
@@ -7984,7 +8002,12 @@ class PrevisionWindow(BaseModuleWindow):
             reports_dir = DatabaseHelper.get_reports_dir_for_user(self.parent.user.identifiant)
             timestamp = datetime.now().strftime("%H%M%S")
             output_path = reports_dir / f"fiches-prevision-production-{target_date.strftime('%Y%m%d')}-{timestamp}.xlsx"
-            created_path = create_prevision_excel_workbook(target_date, output_path)
+            created_path = create_prevision_excel_workbook(
+                target_date,
+                output_path,
+                generated_by=self.parent.user.display_name,
+                generated_role=self.parent.user.role,
+            )
             log_user_action(
                 self,
                 "Prévision",
