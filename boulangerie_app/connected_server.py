@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -24,6 +25,7 @@ from .connected_mode import (
     deserialize_value,
     serialize_value,
 )
+from .client_config import get_public_url
 from .version import APP_NAME, APP_VERSION
 
 
@@ -75,7 +77,7 @@ _AUTO_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
 _AUTO_BACKUP_RETRY_INTERVAL_SECONDS = 5 * 60
 _EMAIL_NOTIFICATION_INTERVAL_SECONDS = 30
 
-_READ_METHODS = {
+_STOCK_READ_METHODS = {
     "get_stock_configuration",
     "get_stock_summary",
     "get_low_stock_alerts",
@@ -89,22 +91,21 @@ _READ_METHODS = {
     "count_stock_supplies_for_period",
     "list_stock_supplies",
     "list_stock_supplies_by_date",
+}
+
+_PRODUCTION_READ_METHODS = {
     "get_production_for_date",
     "get_production_summary_for_date",
     "list_productions",
     "list_productions_by_date",
     "get_global_production_summary",
     "get_production_summary_for_period",
+}
+
+_ORDER_READ_METHODS = {
     "get_orders_summary_for_date",
     "get_global_orders_summary",
     "get_orders_summary_for_period",
-    "get_cash_for_date",
-    "get_accumulated_debt_totals_for_date",
-    "list_cash_days",
-    "list_cash_days_by_date",
-    "list_cash_balance_by_period",
-    "get_total_cash",
-    "get_cash_total_for_period",
     "list_orders",
     "list_orders_by_date",
     "get_client_advance_balance",
@@ -113,6 +114,19 @@ _READ_METHODS = {
     "find_similar_order",
     "count_orders_with_debt",
     "get_debt_alerts",
+}
+
+_CASH_READ_METHODS = {
+    "get_cash_for_date",
+    "get_accumulated_debt_totals_for_date",
+    "list_cash_days",
+    "list_cash_days_by_date",
+    "list_cash_balance_by_period",
+    "get_total_cash",
+    "get_cash_total_for_period",
+}
+
+_COMMISSION_READ_METHODS = {
     "list_commissions",
     "list_commissions_by_date",
     "list_clients_from_orders_by_date",
@@ -120,10 +134,22 @@ _READ_METHODS = {
     "find_existing_commission",
     "get_total_commissions",
     "get_total_commissions_for_period",
+}
+
+_CLOSURE_READ_METHODS = {
     "get_day_closure",
     "is_day_closed",
     "list_day_closures",
 }
+
+_READ_METHODS = (
+    _STOCK_READ_METHODS
+    | _PRODUCTION_READ_METHODS
+    | _ORDER_READ_METHODS
+    | _CASH_READ_METHODS
+    | _COMMISSION_READ_METHODS
+    | _CLOSURE_READ_METHODS
+)
 
 _STOCK_WRITE_METHODS = {
     "initialize_stock_day",
@@ -211,6 +237,38 @@ _DIRECTOR_GENERAL_READ_METHODS = {
     "list_activity_logs",
     "get_recent_activity_summary",
 }
+
+_ROLE_READ_METHODS = {
+    "Gestionnaire de stock": _STOCK_READ_METHODS | _CLOSURE_READ_METHODS,
+    "Chargé de la production": (
+        _PRODUCTION_READ_METHODS
+        | _CLOSURE_READ_METHODS
+        | {"get_orders_summary_for_date", "get_stock_sacks_used_for_date"}
+    ),
+    "Gestionnaire des commandes": _ORDER_READ_METHODS | _COMMISSION_READ_METHODS | _CLOSURE_READ_METHODS,
+    "Caissier": (
+        _CASH_READ_METHODS
+        | _PRODUCTION_READ_METHODS
+        | _ORDER_READ_METHODS
+        | _COMMISSION_READ_METHODS
+        | _CLOSURE_READ_METHODS
+        | _WORKER_READ_METHODS
+    ),
+}
+
+_ROLE_WRITE_METHODS = {
+    "Gestionnaire de stock": _STOCK_WRITE_METHODS,
+    "Chargé de la production": _PRODUCTION_WRITE_METHODS,
+    "Gestionnaire des commandes": _ORDER_WRITE_METHODS,
+    "Caissier": _CASH_WRITE_METHODS | _WORKER_WRITE_METHODS,
+}
+
+
+def _is_loopback_address(value: str) -> bool:
+    try:
+        return ipaddress.ip_address(str(value or "").split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
 
 
 def _database_helper():
@@ -303,18 +361,21 @@ def _delete_web_session(token: str) -> None:
 
 def _is_method_allowed_for_session(method_name: str, args: list[Any], session: dict[str, Any]) -> bool:
     role = str(session.get("role", ""))
+    session_identifiant = str(session.get("identifiant", "")).strip().lower()
     if method_name in {"validate_active_session", "close_active_session"}:
-        return bool(args) and str(args[0]).lower() == str(session.get("identifiant", "")).lower()
+        return bool(args) and str(args[0]).strip().lower() == session_identifiant
+
+    if method_name == "is_using_default_password":
+        return bool(args) and str(args[0]).strip().lower() == session_identifiant
+
+    if method_name == "change_user_password":
+        return bool(args) and str(args[0]).strip().lower() == session_identifiant
+
     if role == "Admin":
         return True
 
-    if method_name == "change_user_password":
-        if role == "Directeur Général":
-            return False
-        return bool(args) and str(args[0]) == str(session.get("identifiant", ""))
-
     if method_name == "trigger_email_delivery_async":
-        return True
+        return role in _ROLE_READ_METHODS or role == "Directeur Général"
 
     if method_name == "process_pending_email_notifications":
         return role in {"Admin", "Caissier"}
@@ -328,40 +389,13 @@ def _is_method_allowed_for_session(method_name: str, args: list[Any], session: d
             or method_name == "close_day"
         )
 
-    if method_name in _READ_METHODS:
-        if role == "Gestionnaire de stock":
-            method_text = method_name.lower()
-            return "stock" in method_text or method_name in {"get_day_closure", "is_day_closed", "list_day_closures"}
-        if role == "Chargé de la production":
-            return method_name in {
-                "get_production_for_date",
-                "get_production_summary_for_date",
-                "list_productions",
-                "list_productions_by_date",
-                "get_global_production_summary",
-                "get_orders_summary_for_date",
-                "get_stock_sacks_used_for_date",
-                "get_day_closure",
-                "is_day_closed",
-                "list_day_closures",
-            }
-        return True
-
-    if method_name in _WORKER_READ_METHODS:
-        return role == "Caissier"
-
     if method_name in _REPORT_METHODS:
-        return True
+        return role in _ROLE_READ_METHODS
 
-    if role == "Gestionnaire de stock":
-        return method_name in _STOCK_WRITE_METHODS
-    if role == "Chargé de la production":
-        return method_name in _PRODUCTION_WRITE_METHODS
-    if role == "Gestionnaire des commandes":
-        return method_name in _ORDER_WRITE_METHODS
-    if role == "Caissier":
-        return method_name in _CASH_WRITE_METHODS or method_name in _WORKER_WRITE_METHODS
-    return False
+    return (
+        method_name in _ROLE_READ_METHODS.get(role, set())
+        or method_name in _ROLE_WRITE_METHODS.get(role, set())
+    )
 
 
 class SyncRequestHandler(BaseHTTPRequestHandler):
@@ -388,12 +422,27 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
                 "server_port": self.server.server_port,
                 "discovery_port": REMOTE_DISCOVERY_PORT,
                 "token_required": bool(server_token.strip()),
+                "public_url": get_public_url(),
             },
         )
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path.rstrip("/") != "/rpc":
             self._send_json(404, {"ok": False, "error": {"message": "Route introuvable."}})
+            return
+        if not _is_loopback_address(str(self.client_address[0] or "")):
+            self._send_json(
+                403,
+                {
+                    "ok": False,
+                    "error": {
+                        "message": (
+                            "Le RPC HTTP direct est réservé au PC serveur. "
+                            "Utilisez l'adresse publique HTTPS de l'application."
+                        )
+                    },
+                },
+            )
             return
 
         payload = self._read_json_payload()
@@ -420,6 +469,8 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
             return
         if method_name == "create_initial_admin":
             try:
+                if not _is_loopback_address(str(self.client_address[0] or "")):
+                    raise PermissionError("La configuration initiale est réservée au PC serveur.")
                 args = deserialize_value(payload.get("args", []))
                 if not isinstance(args, list) or len(args) < 4:
                     raise ValueError("Informations du premier administrateur incomplètes.")
@@ -649,6 +700,7 @@ def _run_discovery_listener(
                         "app_version": APP_VERSION,
                         "server_port": server_port,
                         "token_required": bool(api_token.strip()),
+                        "public_url": get_public_url(),
                     },
                     ensure_ascii=True,
                 ).encode("utf-8")

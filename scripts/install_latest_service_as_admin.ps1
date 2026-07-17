@@ -13,6 +13,7 @@ $sourceCandidates = @(
 $source = $sourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 $installDir = "C:\Program Files\Boulangerie Lomoto"
 $target = Join-Path $installDir "Boulangerie Lomoto Service.exe"
+$serviceImageName = Split-Path -Leaf $target
 
 if (-not $source) {
     throw "Service compile introuvable. Chemins testes : $($sourceCandidates -join ', ')"
@@ -40,21 +41,31 @@ $staging = "$target.new"
 
 Write-Host "Mise a jour du service Boulangerie Lomoto..." -ForegroundColor Cyan
 try {
-    $serviceInfo = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
-    $serviceProcessId = [int]$serviceInfo.ProcessId
-
     Stop-Service -Name $serviceName -Force
     $service = Get-Service -Name $serviceName
     $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
 
-    if ($serviceProcessId -gt 0) {
-        $deadline = (Get-Date).AddSeconds(30)
-        while ((Get-Process -Id $serviceProcessId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
-            Start-Sleep -Milliseconds 500
+    $deadline = (Get-Date).AddSeconds(30)
+    $serviceProcesses = @(
+        Get-CimInstance Win32_Process -Filter "Name='$serviceImageName'" -ErrorAction SilentlyContinue
+    )
+    while ($serviceProcesses.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        $serviceProcesses = @(
+            Get-CimInstance Win32_Process -Filter "Name='$serviceImageName'" -ErrorAction SilentlyContinue
+        )
+    }
+    if ($serviceProcesses.Count -gt 0) {
+        $serviceProcesses | ForEach-Object {
+            Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction Stop
         }
-        if (Get-Process -Id $serviceProcessId -ErrorAction SilentlyContinue) {
-            throw "Le processus du service ne s'est pas ferme dans le delai prevu."
-        }
+        Start-Sleep -Milliseconds 750
+    }
+    $remainingProcesses = @(
+        Get-CimInstance Win32_Process -Filter "Name='$serviceImageName'" -ErrorAction SilentlyContinue
+    )
+    if ($remainingProcesses.Count -gt 0) {
+        throw "Tous les processus du service ne se sont pas fermes dans le delai prevu."
     }
 
     Copy-Item -LiteralPath $source -Destination $staging -Force

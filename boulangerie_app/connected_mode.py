@@ -8,14 +8,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime
-from ipaddress import IPv4Address, IPv4Network
+from ipaddress import IPv4Address, IPv4Network, ip_address
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from .client_config import get_client_id
+from .client_config import get_client_id, get_public_url
 from .version import APP_NAME, APP_VERSION
 
 
@@ -164,6 +164,29 @@ class RemoteDatabaseError(RuntimeError):
     pass
 
 
+def is_secure_remote_url(value: str) -> bool:
+    url = str(value or "").strip()
+    if not url:
+        return False
+    parsed = urlsplit(url)
+    hostname = str(parsed.hostname or "").strip().lower()
+    if parsed.scheme.lower() == "https" and hostname:
+        return True
+    if parsed.scheme.lower() != "http" or not hostname:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        return ip_address(hostname.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _secure_public_server_url(value: str = "") -> str:
+    candidate = str(value or get_public_url() or "").strip().rstrip("/")
+    return candidate if candidate.lower().startswith("https://") and is_secure_remote_url(candidate) else ""
+
+
 @dataclass
 class DiscoveredServerInfo:
     server_url: str
@@ -190,7 +213,18 @@ class ConnectionSettings:
     def normalized_url(self) -> str:
         url = self.server_url.strip().rstrip("/")
         if url and not url.startswith(("http://", "https://")):
-            url = f"http://{url}"
+            parsed_without_scheme = urlsplit(f"//{url}")
+            hostname = str(parsed_without_scheme.hostname or "").strip().lower()
+            scheme = "https"
+            if hostname == "localhost":
+                scheme = "http"
+            else:
+                try:
+                    if ip_address(hostname.split("%", 1)[0]):
+                        scheme = "http"
+                except ValueError:
+                    pass
+            url = f"{scheme}://{url}"
         if url:
             parsed = urlsplit(url)
             try:
@@ -410,8 +444,9 @@ def _health_probe_server(ip_address: str, server_port: int) -> DiscoveredServerI
     if str(payload.get("app_name", "")).strip() not in {"", APP_NAME, "Boulangerie Lomoto"}:
         return None
     detected_port = int(payload.get("server_port", server_port) or server_port)
+    public_url = _secure_public_server_url(str(payload.get("public_url", "")))
     return DiscoveredServerInfo(
-        server_url=f"http://{ip_address}:{detected_port}",
+        server_url=public_url or f"http://{ip_address}:{detected_port}",
         server_name=str(payload.get("server_name") or ip_address),
         app_version=str(payload.get("app_version", "")),
         token_required=bool(payload.get("token_required", False)),
@@ -492,7 +527,9 @@ def discover_remote_servers(
                     continue
 
                 server_name = str(payload.get("server_name", source_ip))
-                server_url = f"http://{source_ip}:{server_port}"
+                server_url = _secure_public_server_url(str(payload.get("public_url", "")))
+                if not server_url:
+                    server_url = f"http://{source_ip}:{server_port}"
                 discovered_info = DiscoveredServerInfo(
                     server_url=server_url,
                     server_name=server_name,
@@ -602,6 +639,11 @@ class RemoteDatabaseClient:
         session_token: str = "",
     ) -> None:
         self.server_url = server_url.strip().rstrip("/")
+        if not is_secure_remote_url(self.server_url):
+            raise RemoteDatabaseError(
+                "Connexion non chiffrée refusée. Utilisez l'adresse publique HTTPS "
+                "de l'application, ou 127.0.0.1 uniquement sur le PC serveur."
+            )
         self.api_token = api_token.strip()
         self.timeout_seconds = timeout_seconds
         self.session_token = session_token.strip()

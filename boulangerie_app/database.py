@@ -24,6 +24,7 @@ from .connected_mode import (
     REMOTE_DATABASE_METHODS,
     ConnectionSettings,
     RemoteDatabaseClient,
+    is_secure_remote_url,
     load_connection_settings,
     save_connection_settings,
 )
@@ -59,7 +60,7 @@ FORCED_DATABASE_RESET_VERSION = "1.3.0"
 # fois qu'une évolution du schéma justifie une sauvegarde de sécurité avant
 # migration. Les bases antérieures (user_version = 0) sont sauvegardées une fois
 # au premier démarrage sous cette version.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 AUTO_BACKUP_PREFIX = "sauvegarde-automatique"
 AUTO_BACKUP_RETENTION_DAYS = 30
 AUTO_BACKUP_MIN_KEEP = 7
@@ -142,9 +143,14 @@ class DatabaseHelper:
 
     @classmethod
     def apply_connection_settings(cls, settings: ConnectionSettings, persist: bool = False) -> None:
+        normalized_url = settings.normalized_url()
+        if settings.normalized_mode() == "remote" and normalized_url and not is_secure_remote_url(normalized_url):
+            secure_public_url = get_public_url().strip().rstrip("/")
+            if is_secure_remote_url(secure_public_url):
+                normalized_url = secure_public_url
         normalized_settings = ConnectionSettings(
             mode=settings.normalized_mode(),
-            server_url=settings.normalized_url(),
+            server_url=normalized_url,
             api_token=settings.api_token.strip(),
         )
         if persist:
@@ -326,9 +332,11 @@ class DatabaseHelper:
             cls._create_tables(connection)
             cls._migrate_user_recoverable_password_column(connection)
             cls._migrate_user_login_security_columns(connection)
+            cls._migrate_user_password_change_column(connection)
             cls._migrate_user_email_column(connection)
             cls._migrate_worker_email_column(connection)
             cls._migrate_email_notifications_table(connection)
+            cls._scrub_legacy_password_notifications(connection)
             cls._migrate_active_sessions_table(connection)
             cls._migrate_stock_configuration_table(connection)
             cls._migrate_cash_table(connection)
@@ -576,6 +584,13 @@ class DatabaseHelper:
         with cls.connect() as connection:
             cls._create_tables(connection)
             cls._migrate_user_recoverable_password_column(connection)
+            cls._migrate_user_login_security_columns(connection)
+            cls._migrate_user_password_change_column(connection)
+            cls._migrate_user_email_column(connection)
+            cls._migrate_worker_email_column(connection)
+            cls._migrate_email_notifications_table(connection)
+            cls._scrub_legacy_password_notifications(connection)
+            cls._migrate_active_sessions_table(connection)
             cls._migrate_stock_configuration_table(connection)
             cls._migrate_cash_table(connection)
             cls._migrate_orders_table(connection)
@@ -590,6 +605,7 @@ class DatabaseHelper:
             cls._sync_all_commissions(connection)
             cls._migrate_legacy_admin(connection)
             cls._insert_default_stock_config(connection)
+            connection.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
 
         return safety_backup, cls.db_path
 
@@ -605,6 +621,7 @@ class DatabaseHelper:
                 MotDePasse TEXT NOT NULL,
                 MotDePasseLisible TEXT NOT NULL DEFAULT '',
                 Role TEXT NOT NULL,
+                DoitChangerMotDePasse INTEGER NOT NULL DEFAULT 0,
                 EchecsConnexion INTEGER NOT NULL DEFAULT 0,
                 NiveauBlocage INTEGER NOT NULL DEFAULT 0,
                 VerrouilleJusqua TEXT NOT NULL DEFAULT ''
@@ -1192,6 +1209,25 @@ class DatabaseHelper:
                 )
 
     @classmethod
+    def _migrate_user_password_change_column(cls, connection: sqlite3.Connection) -> None:
+        columns = cls._table_columns(connection, "Utilisateurs")
+        if not columns:
+            return
+        if "DoitChangerMotDePasse" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE Utilisateurs
+                ADD COLUMN DoitChangerMotDePasse INTEGER NOT NULL DEFAULT 0
+                """
+            )
+            # Les comptes existants ont pu recevoir leur mot de passe par e-mail
+            # dans les versions antérieures. Une rotation unique est donc imposée
+            # lors de la migration vers le schéma sécurisé.
+            connection.execute(
+                "UPDATE Utilisateurs SET DoitChangerMotDePasse = 1"
+            )
+
+    @classmethod
     def _migrate_user_email_column(cls, connection: sqlite3.Connection) -> None:
         columns = cls._table_columns(connection, "Utilisateurs")
         if not columns:
@@ -1243,6 +1279,24 @@ class DatabaseHelper:
             CREATE INDEX IF NOT EXISTS idx_notifications_email_statut
             ON NotificationsEmail (Statut, Id);
             """
+        )
+
+    @classmethod
+    def _scrub_legacy_password_notifications(cls, connection: sqlite3.Connection) -> None:
+        safe_text = (
+            "Cette ancienne notification a été neutralisée automatiquement car elle "
+            "pouvait contenir un mot de passe. Contactez l'administrateur si nécessaire."
+        )
+        connection.execute(
+            """
+            UPDATE NotificationsEmail
+            SET CorpsTexte = ?, CorpsHtml = ''
+            WHERE CorpsTexte LIKE '%Mot de passe temporaire :%'
+               OR CorpsTexte LIKE '%Nouveau mot de passe :%'
+               OR CorpsHtml LIKE '%>Mot de passe temporaire</td>%'
+               OR CorpsHtml LIKE '%>Nouveau mot de passe</td>%'
+            """,
+            (safe_text,),
         )
 
     @classmethod
@@ -1699,7 +1753,6 @@ class DatabaseHelper:
         full_name: str,
         identifiant: str,
         email: str,
-        password: str,
         role: str,
     ) -> None:
         subject = f"{APP_NAME} - Vos accès utilisateur"
@@ -1707,10 +1760,11 @@ class DatabaseHelper:
             f"Bonjour {full_name},\n\n"
             f"Votre compte {APP_NAME} a été créé.\n\n"
             f"Identifiant : {identifiant}\n"
-            f"Mot de passe temporaire : {password}\n"
             f"Rôle : {role}\n"
             f"Application : {APP_PUBLIC_URL}\n\n"
-            "Pour votre sécurité, changez le mot de passe après votre première connexion.\n"
+            "Le mot de passe n'est jamais envoyé par e-mail. "
+            "S'il a été attribué par un administrateur, demandez-le par un canal distinct.\n"
+            "Tout mot de passe temporaire doit être changé lors de la première connexion.\n"
             "Ne transmettez jamais votre mot de passe à une autre personne."
             + cls._email_text_footer()
         )
@@ -1719,8 +1773,6 @@ class DatabaseHelper:
             'style="border-collapse:collapse;border:1px solid #d9e1ec;border-radius:8px;overflow:hidden;">'
             '<tr><td style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Identifiant</td>'
             f'<td style="padding:12px 14px;border-bottom:1px solid #e2e8f0;font-weight:700;">{escape(identifiant)}</td></tr>'
-            '<tr><td style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Mot de passe temporaire</td>'
-            f'<td style="padding:12px 14px;border-bottom:1px solid #e2e8f0;font-weight:700;">{escape(password)}</td></tr>'
             '<tr><td style="padding:12px 14px;background:#f8fafc;color:#64748b;">Rôle</td>'
             f'<td style="padding:12px 14px;font-weight:700;">{escape(role)}</td></tr>'
             "</table>"
@@ -1728,7 +1780,8 @@ class DatabaseHelper:
             'style="display:inline-block;background:#c5162d;color:#ffffff;text-decoration:none;'
             'font-weight:700;padding:12px 18px;border-radius:7px;">Ouvrir l\'application</a></p>'
             '<div style="margin-top:18px;padding:14px 16px;border-left:4px solid #c5162d;background:#fff7ed;color:#7c2d12;">'
-            "<strong>Sécurité :</strong> changez ce mot de passe après la première connexion et ne le partagez pas."
+            "<strong>Sécurité :</strong> aucun mot de passe n'est envoyé par e-mail. "
+            "Un mot de passe temporaire doit être communiqué séparément et changé à la première connexion."
             "</div>"
         )
         html_body = cls._email_html_layout(
@@ -1752,7 +1805,6 @@ class DatabaseHelper:
         full_name: str,
         identifiant: str,
         email: str,
-        password: str,
         role: str,
     ) -> None:
         subject = f"{APP_NAME} - Nouveau mot de passe"
@@ -1760,7 +1812,6 @@ class DatabaseHelper:
             f"Bonjour {full_name},\n\n"
             f"Le mot de passe de votre compte {APP_NAME} a ete modifie.\n\n"
             f"Identifiant : {identifiant}\n"
-            f"Nouveau mot de passe : {password}\n"
             f"Role : {role}\n"
             f"Application : {APP_PUBLIC_URL}\n\n"
             "Si vous n'avez pas demande cette modification, contactez immediatement l'administrateur.\n"
@@ -1772,8 +1823,6 @@ class DatabaseHelper:
             'style="border-collapse:collapse;border:1px solid #d9e1ec;border-radius:8px;overflow:hidden;">'
             '<tr><td style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Identifiant</td>'
             f'<td style="padding:12px 14px;border-bottom:1px solid #e2e8f0;font-weight:700;">{escape(identifiant)}</td></tr>'
-            '<tr><td style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;">Nouveau mot de passe</td>'
-            f'<td style="padding:12px 14px;border-bottom:1px solid #e2e8f0;font-weight:700;">{escape(password)}</td></tr>'
             '<tr><td style="padding:12px 14px;background:#f8fafc;color:#64748b;">Role</td>'
             f'<td style="padding:12px 14px;font-weight:700;">{escape(role)}</td></tr>'
             "</table>"
@@ -2016,8 +2065,8 @@ class DatabaseHelper:
             connection.execute(
                 """
                 INSERT INTO Utilisateurs
-                    (NomComplet, Identifiant, Email, MotDePasse, MotDePasseLisible, Role)
-                VALUES (?, ?, ?, ?, ?, 'Admin')
+                    (NomComplet, Identifiant, Email, MotDePasse, MotDePasseLisible, Role, DoitChangerMotDePasse)
+                VALUES (?, ?, ?, ?, ?, 'Admin', 0)
                 """,
                 (
                     normalized_name,
@@ -2032,7 +2081,6 @@ class DatabaseHelper:
                 normalized_name,
                 normalized_identifiant,
                 normalized_email,
-                normalized_password,
                 "Admin",
             )
 
@@ -2072,8 +2120,9 @@ class DatabaseHelper:
                     raise ValueError("Un seul Directeur Général peut être enregistré.")
             connection.execute(
                 """
-                INSERT INTO Utilisateurs (NomComplet, Identifiant, Email, MotDePasse, MotDePasseLisible, Role)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO Utilisateurs
+                    (NomComplet, Identifiant, Email, MotDePasse, MotDePasseLisible, Role, DoitChangerMotDePasse)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
                 """,
                 (
                     normalized_name,
@@ -2089,7 +2138,6 @@ class DatabaseHelper:
                 normalized_name,
                 normalized_identifiant,
                 normalized_email,
-                normalized_password,
                 normalized_role,
             )
 
@@ -2136,7 +2184,8 @@ class DatabaseHelper:
                     cursor = connection.execute(
                         """
                         UPDATE Utilisateurs
-                        SET NomComplet = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = ?
+                        SET NomComplet = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = ?,
+                            DoitChangerMotDePasse = 1
                         WHERE Identifiant = ?
                         """,
                         (
@@ -2151,7 +2200,8 @@ class DatabaseHelper:
                     cursor = connection.execute(
                         """
                         UPDATE Utilisateurs
-                        SET NomComplet = ?, Email = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = ?
+                        SET NomComplet = ?, Email = ?, MotDePasse = ?, MotDePasseLisible = ?, Role = ?,
+                            DoitChangerMotDePasse = 1
                         WHERE Identifiant = ?
                         """,
                         (
@@ -2197,7 +2247,6 @@ class DatabaseHelper:
                         str(updated_user["NomComplet"] or full_name),
                         str(updated_user["Identifiant"] or normalized_identifiant),
                         str(updated_user["Email"] or ""),
-                        normalized_password,
                         str(updated_user["Role"] or role),
                     )
             return cursor.rowcount
@@ -2312,13 +2361,19 @@ class DatabaseHelper:
 
     @classmethod
     def is_using_default_password(cls, identifiant: str) -> bool:
-        stored_password = cls._fetch_value(
-            "SELECT MotDePasse FROM Utilisateurs WHERE Identifiant = ?",
+        row = cls._fetch_one(
+            """
+            SELECT MotDePasse, IFNULL(DoitChangerMotDePasse, 0) AS DoitChangerMotDePasse
+            FROM Utilisateurs
+            WHERE Identifiant = ?
+            """,
             (identifiant,),
         )
-        if stored_password is None:
+        if not row:
             return False
-        return cls.verify_password(DEFAULT_ADMIN_PASSWORD, str(stored_password))
+        if bool(int(row.get("DoitChangerMotDePasse", 0) or 0)):
+            return True
+        return cls.verify_password(DEFAULT_ADMIN_PASSWORD, str(row.get("MotDePasse", "")))
 
     @classmethod
     def change_user_password(
@@ -2371,7 +2426,7 @@ class DatabaseHelper:
             connection.execute(
                 """
                 UPDATE Utilisateurs
-                SET MotDePasse = ?, MotDePasseLisible = ?, Email = ?
+                SET MotDePasse = ?, MotDePasseLisible = ?, Email = ?, DoitChangerMotDePasse = 0
                 WHERE Identifiant = ?
                 """,
                 (
@@ -2386,7 +2441,6 @@ class DatabaseHelper:
                 str(row["NomComplet"] or normalized_identifiant),
                 normalized_identifiant,
                 normalized_email,
-                new_password,
                 str(row["Role"] or ""),
             )
 

@@ -101,6 +101,23 @@ CSRF_EXEMPT_POST_PATHS = {
 RPC_CSRF_EXEMPT_METHODS = {"get_setup_status", "create_initial_admin", "web_login", "find_user_for_login"}
 
 
+def _has_native_rpc_auth(payload: Any, expected_api_token: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    session_auth_required = str(
+        os.environ.get("BOULANGERIE_REQUIRE_SESSION_AUTH", "1")
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    if session_auth_required and str(payload.get("session_token", "") or "").strip():
+        return True
+    provided_token = str(payload.get("token", "") or "").strip()
+    expected_token = str(expected_api_token or "").strip()
+    return bool(
+        provided_token
+        and expected_token
+        and hmac.compare_digest(provided_token, expected_token)
+    )
+
+
 ROLE_MODULES = {
     "Admin": [
         "dashboard",
@@ -1027,6 +1044,19 @@ class WebProHandler(BaseHTTPRequestHandler):
         except ValueError:
             return False
 
+    def _is_server_console_client(self) -> bool:
+        if any(
+            str(self.headers.get(header_name, "") or "").strip()
+            for header_name in ("CF-Connecting-IP", "X-Forwarded-For", "Forwarded")
+        ):
+            return False
+        try:
+            peer_address = ipaddress.ip_address(str(self.client_address[0] or "").split("%", 1)[0])
+            effective_address = ipaddress.ip_address(self._client_ip().split("%", 1)[0])
+            return bool(peer_address.is_loopback and effective_address.is_loopback)
+        except ValueError:
+            return False
+
     def _license_domain(self) -> str:
         host = self._request_host()
         if host in LOCAL_HOSTS:
@@ -1144,14 +1174,17 @@ class WebProHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("Requête distante invalide.") from exc
         method_name = str(rpc_payload.get("method", "") if isinstance(rpc_payload, dict) else "").strip()
-        if method_name not in RPC_CSRF_EXEMPT_METHODS:
+        settings = load_central_server_settings()
+        if method_name not in RPC_CSRF_EXEMPT_METHODS and not _has_native_rpc_auth(
+            rpc_payload,
+            settings.normalized_token(),
+        ):
             self._require_valid_csrf()
         client_ip = self._client_ip()
-        if method_name == "create_initial_admin" and not self._is_local_client():
-            raise PermissionError("La configuration initiale doit être effectuée depuis le réseau local.")
+        if method_name == "create_initial_admin" and not self._is_server_console_client():
+            raise PermissionError("La configuration initiale doit être effectuée sur le PC serveur.")
         if method_name in {"web_login", "find_user_for_login"}:
             _ensure_login_allowed(client_ip)
-        settings = load_central_server_settings()
         if isinstance(rpc_payload, dict) and settings.normalized_token():
             rpc_payload["token"] = settings.normalized_token()
             body = json.dumps(rpc_payload, ensure_ascii=True, default=_json_default).encode("utf-8")
@@ -1446,8 +1479,8 @@ class WebProHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/setup":
-            if not self._is_local_client():
-                raise PermissionError("La configuration initiale doit être effectuée depuis le réseau local.")
+            if not self._is_server_console_client():
+                raise PermissionError("La configuration initiale doit être effectuée sur le PC serveur.")
             DatabaseHelper.create_initial_admin(
                 _clean(payload.get("fullName")),
                 _clean(payload.get("identifiant")),
@@ -1459,7 +1492,7 @@ class WebProHandler(BaseHTTPRequestHandler):
 
         if path == "/api/license/activate":
             session = _get_session(self._session_token())
-            if session is None and not self._is_local_client():
+            if session is None and not self._is_server_console_client():
                 raise PermissionError("L'activation sans session Admin doit etre effectuee depuis le PC serveur.")
             if session is not None:
                 _require_admin(session, "l'activation du produit")
