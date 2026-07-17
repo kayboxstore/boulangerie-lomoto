@@ -1,4 +1,4 @@
-const CACHE_NAME = "lomoto-web-pro-1.5.4-security-20260717";
+const CACHE_NAME = "lomoto-web-pro-1.5.5-hardening-20260717";
 const APP_SHELL = [
   "/",
   "/index.html",

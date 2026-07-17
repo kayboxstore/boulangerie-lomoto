@@ -34,6 +34,7 @@ from .status_labels import (
     ORDER_STATUS_RATES,
     normalize_status_form_label,
 )
+from .spreadsheet_security import sanitize_spreadsheet_value
 from .client_config import get_app_data_dir_name, get_contact_email, get_contact_phone, get_email_domain, get_public_url
 from .version import APP_NAME, APP_PUBLISHER, APP_VERSION
 
@@ -374,6 +375,18 @@ class DatabaseHelper:
         if isinstance(value, date):
             return value
         return datetime.strptime(str(value).strip(), DB_DATE_FORMAT).date()
+
+    @staticmethod
+    def _finite_number(value: Any, field_name: str, *, minimum: float | None = None) -> float:
+        try:
+            parsed = float(value or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{field_name} doit être numérique.") from exc
+        if not math.isfinite(parsed):
+            raise ValueError(f"{field_name} doit être un nombre fini.")
+        if minimum is not None and parsed < minimum:
+            raise ValueError(f"{field_name} ne peut pas être inférieur à {minimum:g}.")
+        return parsed
 
     @classmethod
     def ensure_not_future_date(cls, target_date: date | str, label: str = "cet enregistrement") -> date:
@@ -2886,7 +2899,7 @@ class DatabaseHelper:
         normalized_name = full_name.strip()
         if not normalized_name:
             raise ValueError("Veuillez saisir le nom complet du travailleur.")
-        normalized_salary = float(monthly_salary or 0)
+        normalized_salary = cls._finite_number(monthly_salary, "Le salaire mensuel", minimum=0)
         if normalized_salary < 0:
             raise ValueError("Le salaire mensuel ne peut pas être négatif.")
         normalized_date = cls.ensure_not_future_date(hire_date, "un travailleur")
@@ -2938,7 +2951,7 @@ class DatabaseHelper:
         normalized_name = full_name.strip()
         if not normalized_name:
             raise ValueError("Veuillez saisir le nom complet du travailleur.")
-        normalized_salary = float(monthly_salary or 0)
+        normalized_salary = cls._finite_number(monthly_salary, "Le salaire mensuel", minimum=0)
         if normalized_salary < 0:
             raise ValueError("Le salaire mensuel ne peut pas être négatif.")
         normalized_date = cls.ensure_not_future_date(hire_date, "un travailleur")
@@ -3166,10 +3179,10 @@ class DatabaseHelper:
         worker = cls.get_worker(int(worker_id))
         if not worker:
             raise ValueError("Travailleur introuvable.")
-        gross = float(gross_amount or 0)
-        bonus_value = float(bonus or 0)
-        advance_value = float(advance or 0)
-        withholding_value = float(withholding or 0)
+        gross = cls._finite_number(gross_amount, "Le montant brut", minimum=0)
+        bonus_value = cls._finite_number(bonus, "La prime", minimum=0)
+        advance_value = cls._finite_number(advance, "L'avance", minimum=0)
+        withholding_value = cls._finite_number(withholding, "La retenue", minimum=0)
         for label, value in (
             ("Montant brut", gross),
             ("Prime", bonus_value),
@@ -3257,10 +3270,10 @@ class DatabaseHelper:
         worker = cls.get_worker(int(worker_id))
         if not worker:
             raise ValueError("Travailleur introuvable.")
-        gross = float(gross_amount or 0)
-        bonus_value = float(bonus or 0)
-        advance_value = float(advance or 0)
-        withholding_value = float(withholding or 0)
+        gross = cls._finite_number(gross_amount, "Le montant brut", minimum=0)
+        bonus_value = cls._finite_number(bonus, "La prime", minimum=0)
+        advance_value = cls._finite_number(advance, "L'avance", minimum=0)
+        withholding_value = cls._finite_number(withholding, "La retenue", minimum=0)
         for label, value in (
             ("Montant brut", gross),
             ("Prime", bonus_value),
@@ -3405,10 +3418,30 @@ class DatabaseHelper:
         sel_alert: float | None = None,
         huile_alert: float | None = None,
     ) -> None:
-        farine_alert = float(farine * 0.2 if farine_alert is None else farine_alert)
-        levure_alert = float(levure * 0.2 if levure_alert is None else levure_alert)
-        sel_alert = float(sel * 0.2 if sel_alert is None else sel_alert)
-        huile_alert = float(huile * 0.2 if huile_alert is None else huile_alert)
+        farine = cls._finite_number(farine, "Le stock initial de farine", minimum=0)
+        levure = cls._finite_number(levure, "Le stock initial de levure", minimum=0)
+        sel = cls._finite_number(sel, "Le stock initial de sel", minimum=0)
+        huile = cls._finite_number(huile, "Le stock initial d'huile", minimum=0)
+        farine_alert = cls._finite_number(
+            farine * 0.2 if farine_alert is None else farine_alert,
+            "Le seuil de farine",
+            minimum=0,
+        )
+        levure_alert = cls._finite_number(
+            levure * 0.2 if levure_alert is None else levure_alert,
+            "Le seuil de levure",
+            minimum=0,
+        )
+        sel_alert = cls._finite_number(
+            sel * 0.2 if sel_alert is None else sel_alert,
+            "Le seuil de sel",
+            minimum=0,
+        )
+        huile_alert = cls._finite_number(
+            huile * 0.2 if huile_alert is None else huile_alert,
+            "Le seuil d'huile",
+            minimum=0,
+        )
         cls._execute(
             """
             UPDATE ConfigurationStock
@@ -3685,7 +3718,10 @@ class DatabaseHelper:
         litres_huile: float,
     ) -> None:
         target_date = cls._coerce_date(target_date)
-        sacs = float(sacs)
+        sacs = cls._finite_number(sacs, "Le nombre de sacs utilisés", minimum=0)
+        paquets = cls._finite_number(paquets, "Le nombre de paquets utilisés", minimum=0)
+        kg_sel = cls._finite_number(kg_sel, "La quantité de sel utilisée", minimum=0)
+        litres_huile = cls._finite_number(litres_huile, "La quantité d'huile utilisée", minimum=0)
         projected_total = cls.get_stock_sacks_used_for_date(target_date) + sacs
         cls._ensure_stock_sacks_match_production(target_date, projected_total)
         cls.ensure_day_open_for_write(target_date, "le stock")
@@ -3716,7 +3752,10 @@ class DatabaseHelper:
         litres_huile: float,
     ) -> int:
         target_date = cls._coerce_date(target_date)
-        sacs = float(sacs)
+        sacs = cls._finite_number(sacs, "Le nombre de sacs utilisés", minimum=0)
+        paquets = cls._finite_number(paquets, "Le nombre de paquets utilisés", minimum=0)
+        kg_sel = cls._finite_number(kg_sel, "La quantité de sel utilisée", minimum=0)
+        litres_huile = cls._finite_number(litres_huile, "La quantité d'huile utilisée", minimum=0)
         original_date_text = cls._get_record_date_text("StockSorties", "DateSortie", exit_id)
         cls._ensure_update_dates_open("le stock", original_date_text, target_date)
         projected_total = cls.get_stock_sacks_used_for_date(target_date, exclude_exit_id=exit_id) + sacs
@@ -3817,6 +3856,10 @@ class DatabaseHelper:
     ) -> None:
         target_date = cls._coerce_date(target_date)
         cls.ensure_day_open_for_write(target_date, "le stock")
+        sacs = cls._finite_number(sacs, "Le nombre de sacs ajoutés", minimum=0)
+        paquets = cls._finite_number(paquets, "Le nombre de paquets ajoutés", minimum=0)
+        kg_sel = cls._finite_number(kg_sel, "La quantité de sel ajoutée", minimum=0)
+        litres_huile = cls._finite_number(litres_huile, "La quantité d'huile ajoutée", minimum=0)
         if min(sacs, paquets, kg_sel, litres_huile) < 0:
             raise ValueError("Les quantités ajoutées au stock ne peuvent pas être négatives.")
         if sacs == 0 and paquets == 0 and kg_sel == 0 and litres_huile == 0:
@@ -3861,6 +3904,10 @@ class DatabaseHelper:
             supply_id,
         )
         cls._ensure_update_dates_open("le stock", original_date_text, target_date)
+        sacs = cls._finite_number(sacs, "Le nombre de sacs ajoutés", minimum=0)
+        paquets = cls._finite_number(paquets, "Le nombre de paquets ajoutés", minimum=0)
+        kg_sel = cls._finite_number(kg_sel, "La quantité de sel ajoutée", minimum=0)
+        litres_huile = cls._finite_number(litres_huile, "La quantité d'huile ajoutée", minimum=0)
         if min(sacs, paquets, kg_sel, litres_huile) < 0:
             raise ValueError("Les quantités ajoutées au stock ne peuvent pas être négatives.")
         if sacs == 0 and paquets == 0 and kg_sel == 0 and litres_huile == 0:
@@ -4386,10 +4433,7 @@ class DatabaseHelper:
         elif sacks_used is None:
             sacks_value = round(produced_trays / 33.0, 2) if produced_trays > 0 else 0.0
         else:
-            try:
-                sacks_value = float(sacks_used)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("Le nombre de sacs utilisés doit être numérique.") from exc
+            sacks_value = cls._finite_number(sacks_used, "Le nombre de sacs utilisés", minimum=0)
         if sacks_value < 0:
             raise ValueError("Le nombre de sacs utilisés ne peut pas être négatif.")
         cls._ensure_production_sacks_match_stock(target_date, sacks_value)
@@ -4754,6 +4798,12 @@ class DatabaseHelper:
     ) -> None:
         target_date = cls._coerce_date(target_date)
         cls.ensure_day_open_for_write(target_date, "la caisse")
+        total_expenses = cls._finite_number(total_expenses, "Le montant total des dépenses", minimum=0)
+        paid_debts_today = cls._finite_number(
+            paid_debts_today,
+            "Le montant des dettes payées aujourd'hui",
+            minimum=0,
+        )
         if total_expenses < 0:
             raise ValueError("Le montant total des dépenses ne peut pas être négatif.")
         if paid_debts_today < 0:
@@ -6003,7 +6053,9 @@ class DatabaseHelper:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             for row in rows:
-                writer.writerow({field: row.get(field, "") for field in fieldnames})
+                writer.writerow(
+                    {field: sanitize_spreadsheet_value(row.get(field, "")) for field in fieldnames}
+                )
         return archive_path
 
     @classmethod

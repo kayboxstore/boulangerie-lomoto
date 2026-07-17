@@ -21,6 +21,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from .database import DatabaseHelper
 from .report_branding import PDF_FONT_BOLD, PDF_FONT_REGULAR, REPORT_BLUE, REPORT_RED, register_pdf_fonts
 from .reports import ReportGenerationError
+from .spreadsheet_security import sanitize_spreadsheet_value
 from .version import APP_NAME, APP_PUBLISHER
 
 
@@ -426,7 +427,7 @@ def create_cash_balance_excel_report(
         row_date = _parse_row_date(row.get("DateCaisse"))
         date_key = str(row.get("DateCaisse", "") or "").strip()
         values = [
-            _format_date(row_date) if row_date else str(row.get("DateCaisse", "")),
+            _format_date(row_date) if row_date else sanitize_spreadsheet_value(str(row.get("DateCaisse", ""))),
             int(row.get("NombreTotalBacs", 0) or 0),
             float(row.get("MontantAttendu", 0) or 0),
             float(row.get("MontantRecu", 0) or 0),
@@ -496,9 +497,9 @@ def create_cash_balance_excel_report(
                 current_row += 1
                 row_date = _parse_row_date(item.get("DatePaie"))
                 values = [
-                    _format_date(row_date) if row_date else str(item.get("DatePaie", "")),
-                    str(item.get("NomComplet", "") or ""),
-                    str(item.get("Periode", "") or ""),
+                    _format_date(row_date) if row_date else sanitize_spreadsheet_value(str(item.get("DatePaie", ""))),
+                    sanitize_spreadsheet_value(str(item.get("NomComplet", "") or "")),
+                    sanitize_spreadsheet_value(str(item.get("Periode", "") or "")),
                     float(item.get("MontantBrut", 0) or 0),
                     float(item.get("Prime", 0) or 0),
                     float(item.get("Avance", 0) or 0),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import math
 import os
 import secrets
 import sys
@@ -42,6 +43,7 @@ from .connected_server import (
     stop_embedded_server,
 )
 from .database import AUTO_BACKUP_PREFIX, ActiveSessionConflictError, AuthenticatedUser, DatabaseHelper
+from .demo_data import DEMO_ADMIN_PASSWORD, DEMO_ADMIN_USERNAME
 from .excel_reports import create_daily_excel_report, create_monthly_excel_report, create_period_excel_report
 from .reports import (
     ReportGenerationError,
@@ -860,14 +862,20 @@ def parse_float(value: str, field_name: str) -> float:
     text = value.strip().replace(" ", "").replace(",", ".")
     if not text:
         raise ValueError(f"Veuillez renseigner le champ « {field_name} ».")
-    return float(text)
+    parsed = float(text)
+    if not math.isfinite(parsed):
+        raise ValueError(f"Le champ « {field_name} » doit contenir un nombre fini.")
+    return parsed
 
 
 def parse_optional_float(value: str) -> float:
     text = value.strip().replace(" ", "").replace(",", ".")
     if not text:
         return 0.0
-    return float(text)
+    parsed = float(text)
+    if not math.isfinite(parsed):
+        raise ValueError("La valeur numérique doit être un nombre fini.")
+    return parsed
 
 
 def format_fc(value: float) -> str:
@@ -1871,6 +1879,14 @@ class LoginWindow(ttk.Frame):
         ).grid(row=3, column=0, columnspan=2, pady=(0, 12))
 
         row_index = 4
+        if APP_DEMO:
+            ttk.Label(
+                card,
+                text=f"Compte démo : {DEMO_ADMIN_USERNAME}\nMot de passe : {DEMO_ADMIN_PASSWORD}",
+                foreground=ACCENT_DARK_COLOR,
+                justify="center",
+            ).grid(row=row_index, column=0, columnspan=2, pady=(0, 10))
+            row_index += 1
         if self.post_update_notice is not None and self.post_update_notice.remaining_ms() > 0:
             self.notice_label = ttk.Label(
                 card,

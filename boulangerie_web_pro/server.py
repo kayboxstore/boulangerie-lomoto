@@ -6,6 +6,7 @@ import html
 import hmac
 import ipaddress
 import json
+import math
 import mimetypes
 import os
 import secrets
@@ -225,16 +226,26 @@ def _date_value(value: Any) -> date:
 
 def _money(value: Any) -> float:
     try:
-        return float(value or 0)
+        parsed = float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+    if not math.isfinite(parsed):
+        raise ValueError("La valeur numérique doit être un nombre fini.")
+    return parsed
 
 
 def _int(value: Any) -> int:
     try:
-        return int(float(value or 0))
-    except (TypeError, ValueError):
+        parsed = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
         return 0
+    if not math.isfinite(parsed):
+        raise ValueError("La valeur numérique doit être un nombre fini.")
+    return int(parsed)
+
+
+def _reject_non_finite_json(value: str) -> None:
+    raise ValueError(f"Constante JSON numérique non autorisée : {value}.")
 
 
 def _clean(value: Any) -> str:
@@ -1170,7 +1181,10 @@ class WebProHandler(BaseHTTPRequestHandler):
             raise ValueError("La requête dépasse la taille autorisée.")
         body = self.rfile.read(length) if length else b"{}"
         try:
-            rpc_payload = json.loads(body.decode("utf-8-sig") or "{}")
+            rpc_payload = json.loads(
+                body.decode("utf-8-sig") or "{}",
+                parse_constant=_reject_non_finite_json,
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("Requête distante invalide.") from exc
         method_name = str(rpc_payload.get("method", "") if isinstance(rpc_payload, dict) else "").strip()
@@ -2232,7 +2246,7 @@ class WebProHandler(BaseHTTPRequestHandler):
         if length < 0 or length > MAX_JSON_BODY_BYTES:
             raise ValueError("La requête dépasse la taille autorisée.")
         raw = self.rfile.read(length).decode("utf-8-sig") if length else "{}"
-        payload = json.loads(raw or "{}")
+        payload = json.loads(raw or "{}", parse_constant=_reject_non_finite_json)
         if not isinstance(payload, dict):
             raise ValueError("Le corps de la requête doit être un objet JSON.")
         return payload

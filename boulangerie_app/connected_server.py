@@ -77,6 +77,10 @@ _AUTO_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
 _AUTO_BACKUP_RETRY_INTERVAL_SECONDS = 5 * 60
 _EMAIL_NOTIFICATION_INTERVAL_SECONDS = 30
 
+
+def _reject_non_finite_json(value: str) -> None:
+    raise ValueError(f"Constante JSON numérique non autorisée : {value}.")
+
 _STOCK_READ_METHODS = {
     "get_stock_configuration",
     "get_stock_summary",
@@ -595,7 +599,7 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
 
         try:
             body = self.rfile.read(content_length).decode("utf-8-sig") if content_length else "{}"
-            payload = json.loads(body)
+            payload = json.loads(body, parse_constant=_reject_non_finite_json)
         except ValueError:
             self._send_json(400, {"ok": False, "error": {"message": "Corps JSON invalide."}})
             return None

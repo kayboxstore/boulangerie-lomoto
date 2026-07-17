@@ -8,6 +8,9 @@ from .status_labels import DEPOSITARY_STATUS, ORDER_STATUS_RATES
 
 
 DEMO_ADMIN_USERNAME = "demo.admin"
+DEMO_ADMIN_PASSWORD = "Essai#Four9Kivu!"
+DEMO_USER_PASSWORD = "Essai#Equipe9Kivu!"
+DEMO_USER_IDENTIFIERS = ("demo.caisse", "demo.stock", "demo.commandes")
 LEGACY_OFFICIAL_ADMIN_IDENTIFIERS = ("a.kayembe", "au.kayembe", "au.keyembe", "admin")
 
 
@@ -22,10 +25,15 @@ def _add_order(target_date: date, client: str, status: str, trays: int, received
 
 def _demo_database_needs_reset() -> bool:
     with DatabaseHelper.connect() as connection:
-        demo_admin_exists = connection.execute(
-            "SELECT COUNT(*) FROM Utilisateurs WHERE Identifiant = ?",
-            (DEMO_ADMIN_USERNAME,),
+        required_identifiers = (DEMO_ADMIN_USERNAME, *DEMO_USER_IDENTIFIERS)
+        demo_user_count = connection.execute(
+            f"SELECT COUNT(*) FROM Utilisateurs WHERE Identifiant IN ({','.join('?' for _ in required_identifiers)})",
+            required_identifiers,
         ).fetchone()[0]
+        demo_admin = connection.execute(
+            "SELECT MotDePasse FROM Utilisateurs WHERE Identifiant = ?",
+            (DEMO_ADMIN_USERNAME,),
+        ).fetchone()
         legacy_official_admin_exists = connection.execute(
             f"""
             SELECT COUNT(*)
@@ -34,7 +42,14 @@ def _demo_database_needs_reset() -> bool:
             """,
             LEGACY_OFFICIAL_ADMIN_IDENTIFIERS,
         ).fetchone()[0]
-    return not bool(demo_admin_exists) or bool(legacy_official_admin_exists)
+    admin_password_is_current = bool(
+        demo_admin and DatabaseHelper.verify_password(DEMO_ADMIN_PASSWORD, str(demo_admin["MotDePasse"] or ""))
+    )
+    return (
+        int(demo_user_count or 0) != len(required_identifiers)
+        or not admin_password_is_current
+        or bool(legacy_official_admin_exists)
+    )
 
 
 def _reset_demo_database() -> None:
@@ -50,6 +65,13 @@ def seed_demo_database_if_empty(base_date: date | None = None) -> None:
         DatabaseHelper.initialize_local_database()
         if _demo_database_needs_reset():
             _reset_demo_database()
+        if DatabaseHelper.get_setup_status().get("required", False):
+            DatabaseHelper.create_initial_admin(
+                "Administrateur Démo",
+                DEMO_ADMIN_USERNAME,
+                "demo.admin@boulangerie-lomoto.com",
+                DEMO_ADMIN_PASSWORD,
+            )
         if DatabaseHelper.list_orders():
             return
 
@@ -61,15 +83,17 @@ def seed_demo_database_if_empty(base_date: date | None = None) -> None:
         day_5 = today - timedelta(days=1)
 
         demo_users = [
-            ("Grâce Mbala", "demo.caisse", "060606", "Caissier"),
-            ("Patrick Nsimba", "demo.stock", "060606", "Gestionnaire de stock"),
-            ("Ruth Mansi", "demo.commandes", "060606", "Gestionnaire des commandes"),
+            ("Grâce Mbala", "demo.caisse", DEMO_USER_PASSWORD, "Caissier"),
+            ("Patrick Nsimba", "demo.stock", DEMO_USER_PASSWORD, "Gestionnaire de stock"),
+            ("Ruth Mansi", "demo.commandes", DEMO_USER_PASSWORD, "Gestionnaire des commandes"),
         ]
         for full_name, username, password, role in demo_users:
-            try:
-                DatabaseHelper.add_user(full_name, username, password, role)
-            except Exception:
-                pass
+            DatabaseHelper.add_user(full_name, username, password, role)
+        with DatabaseHelper.connect() as connection:
+            connection.execute(
+                f"UPDATE Utilisateurs SET DoitChangerMotDePasse = 0 WHERE Identifiant IN ({','.join('?' for _ in DEMO_USER_IDENTIFIERS)})",
+                DEMO_USER_IDENTIFIERS,
+            )
 
         DatabaseHelper.update_stock_configuration(160, 90, 45, 40)
         stock_days = [

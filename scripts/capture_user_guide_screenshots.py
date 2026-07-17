@@ -28,7 +28,7 @@ os.environ["BOULANGERIE_APP_EDITION"] = "demo"
 os.environ["BOULANGERIE_APP_NAME"] = "Boulangerie Lomoto Démo"
 os.environ["BOULANGERIE_DEFAULT_ADMIN_FULL_NAME"] = "Administrateur Démo"
 os.environ["BOULANGERIE_DEFAULT_ADMIN_USERNAME"] = "demo.admin"
-os.environ["BOULANGERIE_DEFAULT_ADMIN_PASSWORD"] = "demo2026"
+os.environ["BOULANGERIE_DEFAULT_ADMIN_PASSWORD"] = "Essai#Four9Kivu!"
 
 from boulangerie_app.app import (  # noqa: E402
     APP_BACKGROUND,

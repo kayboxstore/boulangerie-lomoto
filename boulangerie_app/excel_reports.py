@@ -33,6 +33,7 @@ from .reports import (
     split_structured_lines,
 )
 from .status_labels import normalize_status_form_label
+from .spreadsheet_security import sanitize_spreadsheet_value
 from .version import APP_NAME
 
 TITLE_FILL = PatternFill("solid", fgColor="1F4E78")
@@ -144,7 +145,7 @@ def _format_number(value: float) -> str:
 
 
 def _safe_text(value: Any) -> str:
-    return "" if value is None else str(value)
+    return str(sanitize_spreadsheet_value("" if value is None else str(value)))
 
 
 def _summarize_production_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -366,9 +367,9 @@ def _apply_brand_header(
     sheet["A9"] = "Généré le"
     sheet["B9"] = datetime.now().strftime("%d/%m/%Y à %H:%M")
     sheet["A10"] = "Généré par"
-    sheet["B10"] = generated_by
+    sheet["B10"] = _safe_text(generated_by)
     sheet["A11"] = "Rôle du générateur"
-    sheet["B11"] = generated_role
+    sheet["B11"] = _safe_text(generated_role)
 
     for cell_ref in ("A6", "A7", "A8", "A9", "A10", "A11"):
         _apply_cell_style(sheet[cell_ref], bold=True, fill=SECTION_FILL, alignment=Alignment(horizontal="left"))

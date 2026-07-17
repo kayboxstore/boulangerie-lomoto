@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "1.5.4"
+VERSION = "1.5.5"
 DIRECTOR_ROLE = "Directeur G\u00e9n\u00e9ral"
 PRODUCTION_ROLE = "Charg\u00e9 de la production"
 DEPOSITARY_STATUS = "D\u00e9positaire"
@@ -63,7 +63,7 @@ class ApiClient:
         data = None
         request_headers = {
             "Accept": "application/json",
-            "User-Agent": "LomotoRecette/1.5.4",
+            "User-Agent": "LomotoRecette/1.5.5",
         }
         if payload is not None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -109,7 +109,7 @@ class ApiClient:
     def text(self, path: str) -> str:
         request = urllib.request.Request(
             self.base_url + path,
-            headers={"User-Agent": "LomotoRecette/1.5.4", "Cache-Control": "no-cache"},
+            headers={"User-Agent": "LomotoRecette/1.5.5", "Cache-Control": "no-cache"},
             method="GET",
         )
         with self.opener.open(request, timeout=30) as response:
@@ -749,7 +749,7 @@ class RecetteRunner:
 
 
 def fetch_json(url: str, timeout: int = 15) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "LomotoRecette/1.5.4"})
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "LomotoRecette/1.5.5"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8-sig"))
 

@@ -4,10 +4,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RuleName = "Boulangerie Lomoto Web Pro $Port"
-$IsAdmin = (
-    [Security.Principal.WindowsPrincipal]
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$Principal = [Security.Principal.WindowsPrincipal]::new($Identity)
+$IsAdmin = $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $IsAdmin) {
     $Arguments = @(

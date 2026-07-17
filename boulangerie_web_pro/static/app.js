@@ -35,7 +35,7 @@ const state = {
   user: null,
   client: null,
   license: null,
-  appVersion: "1.5.4",
+  appVersion: "1.5.5",
   active: "dashboard",
   loading: false,
   error: "",
@@ -62,7 +62,11 @@ const WEB_HEARTBEAT_INTERVAL_MS = 30 * 1000;
 const WEB_ACTIVITY_EVENTS = ["pointerdown", "keydown", "input", "scroll", "touchstart"];
 
 function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function currentYear() {
@@ -368,7 +372,7 @@ function loginView() {
       <section class="login-card">
         <div class="brand-mark">
           <img src="/brand-assets/logo-boulangerie-lomoto.png?v=20260701" alt="Logo" />
-          <span>Version web professionnelle ${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.4")}</span>
+          <span>Version web professionnelle ${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.5")}</span>
         </div>
         <p class="eyebrow">Application connectée</p>
         <h1>${escapeHtml(appName()).toUpperCase()}</h1>
@@ -403,7 +407,7 @@ function shell(content) {
             <div>
               <strong>${escapeHtml(appName()).toUpperCase()}</strong>
               <span>Pain Lia o Tonda</span>
-              <small>Données Windows v${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.4")}</small>
+              <small>Données Windows v${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.5")}</small>
             </div>
           </div>
           <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-expanded="false" aria-controls="sidebarMenu" title="Ouvrir le menu">☰</button>
@@ -429,7 +433,7 @@ function shell(content) {
             </div>
             <div class="version-card">
               <span>Version</span>
-              <strong>${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.4")}</strong>
+              <strong>${escapeHtml(state.user?.appVersion || state.appVersion || "1.5.5")}</strong>
             </div>
           </div>
         </header>

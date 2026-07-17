@@ -6,7 +6,7 @@ os.environ.setdefault("BOULANGERIE_APP_EDITION", "demo")
 os.environ.setdefault("BOULANGERIE_APP_NAME", "Boulangerie Lomoto Démo")
 os.environ.setdefault("BOULANGERIE_DEFAULT_ADMIN_FULL_NAME", "Administrateur Démo")
 os.environ.setdefault("BOULANGERIE_DEFAULT_ADMIN_USERNAME", "demo.admin")
-os.environ.setdefault("BOULANGERIE_DEFAULT_ADMIN_PASSWORD", "demo2026")
+os.environ.setdefault("BOULANGERIE_DEFAULT_ADMIN_PASSWORD", "Essai#Four9Kivu!")
 
 if "BOULANGERIE_APPDATA_DIR" not in os.environ:
     local_appdata = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))

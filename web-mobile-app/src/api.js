@@ -2,7 +2,11 @@ const CONFIG_KEY = "lomoto.web.config";
 const SESSION_KEY = "lomoto.web.session";
 
 export function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function isHostedApp() {
